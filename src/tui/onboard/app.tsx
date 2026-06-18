@@ -20,13 +20,14 @@ export interface WizardResult {
   memoryConsent: boolean
   advisories: string[]
   summary: string[]
+  telegramConsent: boolean
   /** Host agentic runtime detected during the run (claude if installed, else
    *  codex, else undefined on a no-runtime host) — threaded to the memory
    *  provider init as `--runtime` per the onboard↔init contract. */
   hostRuntime?: OnboardRuntime
 }
 
-type Phase = 'gate' | 'running' | 'memory' | 'declined' | 'finishing'
+type Phase = 'gate' | 'running' | 'telegram' | 'memory' | 'declined' | 'finishing'
 type StepStatus = 'pending' | 'running' | 'ok' | 'warn' | 'fail'
 interface Step {
   key: string
@@ -90,6 +91,7 @@ export function OnboardApp({
   const [steps, setSteps] = useState<Step[]>([])
   const [advisories, setAdvisories] = useState<string[]>([])
   const [hostRuntime, setHostRuntime] = useState<OnboardRuntime | undefined>(undefined)
+  const [telegramConsent, setTelegramConsent] = useState(false)
   const spin = useSpinnerFrame(phase === 'running')
 
   const finish = (memoryConsent: boolean): void => {
@@ -99,7 +101,7 @@ export function OnboardApp({
       return `  ${mark} ${s.label}${s.detail ? ` — ${s.detail}` : ''}`
     })
     summary.unshift(failed ? 'Onboard finished with errors:' : 'Onboard complete:')
-    onResult({ code: failed ? 1 : 0, memoryConsent, advisories, summary, hostRuntime })
+    onResult({ code: failed ? 1 : 0, memoryConsent, telegramConsent, advisories, summary, hostRuntime })
     setPhase('finishing')
     setTimeout(() => exit(), 30)
   }
@@ -111,6 +113,22 @@ export function OnboardApp({
       else if (input === 'n' || input === 'N' || key.escape) setPhase('declined')
     },
     { isActive: phase === 'gate' },
+  )
+
+  // Telegram consent — DEFAULT-YES ([Y/n]). Records the decision; the actual setup
+  // (install + ask name/user_id) runs post-Ink (its readline needs a cooked
+  // terminal). Then → memory consent.
+  useInput(
+    (input, key) => {
+      if (input === 'n' || input === 'N') {
+        setTelegramConsent(false)
+        setPhase('memory')
+      } else if (input === 'y' || input === 'Y' || key.return) {
+        setTelegramConsent(true)
+        setPhase('memory')
+      }
+    },
+    { isActive: phase === 'telegram' },
   )
 
   // Memory consent — DEFAULT-YES ([Y/n]: Enter or y → install).
@@ -125,7 +143,7 @@ export function OnboardApp({
   // Declined → exit 1 (no host mutation).
   useEffect(() => {
     if (phase !== 'declined') return
-    onResult({ code: 1, memoryConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
+    onResult({ code: 1, memoryConsent: false, telegramConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
     const t = setTimeout(() => exit(), 30)
     return () => clearTimeout(t)
   }, [phase, onResult, exit])
@@ -222,30 +240,23 @@ export function OnboardApp({
       set('notifier', { status: 'running' })
       await tick()
       try {
-        const { onboardRuntime } = await import('../../runtime/deploy.ts')
-        const nr = await onboardRuntime({ runtime: 'notifier', env, warn: () => {} })
-        const deployFailed = nr.deploy?.peers.some(p => p.bootstrap === 'failed') ?? false
+        // canonical backbone step (same as the linear onboard path): zero-question,
+        // captured-stdio, idempotent, soft-skip on unavailable.
+        const { onboardNotifierStep } = await import('../../onboard/steps.ts')
+        const ns = await onboardNotifierStep({ env, warn: () => {} })
         set('notifier', {
-          status: nr.install.state === 'failed' || deployFailed ? 'warn' : 'ok',
-          detail:
-            nr.install.state === 'skipped'
-              ? 'already present'
-              : nr.deploy
-                ? `${nr.deploy.peers.length} peer(s)`
-                : nr.install.state,
+          status: ns.state === 'deployed' ? 'ok' : 'warn',
+          detail: ns.state === 'deployed' ? `${ns.peers.length} peer(s)` : (ns.detail ?? ns.state),
         })
+        if (ns.state !== 'deployed') adv.push(`Scheduler (notifier): ${ns.detail ?? ns.state}`)
       } catch (e) {
         set('notifier', { status: 'warn', detail: (e instanceof Error ? e.message : 'failed').slice(0, 60) })
-        adv.push(
-          'Note: the scheduler (notifier) did not install — time-based memory upkeep is skipped.\n' +
-            '  Retry later with `iapeer onboard`.',
-        )
       }
       if (cancelled) return
       await tick()
 
       setAdvisories([...adv])
-      setPhase('memory')
+      setPhase('telegram')
     })()
 
     return () => {
@@ -302,6 +313,12 @@ export function OnboardApp({
               {a}
             </Text>
           ))}
+        </Box>
+      ) : null}
+      {phase === 'telegram' ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text>Set up Telegram — talk to your agents from your phone?</Text>
+          <Text dimColor>It will ask your name + Telegram user_id next. [Y/n] </Text>
         </Box>
       ) : null}
       {phase === 'memory' ? (

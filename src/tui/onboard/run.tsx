@@ -36,7 +36,7 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     return WIZARD_NOT_INTERACTIVE
   }
 
-  let result: WizardResult = { code: 0, memoryConsent: false, advisories: [], summary: [] }
+  let result: WizardResult = { code: 0, memoryConsent: false, telegramConsent: false, advisories: [], summary: [] }
   try {
     const app = render(<OnboardApp env={env} onResult={r => (result = r)} />)
     await app.waitUntilExit()
@@ -44,38 +44,52 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     return WIZARD_NOT_INTERACTIVE
   }
 
-  // Post-Ink: the memory provider install owns the terminal (inherited stdio).
-  // Ink is fully unmounted now, so there is no contention.
-  if (result.memoryConsent) {
-    const { onboardMemoryProvider } = await import('../../onboard/memory.ts')
-    process.stdout.write(
-      '\nInstalling the shared-memory provider (@agfpd/iapeer-memory)…\n' +
-        'This can take a few minutes — it builds a native module. Memory is OPTIONAL:\n' +
-        'press Ctrl-C to skip it (set it up later with `npx @agfpd/iapeer-memory init`).\n\n',
-    )
-    // NON-WEDGE: ignore SIGINT in the PARENT during the install so Ctrl-C kills
-    // only the foreground child installer (it dies → spawnSync returns) and we
-    // continue to the summary, instead of the whole onboard dying. A no-op handler
-    // prevents default parent termination; it is queued past the blocking spawnSync.
-    // A generous wall-clock timeout is the last-resort backstop for a hung provider.
-    const prevInt = process.listeners('SIGINT')
-    process.removeAllListeners('SIGINT')
-    const ignore = (): void => {}
-    process.on('SIGINT', ignore)
-    try {
-      const mem = await onboardMemoryProvider({ env, runtime: result.hostRuntime, timeoutMs: 12 * 60_000 })
-      const label = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
-      process.stdout.write(`\nmemory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${label})\n`)
-    } catch (e) {
-      process.stdout.write(
-        `\nmemory: step skipped — ${e instanceof Error ? e.message : String(e)} (set up later: \`npx @agfpd/iapeer-memory init\`)\n`,
-      )
-    } finally {
-      process.removeListener('SIGINT', ignore)
-      for (const h of prevInt) process.on('SIGINT', h as NodeJS.SignalsListener)
+  // Post-Ink interactive provisioning — telegram THEN memory (the canonical order:
+  // telegram creates the human peer that memory's --human resolves from). These own
+  // the terminal (inherited stdio / readline), so they run AFTER Ink unmounts (no
+  // contention). NON-WEDGE: ignore SIGINT in the parent so Ctrl-C kills only the
+  // CURRENT step's child/readline and onboard continues to the summary, instead of
+  // the whole flow dying. The no-op handler is queued past the blocking spawnSync.
+  const prevInt = process.listeners('SIGINT')
+  process.removeAllListeners('SIGINT')
+  const ignore = (): void => {}
+  process.on('SIGINT', ignore)
+  try {
+    if (result.telegramConsent) {
+      const { onboardTelegramStep } = await import('../../onboard/steps.ts')
+      process.stdout.write('\nSetting up Telegram… (Ctrl-C to skip — add later: `iapeer create <you> --runtime telegram`)\n')
+      try {
+        const ts = await onboardTelegramStep({ env })
+        process.stdout.write(`telegram: ${ts.state}${ts.detail ? ` — ${ts.detail}` : ''}\n`)
+      } catch (e) {
+        process.stdout.write(`telegram: step skipped — ${e instanceof Error ? e.message : String(e)}\n`)
+      }
+    } else {
+      process.stdout.write('\ntelegram: skipped — add later with `iapeer create <you> --runtime telegram`\n')
     }
-  } else {
-    process.stdout.write('\nmemory: skipped — set it up later with `npx @agfpd/iapeer-memory init`\n')
+
+    if (result.memoryConsent) {
+      const { onboardMemoryProvider } = await import('../../onboard/memory.ts')
+      process.stdout.write(
+        '\nInstalling the shared-memory provider (@agfpd/iapeer-memory)…\n' +
+          'This can take a few minutes — it builds a native module. Memory is OPTIONAL:\n' +
+          'press Ctrl-C to skip it (set it up later with `npx @agfpd/iapeer-memory init`).\n\n',
+      )
+      try {
+        const mem = await onboardMemoryProvider({ env, runtime: result.hostRuntime, timeoutMs: 12 * 60_000 })
+        const label = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
+        process.stdout.write(`\nmemory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${label})\n`)
+      } catch (e) {
+        process.stdout.write(
+          `\nmemory: step skipped — ${e instanceof Error ? e.message : String(e)} (set up later: \`npx @agfpd/iapeer-memory init\`)\n`,
+        )
+      }
+    } else {
+      process.stdout.write('\nmemory: skipped — set it up later with `npx @agfpd/iapeer-memory init`\n')
+    }
+  } finally {
+    process.removeListener('SIGINT', ignore)
+    for (const h of prevInt) process.on('SIGINT', h as NodeJS.SignalsListener)
   }
 
   // Final summary (plain text, post-Ink).
