@@ -27,9 +27,19 @@ export interface MemoryOnboardOptions {
   package?: string
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
+  /** Wall-clock backstop (ms) for the provider-init subprocess — a hung provider
+   *  (e.g. a stalled native build) must NEVER wedge onboard (memory is optional).
+   *  The interactive wizard passes a generous value; the linear path leaves it
+   *  unset (no timeout). */
+  timeoutMs?: number
   /** Injectable runner (tests). Default: availability probe + `npx -y <pkg> init …`
    *  with inherited stdio. */
-  runInit?: (pkg: string, args: string[], env: NodeJS.ProcessEnv) => { status: number | null; unavailable: boolean }
+  runInit?: (
+    pkg: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    timeoutMs?: number,
+  ) => { status: number | null; unavailable: boolean }
 }
 
 export interface MemoryOnboardResult {
@@ -49,17 +59,24 @@ function defaultRunInit(
   pkg: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  timeoutMs?: number,
 ): { status: number | null; unavailable: boolean } {
   // Availability probe FIRST (cheap, side-effect-free): an unpublished package /
   // no network → soft-skip per the contract (the provider's release order must
-  // never block the core's onboard).
-  const probe = spawnSync('npm', ['view', `${pkg}@latest`, 'version'], { encoding: 'utf8', env })
+  // never block the core's onboard). Bounded so the probe itself cannot hang.
+  const probe = spawnSync('npm', ['view', `${pkg}@latest`, 'version'], { encoding: 'utf8', env, timeout: 60_000 })
   if (probe.status !== 0) return { status: probe.status, unavailable: true }
   // INHERITED stdio — the provider owns its install questions (tty interactive
   // happens here, once). npx bin-name nuance (cf. the 0.2.9 update pitfall): with
   // the provider bin already on PATH npx runs the INSTALLED one — acceptable for
   // an idempotent init (unlike the self-update case where it was a structural bug).
-  const r = spawnSync('npx', ['-y', pkg, ...args], { stdio: 'inherit', env })
+  // timeout: a generous wall-clock backstop so a hung provider can't wedge onboard
+  // (the caller also makes Ctrl-C skip just this step).
+  const r = spawnSync('npx', ['-y', pkg, ...args], {
+    stdio: 'inherit',
+    env,
+    ...(timeoutMs ? { timeout: timeoutMs } : {}),
+  })
   return { status: r.status, unavailable: false }
 }
 
@@ -96,7 +113,7 @@ export async function onboardMemoryProvider(opts: MemoryOnboardOptions = {}): Pr
     return { state: 'dry-run', provider: null, detail: `would run: npx -y ${pkg} ${args.join(' ')}` }
   }
   const run = opts.runInit ?? defaultRunInit
-  const r = run(pkg, args, env)
+  const r = run(pkg, args, env, opts.timeoutMs)
   if (r.unavailable) {
     return {
       state: 'skipped-unavailable',

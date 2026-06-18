@@ -165,9 +165,15 @@ export function OnboardApp({
       const installed: OnboardRuntime[] = []
       for (const m of r.marketplaces) if (m.state !== 'runtime-missing') installed.push(m.runtime)
       const mFail = r.marketplaces.some(m => m.state === 'failed')
+      const allMissing = r.marketplaces.length > 0 && r.marketplaces.every(m => m.state === 'runtime-missing')
       set('market', {
-        status: mFail ? 'fail' : 'ok',
-        detail: r.marketplaces.map(m => `${m.runtime}:${m.state}`).join(' '),
+        // runtime-missing is NOT success — show '!' (warn), never a contradictory ✓.
+        status: mFail ? 'fail' : allMissing ? 'warn' : 'ok',
+        detail: allMissing
+          ? 'no agent runtime installed — skipped'
+          : r.marketplaces
+              .map(m => `${m.runtime}: ${m.state === 'runtime-missing' ? 'not installed' : m.state}`)
+              .join(', '),
       })
       if (cancelled) return
       await tick()
@@ -188,6 +194,7 @@ export function OnboardApp({
         })
         adv.push(...notes)
       }
+      setAdvisories([...adv]) // surface SETUP-INCOMPLETE / auth advisories IN the wizard now
       if (cancelled) return
 
       set('fda', { status: 'running' })
@@ -196,9 +203,9 @@ export function OnboardApp({
       const tcc = tccFullDiskAccessNote({ fda, binPath: iapeerBinPath(env) })
       set('fda', { status: tcc ? 'warn' : 'ok', detail: fda === true ? 'granted' : tcc ? 'not granted' : 'n/a' })
       if (tcc) adv.push(tcc)
+      setAdvisories([...adv])
       if (cancelled) return
 
-      setAdvisories(adv)
       setPhase('memory')
     })()
 
@@ -249,6 +256,15 @@ export function OnboardApp({
           </Box>
         ))}
       </Box>
+      {advisories.length > 0 ? (
+        <Box marginTop={1} flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+          {advisories.map((a, i) => (
+            <Text key={i} color="yellow">
+              {a}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       {phase === 'memory' ? (
         <Box marginTop={1} flexDirection="column">
           <Text>Install the shared-memory provider (@agfpd/iapeer-memory)?</Text>
