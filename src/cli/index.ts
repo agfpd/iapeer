@@ -1253,9 +1253,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // and the memory provider's install-time sweep (`--all`). NOT slot-gated here —
         // an explicit operator/provider action; only the BIRTH-time hook is slot-gated.
         const state = positionals[0]
-        if (state !== 'off' && state !== 'on') return usage(errOut)
+        if (state !== 'off' && state !== 'on') return argErr(errOut, 'native-memory needs a state — usage: iapeer native-memory <off|on> (--peer <p> | --all)')
         const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
-        if (flags.all !== true && !peerName) return usage(errOut)
+        if (flags.all !== true && !peerName) return argErr(errOut, 'native-memory needs a target — pass --peer <p> or --all')
         const { applyNativeMemory } = await import('../launch/nativeMemory.ts')
         const index = readPeersIndex({ env })
         const targets = flags.all === true ? index.peers : index.peers.filter(p => p.personality === peerName)
@@ -1288,7 +1288,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // the read-only drift detector for verify pipelines — per-hook
         // trusted/missing/drift, exit 1 on anything but full trust.
         const target = positionals[0]
-        if (!target) return usage(errOut)
+        if (!target) return argErr(errOut, 'trust-hooks needs a hooks file — usage: iapeer trust-hooks <hooks.json> [--check]')
         const { preSeedCodexHooksTrust, checkCodexHooksTrust } = await import('../launch/codexHooksTrust.ts')
         if (flags.check === true) {
           let checks
@@ -1331,7 +1331,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // manifest), THEN deploy its declared peer-set (each → provision + per-peer
         // self-config + auto-bootstrap). A runtime whose manifest declares no peers
         // (telegram) is operator-add — use `iapeer create <human> --runtime telegram`.
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'install-runtime needs a runtime — usage: iapeer install-runtime <runtime> (e.g. telegram | notifier)')
         const { onboardRuntime } = await import('../runtime/deploy.ts')
         const r = await onboardRuntime({
           runtime: positionals[0] as Runtime,
@@ -1359,7 +1359,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // restart the runtime's peers via the regular stop/start. The core's own
         // `update` stays foundation-only — this is the runtimes' counterpart.
         const all = flags.all === true
-        if (!all && !positionals[0]) return usage(errOut)
+        if (!all && !positionals[0]) return argErr(errOut, 'update-runtime needs a runtime or --all — usage: iapeer update-runtime <runtime> | --all')
         const { updateRuntime, updateAllRuntimes } = await import('../runtime/update.ts')
         const results = all
           ? await updateAllRuntimes({ force: flags.force === true, env, warn: m => errOut(`warn: ${m}\n`) })
@@ -1406,7 +1406,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // cwd-INDEPENDENT: resolve a location (default ~/.iapeer/peers/<p> or --path),
         // scaffold the folder (no-clobber), then init it. Operator-add for an infra
         // human (telegram) or any agentic peer; provisions + auto-bootstraps infra.
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'create needs a peer name — usage: iapeer create <personality> [--runtime r] [--path dir]')
         const explicitRuntime = typeof flags.runtime === 'string' ? (flags.runtime as Runtime) : undefined
         // FU5 — never SILENTLY default to claude when both agentic runtimes are
         // installed. `--runtime` selects the DEFAULT (not the sole runtime); the
@@ -1570,7 +1570,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           : positionals[0]
             ? [positionals[0]]
             : null
-        if (!peers) return usage(errOut)
+        if (!peers) return argErr(errOut, 'stop needs a peer or --all — usage: iapeer stop <peer> [runtime] | --all')
         const outcomes = peers.flatMap(p => stopPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
@@ -1579,9 +1579,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Fleet-switch enabler (codex-parity audit): add an agentic runtime to
         // existing peer(s) — full codex birth chain per target, idempotent.
         const rt = positionals[0]
-        if (!rt) return usage(errOut)
+        if (!rt) return argErr(errOut, 'add-runtime needs a runtime — usage: iapeer add-runtime <runtime> (--peer <p> | --all)')
         const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
-        if (flags.all !== true && !peerName) return usage(errOut)
+        if (flags.all !== true && !peerName) return argErr(errOut, 'add-runtime needs a target — pass --peer <p> or --all')
         const outcomes = await addRuntime(rt, { peer: peerName, all: flags.all === true, env })
         for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
         return outcomes.some(o => o.action === 'failed') ? 1 : 0
@@ -1589,9 +1589,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
       case 'default-runtime': {
         // The PRIMARY flip (routing/wake default) — the fleet-switch moment itself.
         const rt = positionals[0]
-        if (!rt) return usage(errOut)
+        if (!rt) return argErr(errOut, 'default-runtime needs a runtime — usage: iapeer default-runtime <runtime> (--peer <p> | --all)')
         const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
-        if (flags.all !== true && !peerName) return usage(errOut)
+        if (flags.all !== true && !peerName) return argErr(errOut, 'default-runtime needs a target — pass --peer <p> or --all')
         const outcomes = await defaultRuntime(rt, { peer: peerName, all: flags.all === true, env })
         for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
         return outcomes.some(o => o.action === 'failed') ? 1 : 0
@@ -1601,7 +1601,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // §new): the emergency lever for a hung/dead session, bypasses the peer.
         // Source: operator CLI, or telegram-runtime's clean-/new detect (their bot
         // shells `iapeer new <peer> <runtime>` — exit 0 ⟺ fresh session up+ready).
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'new needs a peer name — usage: iapeer new <peer> [runtime]')
         const o = await newPeer(positionals[0], positionals[1], { env })
         if (o.action === 'fresh') {
           out(`new: ${o.runtime}-${o.personality} fresh session up\n`)
@@ -1622,7 +1622,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           : positionals[0]
             ? [positionals[0]]
             : null
-        if (!peers) return usage(errOut)
+        if (!peers) return argErr(errOut, 'start needs a peer or --all — usage: iapeer start <peer> [runtime] | --all')
         const outcomes = peers.flatMap(p => startPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
@@ -1636,7 +1636,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           : positionals[0]
             ? [positionals[0]]
             : null
-        if (!peers) return usage(errOut)
+        if (!peers) return argErr(errOut, 'refresh needs a peer or --all — usage: iapeer refresh <peer> [runtime] | --all')
         const outcomes = peers.flatMap(p => refreshPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}\n`)
         return 0
@@ -1645,7 +1645,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Reap a registry record through the locked writer (the operator path over
         // registry.removePeer). Idempotent on an absent peer (exit 0). Refuses a LIVE
         // peer unless --force (orphaning a running session from routing is the risk).
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'remove needs a peer name — usage: iapeer remove <peer> [--force]')
         const o = await removePeerCli(positionals[0], { force: flags.force === true, env })
         if (o.action === 'removed') {
           out(`removed "${o.personality}" from the registry\n`)
@@ -1687,7 +1687,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           const mf = flags['message-file']
           message = mf === '-' ? readFileSync(0, 'utf8') : readFileSync(mf, 'utf8')
         }
-        if (!positionals[0] || message === null) return usage(errOut)
+        if (!positionals[0] || message === null) return argErr(errOut, 'send needs a target and a message — usage: iapeer send <target> --message <text> (or --message-file <f|->)')
         // --attachment is REPEATABLE; parseArgs collapses repeats (last-wins), so
         // re-scan the raw rest argv to collect every attachment path (else files
         // silently drop — a text-only smoke test would not catch it).
@@ -1935,7 +1935,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Ф-F: the always-on infra entrypoint (telegram/notifier), held by launchd.
         // The infra plist runs `iapeer run-infra <personality> <runtime>` (installed
         // binary) instead of `bun launchdRun.ts`. cwd = the launchd WorkingDirectory.
-        if (!positionals[0] || !positionals[1]) return usage(errOut)
+        if (!positionals[0] || !positionals[1]) return argErr(errOut, 'run-infra needs a runtime and a personality — usage: iapeer run-infra <runtime> <personality> (internal launchd entrypoint)')
         return await runAlwaysOn(positionals[0], positionals[1], process.cwd())
       }
       case 'self-done': {
@@ -2009,7 +2009,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
       case 'interrupt': {
         // In-session control (Ф-E, clean-slash namespace): interrupt a stuck/raving
         // turn (Escape). UNCONDITIONAL — acts on the live session.
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'interrupt needs a peer name — usage: iapeer interrupt <peer> [runtime]')
         const r = await routeControl(positionals[0], positionals[1], { name: verb })
         if (!r.ok) {
           errOut(`${verb}: ${r.error.message}\n`)
@@ -2022,7 +2022,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Dialogue control: if the session is merely asleep
         // after a clean idle-reap, resume the same dialogue and compact it; if there
         // is no resumable dialogue, fail honestly instead of compacting a fresh one.
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'compact needs a peer name — usage: iapeer compact <peer> [runtime]')
         const o = await compactPeer(positionals[0], positionals[1], { env })
         if (o.action === 'compacted') {
           out(`compact → ${o.personality} (${o.runtime})${o.woke ? ' after resume' : ''}\n`)
@@ -2036,7 +2036,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // `connect telegram <peer> [--token <t>]`. The human owes only the token;
         // alias/bot-add/interface/router-restart are resolved by the system. The
         // FIRST message from the human to the bot activates the chat (platform rule).
-        if (positionals[0] !== 'telegram' || !positionals[1]) return usage(errOut)
+        if (positionals[0] !== 'telegram' || !positionals[1]) return argErr(errOut, 'connect needs "telegram <peer>" — usage: iapeer connect telegram <peer> [--token <t>] (e.g. iapeer connect telegram boris)')
         const { connectTelegram } = await import('../connect/index.ts')
         const r = await connectTelegram({
           peer: positionals[1],
@@ -2066,7 +2066,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // per-runtime (claude project-scope IN the peer cwd / codex global) + enable +
         // call the plugin's `setup` ONLY if its iapeer.json declares it. Idempotent and
         // fleet-safe — claude is keyed by the peer's projectPath. `enable <plugin> [peer]`.
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'enable needs a capability/plugin — usage: iapeer enable <plugin> [peer]')
         const { enableCapability } = await import('../enable/index.ts')
         const r = enableCapability({
           plugin: positionals[0],
@@ -2081,7 +2081,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         return r.runtimes.some(rt => rt.state === 'failed') || r.setup === 'failed' ? 1 : 0
       }
       case 'attach': {
-        if (!positionals[0]) return usage(errOut)
+        if (!positionals[0]) return argErr(errOut, 'attach needs a peer name — usage: iapeer attach <peer> [runtime]')
         const r = await attachPeer({ personality: positionals[0], runtime: positionals[1], env })
         if (!r.ok) {
           errOut(`attach: ${r.reason}\n`)
@@ -2157,7 +2157,14 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           const id = resolveIdentity({ env })
           const r = await folderLaunch({ cwd: process.cwd(), runtime: verb, env, cfg })
           if (r.status === 'FAILED') {
-            errOut(`launch: ${r.reason}\n`)
+            // A bare token format-matches a runtime, so it dispatched here as `iapeer
+            // <runtime>` (launch the cwd peer on that runtime). When that fails, the user
+            // most often just MISTYPED a command — surface BOTH readings so the message is
+            // actionable instead of a bare "runtime not declared" (FU13).
+            errOut(
+              `iapeer: "${verb}" — ${r.reason}\n` +
+                '  If you meant a command, run `iapeer help`. `iapeer <runtime>` launches a runtime declared for the current peer.\n',
+            )
             return 1
           }
           const identity = r.process_address ?? buildProcessAddress(verb, id.personality)
@@ -2169,6 +2176,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           out(`launched ${identity} (fresh)\n`)
           return 0
         }
+        errOut(`iapeer: unknown verb "${verb ?? ''}"\n`)
         return usage(errOut)
       }
     }
@@ -2180,6 +2188,15 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
 
 function usage(errOut: (s: string) => void): number {
   errOut(renderUsage())
+  return 2
+}
+
+/** A TARGETED argument error (FU13): a one-line, addressed, actionable reason for THIS
+ *  verb — never the generic top-level help wall (which reads as "nothing happened" to a
+ *  user who just mistyped one verb). `message` should name what's missing + the verb's
+ *  own form, e.g. "connect telegram needs a peer — usage: iapeer connect telegram <peer>". */
+function argErr(errOut: (s: string) => void, message: string): number {
+  errOut(`iapeer: ${message}\n`)
   return 2
 }
 
