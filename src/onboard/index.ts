@@ -46,6 +46,14 @@ export interface OnboardOptions {
   /** Restrict to these runtimes (default both). */
   runtimes?: OnboardRuntime[]
   env?: NodeJS.ProcessEnv
+  /** Injectable (tests). Default registerMarketplace. */
+  register?: (runtime: OnboardRuntime, env: NodeJS.ProcessEnv) => { ok: boolean; detail?: string }
+  /** Injectable (tests). Default isMarketplaceRegistered. */
+  isRegistered?: (runtime: OnboardRuntime, env: NodeJS.ProcessEnv) => boolean
+  /** Injectable (tests). Default Bun.sleepSync — the pause before the one transient retry. */
+  sleep?: (ms: number) => void
+  /** Delay (ms) before the single non-timeout retry. Default 2000. */
+  retryDelayMs?: number
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,13 +200,17 @@ export function refreshMarketplace(
 export function onboardHost(opts: OnboardOptions = {}): OnboardResult {
   const env = opts.env ?? process.env
   const runtimes = opts.runtimes ?? (['claude', 'codex'] as OnboardRuntime[])
+  const isRegistered = opts.isRegistered ?? isMarketplaceRegistered
+  const register = opts.register ?? registerMarketplace
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleepSync(ms))
+  const retryDelayMs = opts.retryDelayMs ?? 2000
   const marketplaces: OnboardRuntimeResult[] = []
   for (const runtime of runtimes) {
     if (!isExecutable(runtimeBin(runtime, env), env)) {
       marketplaces.push({ runtime, state: 'runtime-missing' })
       continue
     }
-    if (isMarketplaceRegistered(runtime, env)) {
+    if (isRegistered(runtime, env)) {
       marketplaces.push({ runtime, state: 'already-registered' })
       continue
     }
@@ -206,11 +218,57 @@ export function onboardHost(opts: OnboardOptions = {}): OnboardResult {
       marketplaces.push({ runtime, state: 'would-register' })
       continue
     }
-    const r = registerMarketplace(runtime, env)
-    marketplaces.push({ runtime, state: r.ok ? 'registered' : 'failed', detail: r.detail })
+    marketplaces.push(resolveMarketplaceAdd(runtime, env, register, isRegistered, sleep, retryDelayMs))
   }
   const noop = marketplaces.every(m => m.state !== 'registered')
   return { marketplaces, noop }
+}
+
+/**
+ * One `marketplace add` with first-run-transient resilience (Arthur's fresh-run found a
+ * scary red "failed" on a step that actually self-heals — the failure is transient, the
+ * marketplace ends up registered). Layered:
+ *   (a) SELF-HEAL: if the add reports failure but a re-check shows the marketplace IS
+ *       present (it landed despite a non-zero tail / a race), report `registered`.
+ *   (c) ONE retry after a short delay — only for a NON-timeout transient (a network/git
+ *       blip on the GitHub clone). NEVER on a timeout: a wedged / macOS-launch-approval-
+ *       parked binary would just re-wedge, doubling the wait.
+ *   (b) on a timeout signature, report `failed` with the macOS-approval advisory; on any
+ *       other persistent failure, a transient-retry hint. The marketplace is OPTIONAL for
+ *       core function, so a clear actionable line beats a bare "failed".
+ */
+function resolveMarketplaceAdd(
+  runtime: OnboardRuntime,
+  env: NodeJS.ProcessEnv,
+  register: (r: OnboardRuntime, e: NodeJS.ProcessEnv) => { ok: boolean; detail?: string },
+  isRegistered: (r: OnboardRuntime, e: NodeJS.ProcessEnv) => boolean,
+  sleep: (ms: number) => void,
+  retryDelayMs: number,
+): OnboardRuntimeResult {
+  const first = register(runtime, env)
+  if (first.ok) return { runtime, state: 'registered' }
+  // (a) self-heal — present despite the reported error?
+  if (isRegistered(runtime, env)) {
+    return { runtime, state: 'registered', detail: 'add reported an error, but the marketplace is present' }
+  }
+  const timedOut = /timed out/i.test(first.detail ?? '')
+  if (!timedOut) {
+    // (c) one retry for a non-timeout transient.
+    sleep(retryDelayMs)
+    const second = register(runtime, env)
+    if (second.ok || isRegistered(runtime, env)) return { runtime, state: 'registered', detail: 'succeeded on retry' }
+    return {
+      runtime,
+      state: 'failed',
+      detail: `${second.detail ?? first.detail} — transient (network/git)? re-run \`iapeer onboard\`; the marketplace is optional for core function`,
+    }
+  }
+  // (b) timeout signature → the known macOS launch-approval park.
+  return {
+    runtime,
+    state: 'failed',
+    detail: `${first.detail} — macOS may be verifying the runtime binary; approve it in System Settings → Privacy & Security, then re-run \`iapeer onboard\``,
+  }
 }
 
 /**

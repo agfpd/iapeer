@@ -7,7 +7,8 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { claudeAuthReady, codexAuthReady, isAgfpdInList, runtimeAuthNote, tccFullDiskAccessNote } from './index.ts'
+import { claudeAuthReady, codexAuthReady, isAgfpdInList, onboardHost, runtimeAuthNote, tccFullDiskAccessNote } from './index.ts'
+import type { OnboardRuntime } from './index.ts'
 
 describe('tccFullDiskAccessNote (macOS TCC advisory — PROBE-driven, not memory-gated)', () => {
   test('fda NOT granted → the Full Disk Access instruction with the injected bin path', () => {
@@ -110,5 +111,71 @@ claude-plugins-official  /Users/x/.codex/.tmp/marketplaces/claude-plugins-offici
   test('a different agfpd-* token (e.g. a plugin name) does NOT false-positive', () => {
     // a line that mentions agfpd-prompt-architect but the agfpd marketplace is NOT listed
     expect(isAgfpdInList('plugins:\n  agfpd-prompt-architect@somewhere (installed)\n')).toBe(false)
+  })
+})
+
+describe('onboardHost marketplace resilience (Arthur fresh-run: no bare red "failed")', () => {
+  // process.execPath is always an executable file → runtimeBin('claude') passes the
+  // isExecutable gate, so the (injected) register path is reached deterministically.
+  const env = { IAPEER_CLAUDE_BIN: process.execPath } as NodeJS.ProcessEnv
+  const seqRegister = (
+    results: Array<{ ok: boolean; detail?: string }>,
+  ): ((r: OnboardRuntime, e: NodeJS.ProcessEnv) => { ok: boolean; detail?: string }) & { calls: { n: number } } => {
+    let i = 0
+    const calls = { n: 0 }
+    const fn = (): { ok: boolean; detail?: string } => {
+      calls.n++
+      return results[Math.min(i++, results.length - 1)]!
+    }
+    return Object.assign(fn, { calls })
+  }
+  const seqIsReg = (vals: boolean[]): ((r: OnboardRuntime, e: NodeJS.ProcessEnv) => boolean) => {
+    let i = 0
+    return () => vals[Math.min(i++, vals.length - 1)]!
+  }
+
+  test('self-heal: add reports failure but a recheck shows present → registered (no retry)', () => {
+    const register = seqRegister([{ ok: false, detail: 'exit 1' }])
+    const r = onboardHost({ runtimes: ['claude'], env, register, isRegistered: seqIsReg([false, true]), sleep: () => {} })
+    expect(r.marketplaces[0]!.state).toBe('registered')
+    expect(register.calls.n).toBe(1)
+  })
+
+  test('non-timeout transient: ONE retry succeeds → registered', () => {
+    const register = seqRegister([{ ok: false, detail: 'exit 1' }, { ok: true }])
+    const r = onboardHost({ runtimes: ['claude'], env, register, isRegistered: seqIsReg([false, false, false]), sleep: () => {} })
+    expect(r.marketplaces[0]!.state).toBe('registered')
+    expect(r.marketplaces[0]!.detail).toMatch(/retry/)
+    expect(register.calls.n).toBe(2)
+  })
+
+  test('non-timeout persistent: failed with an actionable transient hint (not a bare "failed")', () => {
+    const register = seqRegister([{ ok: false, detail: 'exit 1' }, { ok: false, detail: 'exit 1' }])
+    const r = onboardHost({ runtimes: ['claude'], env, register, isRegistered: seqIsReg([false]), sleep: () => {} })
+    expect(r.marketplaces[0]!.state).toBe('failed')
+    expect(r.marketplaces[0]!.detail).toMatch(/re-run|optional/)
+  })
+
+  test('timeout: NO retry (would re-wedge) + macOS-approval advisory', () => {
+    const register = seqRegister([{ ok: false, detail: 'timed out (wedged runtime CLI?)' }])
+    const r = onboardHost({
+      runtimes: ['claude'],
+      env,
+      register,
+      isRegistered: seqIsReg([false]),
+      sleep: () => {
+        throw new Error('must NOT sleep/retry on a timeout')
+      },
+    })
+    expect(r.marketplaces[0]!.state).toBe('failed')
+    expect(r.marketplaces[0]!.detail).toMatch(/System Settings|Privacy/)
+    expect(register.calls.n).toBe(1)
+  })
+
+  test('already-registered upfront → no add attempted', () => {
+    const register = seqRegister([{ ok: false }])
+    const r = onboardHost({ runtimes: ['claude'], env, register, isRegistered: seqIsReg([true]), sleep: () => {} })
+    expect(r.marketplaces[0]!.state).toBe('already-registered')
+    expect(register.calls.n).toBe(0)
   })
 })
