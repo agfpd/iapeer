@@ -1002,19 +1002,21 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
   try {
     switch (verb) {
       case 'onboard': {
-        // Interactive TUI wizard (Фаза TUI-редизайн). OPT-IN during dev via
-        // IAPEER_ONBOARD_WIZARD=1; routed ONLY in a real interactive terminal and
-        // never for an automation path (--accept-risk / --dry-run / --no-memory /
-        // --infra) which stay on the deterministic linear flow below. The wizard
-        // owns its own gate screen, so we route BEFORE the readline gate. It fails
-        // closed: no real TTY → WIZARD_NOT_INTERACTIVE → fall through to linear.
-        const wizardOptIn = /^(1|true|yes)$/i.test((env.IAPEER_ONBOARD_WIZARD ?? '').trim())
+        // Interactive TUI wizard (Фаза TUI-редизайн) — the DEFAULT for an
+        // interactive `iapeer onboard`. Routed ONLY in a real interactive terminal
+        // and never for an automation path (--accept-risk / --dry-run / --no-memory
+        // / --infra), which stay on the deterministic linear flow below. Escape
+        // hatch: IAPEER_ONBOARD_WIZARD=0 forces the linear path (recovery / scripts
+        // that want the old flow). The wizard owns its own gate screen, so we route
+        // BEFORE the readline gate. It fails closed: no real TTY →
+        // WIZARD_NOT_INTERACTIVE → fall through to linear.
+        const wizardOptOut = /^(0|false|no)$/i.test((env.IAPEER_ONBOARD_WIZARD ?? '').trim())
         const automationFlag =
           flags['accept-risk'] === true ||
           flags['dry-run'] === true ||
           flags['no-memory'] === true ||
           typeof flags.infra === 'string'
-        if (wizardOptIn && !automationFlag && process.stdin.isTTY === true && process.stdout.isTTY === true) {
+        if (!wizardOptOut && !automationFlag && process.stdin.isTTY === true && process.stdout.isTTY === true) {
           const { runOnboardWizard, WIZARD_NOT_INTERACTIVE } = await import('../tui/onboard/run.tsx')
           const wc = await runOnboardWizard({ env })
           if (wc !== WIZARD_NOT_INTERACTIVE) return wc

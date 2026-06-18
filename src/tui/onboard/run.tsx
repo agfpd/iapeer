@@ -9,10 +9,16 @@
 // fail CLOSED here: no real TTY → return WIZARD_NOT_INTERACTIVE so the caller
 // falls back to the linear non-interactive path instead of rendering raw and
 // hanging.
+//
+// Structure: Ink owns the interactive + live-progress part (gate, daemon/
+// marketplace/auth/FDA steps, memory consent) and EXITS. The memory provider
+// install — an INHERITED-STDIO subprocess (it owns its own tty questions) — runs
+// AFTER Ink has unmounted, so the two never share the terminal at once. The final
+// summary is plain text post-Ink (it folds in the memory outcome).
 
 import React from 'react'
 import { render } from 'ink'
-import { OnboardApp } from './app.tsx'
+import { OnboardApp, type WizardResult } from './app.tsx'
 
 /** Sentinel: the environment is not a real interactive TTY — caller should fall
  *  back to the linear non-interactive onboard path (never render raw + hang). */
@@ -26,19 +32,41 @@ export interface OnboardWizardOptions {
  *  WIZARD_NOT_INTERACTIVE when there is no real TTY to drive it. */
 export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise<number> {
   const env = opts.env ?? process.env
-  // Primary guard: a real interactive terminal on BOTH ends. isTTY can lie under
-  // a /dev/tty redirect, but the CLI only routes here for a user-launched onboard
-  // in a normal terminal, and install.sh no longer pipes onboard at all.
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
     return WIZARD_NOT_INTERACTIVE
   }
-  let code = 0
+
+  let result: WizardResult = { code: 0, memoryConsent: false, advisories: [], summary: [] }
   try {
-    const app = render(<OnboardApp env={env} onResult={c => { code = c }} />)
+    const app = render(<OnboardApp env={env} onResult={r => (result = r)} />)
     await app.waitUntilExit()
   } catch {
-    // Ink raw-mode init failed (raw unsupported) — degrade, never wedge.
     return WIZARD_NOT_INTERACTIVE
   }
-  return code
+
+  // Post-Ink: the memory provider install owns the terminal (inherited stdio).
+  // Ink is fully unmounted now, so there is no contention.
+  if (result.memoryConsent) {
+    const { onboardMemoryProvider } = await import('../../onboard/memory.ts')
+    process.stdout.write('\nInstalling shared-memory provider (@agfpd/iapeer-memory)…\n')
+    try {
+      const mem = await onboardMemoryProvider({ env })
+      const label = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
+      process.stdout.write(`memory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${label})\n`)
+    } catch (e) {
+      process.stdout.write(`memory: step failed — ${e instanceof Error ? e.message : String(e)}\n`)
+    }
+  } else {
+    process.stdout.write('\nmemory: skipped — set it up later with `iapeer onboard` or `npx @agfpd/iapeer-memory init`\n')
+  }
+
+  // Final summary (plain text, post-Ink).
+  process.stdout.write('\n')
+  for (const line of result.summary) process.stdout.write(line + '\n')
+  if (result.advisories.length > 0) {
+    process.stdout.write('\n')
+    for (const a of result.advisories) process.stdout.write(a + '\n')
+  }
+  process.stdout.write('\nNext: create your first agent — `iapeer create <name> --runtime claude`\n')
+  return result.code
 }

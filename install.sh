@@ -86,17 +86,23 @@ case ":${PATH}:" in
     ;;
 esac
 
-# ── 5. hand off to onboard — the interactive security gate (never bypassed) ──
-say "handing off to 'iapeer onboard' (host setup + security checks) …"
+# ── 5. installed — onboard runs SEPARATELY in a real terminal (NOT from here) ──
+# We deliberately do NOT run `iapeer onboard` from this script. Under `curl … | sh`
+# this process's stdin is the script (a pipe), not the keyboard; Bun's interactive
+# raw-mode reader does not receive keys from a redirect-opened /dev/tty, so an
+# onboard prompt would wedge (no echo, Ctrl-C swallowed). Onboard is an interactive
+# TUI and must run in a REAL inherited terminal. So: install here, hand the next
+# step to a normal terminal.
+say "installed."
 if [ "$DRYRUN" = "1" ]; then
-  printf '  [dry-run] would run: %s onboard  (interactive, attached to /dev/tty)\n' "$IAPEER_BIN"
+  printf '  [dry-run] would print the next-step (open a normal terminal → run: iapeer onboard)\n'
   exit 0
 fi
-if [ -r /dev/tty ]; then
-  # curl | sh leaves our stdin pointed at the script, not the keyboard — reattach
-  # the terminal so the onboard prompts (and its security gate) are answerable.
-  "$IAPEER_BIN" onboard </dev/tty
-else
-  say "installed. No interactive terminal detected — finish setup yourself with:"
-  say "  iapeer onboard"
-fi
+printf '\n'
+printf 'Next: finish setup with the onboarding wizard — in a NORMAL terminal (not a pipe).\n'
+printf 'Open a new terminal window (so your PATH picks up ~/.local/bin), then run:\n'
+printf '\n'
+printf '    iapeer onboard\n'
+printf '\n'
+printf 'It reviews security, detects your agent runtimes, and sets up shared memory.\n'
+printf '(Or run it right now by full path: %s onboard)\n' "$IAPEER_BIN"
