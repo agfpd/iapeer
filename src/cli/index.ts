@@ -21,7 +21,7 @@ import {
   type Runtime,
 } from '../core/constants.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
-import { recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaemonHealthy } from '../update/index.ts'
+import { cascadeTail, recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaemonHealthy } from '../update/index.ts'
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { ensureGlobalIapScaffold } from '../storage/index.ts'
 import { findPeer, readPeersIndex, removePeer, type PeerRecord } from '../registry/index.ts'
@@ -955,7 +955,10 @@ export function parseArgs(argv: string[]): { positionals: string[]; flags: Recor
  *  narrow terminal). `sig` = the invocation signature, `desc` = one prose line. */
 const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'install', desc: 'build binary + global scaffold + daemon plist (one bootstrap)' },
-  { sig: 'update [version] [--force]', desc: 'pull latest (or exact) @agfpd/iapeer from npm + restart daemon + recycle owned infra jobs' },
+  {
+    sig: 'update [version] [--force] [--foundation-only]',
+    desc: 'cascade-update the WHOLE stack (foundation + installed runtimes + memory) from npm + restart; --foundation-only = core only; a pinned <version> updates the core only',
+  },
   { sig: 'rollback', desc: 'revert to the previous binary (.prev) + restart daemon + recycle owned infra jobs' },
   {
     sig: 'uninstall [--dry-run] [--yes] [--remove-codesign-identity]',
@@ -1716,49 +1719,72 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         return 0
       }
       case 'update': {
-        // The single deploy path: pull a version of the foundation from npm and restart
-        // the daemon onto it (cloud-only — never a working-tree build). No arg → latest;
-        // an explicit `update <version>` pins to that exact version (downgrade / recover
-        // deeper than the single .prev). Foundation ONLY; the plist and other host packages
-        // are untouched. --force reinstalls even when already at the desired version. (Run
-        // from the installed binary; the first-ever install is `npx @agfpd/iapeer`.)
-        const r = updateIapeer({ env, force: flags.force === true, targetVersion: positionals[0] })
+        // CASCADE deploy (FU12): a bare `iapeer update` updates the WHOLE host stack —
+        // foundation → every installed runtime → the memory provider — in one command.
+        // Foundation goes FIRST and ABORTS the cascade on a hard failure (never update
+        // runtimes onto a broken core). Runtimes + memory are BEST-EFFORT (reported, not
+        // fatal). Two narrowings stay foundation-ONLY: `--foundation-only` (explicit) and
+        // a pinned `update <version>` (a version pin is foundation-specific — downgrade /
+        // recover). H4 holds throughout (foreign persistent-peer fleet is refused, never
+        // forced — the runtime restart goes via the guarded stop/start). Cloud-only; the
+        // first-ever install is `npx @agfpd/iapeer`.
+        const pinned = positionals[0]
+        const foundationOnly = flags['foundation-only'] === true
+        const cascading = !foundationOnly && !pinned
+        if (cascading) {
+          // no-surprise heads-up: this restarts peers and can run minutes.
+          out(
+            'iapeer update — updating the WHOLE stack: foundation + installed runtimes + memory provider.\n' +
+              'This rebuilds the daemon, restarts the telegram/notifier services and the memory daemon,\n' +
+              'and can take a few minutes; agentic peers pick up the new code on their next wake.\n' +
+              '(`iapeer update --foundation-only` updates just the core.)\n\n',
+          )
+        }
+
+        // ── Foundation (the core; a hard failure aborts the cascade) ──
+        const r = updateIapeer({ env, force: flags.force === true, targetVersion: pinned })
+        let foundationHardFail = false
         if (r.status === 'failed') {
           errOut(`update failed: ${r.reason}\n`)
-          return 1
-        }
-        if (r.status === 'already-latest') {
-          out(`already at version ${r.from}\n`)
-          return 0
-        }
-        // 'updated': the binary is swapped. If the daemon was restarted, VERIFY it
-        // actually came back up before declaring success — a new binary that fails to
-        // boot must not read as a healthy deploy (it's the cue to roll back).
-        if (r.daemon === 'restarted') {
+          foundationHardFail = true
+        } else if (r.status === 'already-latest') {
+          out(`foundation: already at version ${r.from}\n`)
+        } else if (r.daemon === 'restarted') {
+          // 'updated' + daemon restarted: VERIFY it actually came back up (a binary that
+          // fails to boot must not read as a healthy deploy — it's the cue to roll back).
           const h = await waitForDaemonHealthy({ env })
           if (!h.healthy) {
-            errOut(`updated ${r.from} → ${r.to} but the daemon is NOT healthy after restart (${h.detail}).\n` +
-              `roll back now: iapeer rollback\n`)
-            return 1
+            errOut(`foundation: updated ${r.from} → ${r.to} but the daemon is NOT healthy after restart (${h.detail}).\nroll back now: iapeer rollback\n`)
+            foundationHardFail = true
+          } else {
+            const note = infraRecycleNote(r.infra)
+            ;(infraRecycleFailed(r.infra) ? errOut : out)(`foundation: updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
           }
+        } else {
+          const daemonNote =
+            r.daemon === 'not-loaded'
+              ? 'daemon not loaded — new binary will be used on next start'
+              : r.daemon === 'failed'
+                ? `WARNING — ${r.reason}; roll back with: iapeer rollback`
+                : String(r.daemon)
+          if (r.daemon === 'failed') foundationHardFail = true
           const note = infraRecycleNote(r.infra)
-          if (infraRecycleFailed(r.infra)) {
-            errOut(`updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
-            return 1
-          }
-          out(`updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
-          return 0
+          ;(r.daemon === 'failed' || infraRecycleFailed(r.infra) ? errOut : out)(`foundation: updated ${r.from} → ${r.to}; ${daemonNote}${note}\n`)
         }
-        const daemonNote =
-          r.daemon === 'not-loaded'
-            ? 'daemon not loaded — new binary will be used on next start'
-            : r.daemon === 'failed'
-              ? `WARNING — ${r.reason}; roll back with: iapeer rollback`
-              : String(r.daemon)
-        const note = infraRecycleNote(r.infra)
-        const failed = r.daemon === 'failed' || infraRecycleFailed(r.infra)
-        ;(failed ? errOut : out)(`updated ${r.from} → ${r.to}; ${daemonNote}${note}\n`)
-        return failed ? 1 : 0
+        const foundationExit = foundationHardFail || infraRecycleFailed(r.infra) ? 1 : 0
+
+        // foundation-only / pinned / hard-fail → stop here (don't cascade onto a broken core).
+        if (!cascading || foundationHardFail) return foundationExit
+
+        // ── Cascade tail: runtimes + memory provider (best-effort) ──
+        const { updateAllRuntimes } = await import('../runtime/update.ts')
+        const { updateMemoryProvider } = await import('../onboard/memory.ts')
+        const tail = await cascadeTail({
+          runtimes: () => updateAllRuntimes({ force: flags.force === true, env, warn: m => errOut(`warn: ${m}\n`) }),
+          memory: () => updateMemoryProvider({ env }),
+          out,
+        })
+        return foundationExit === 0 && !tail.failed ? 0 : 1
       }
       case 'rollback': {
         // Recovery: restore the .prev binary kept by the last install, restart the

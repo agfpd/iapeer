@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { coreKnownInitArgs, onboardMemoryProvider, DEFAULT_MEMORY_PACKAGE } from './memory.ts'
+import { coreKnownInitArgs, onboardMemoryProvider, updateMemoryProvider, DEFAULT_MEMORY_PACKAGE } from './memory.ts'
 import { memoryProviderPath } from '../status/index.ts'
 
 const dirs: string[] = []
@@ -153,5 +153,60 @@ describe('onboardMemoryProvider', () => {
     const r = await onboardMemoryProvider({ env: envFor(root), runInit: () => ({ status: 2, unavailable: false }) })
     expect(r.state).toBe('provider-init-failed')
     expect(r.detail).toMatch(/exited 2/)
+  })
+})
+
+describe('updateMemoryProvider (FU12 — the memory leg of cascade update)', () => {
+  const seedSlot = (root: string, version: string): void =>
+    writeFileSync(memoryProviderPath(envFor(root)), JSON.stringify({ ...SLOT, version }))
+
+  test('no slot → no-slot (nothing to update)', () => {
+    const root = mkTmp()
+    expect(updateMemoryProvider({ env: envFor(root) }).state).toBe('no-slot')
+  })
+
+  test('provider update advances the slot version → updated (from→to)', () => {
+    const root = mkTmp()
+    seedSlot(root, '0.1.0')
+    const r = updateMemoryProvider({
+      env: envFor(root),
+      // simulate the provider stamping the new version into the slot
+      runUpdate: () => (seedSlot(root, '0.2.0'), { status: 0, unavailable: false }),
+    })
+    expect(r.state).toBe('updated')
+    expect(r.from).toBe('0.1.0')
+    expect(r.to).toBe('0.2.0')
+  })
+
+  test('slot version unchanged after run → already-latest', () => {
+    const root = mkTmp()
+    seedSlot(root, '0.4.1')
+    const r = updateMemoryProvider({ env: envFor(root), runUpdate: () => ({ status: 0, unavailable: false }) })
+    expect(r.state).toBe('already-latest')
+    expect(r.from).toBe('0.4.1')
+    expect(r.to).toBe('0.4.1')
+  })
+
+  test('package unreachable → skipped-unavailable (soft, not a failure)', () => {
+    const root = mkTmp()
+    seedSlot(root, '0.1.0')
+    const r = updateMemoryProvider({ env: envFor(root), runUpdate: () => ({ status: null, unavailable: true }) })
+    expect(r.state).toBe('skipped-unavailable')
+  })
+
+  test('provider update exits non-zero → failed', () => {
+    const root = mkTmp()
+    seedSlot(root, '0.1.0')
+    const r = updateMemoryProvider({ env: envFor(root), runUpdate: () => ({ status: 1, unavailable: false }) })
+    expect(r.state).toBe('failed')
+  })
+
+  test('dry-run → describes the npm exec --package command (NOT a bare npx)', () => {
+    const root = mkTmp()
+    seedSlot(root, '0.1.0')
+    const r = updateMemoryProvider({ env: envFor(root), dryRun: true })
+    expect(r.detail).toContain('npm exec --package=')
+    expect(r.detail).toContain('iapeer-memory update')
+    expect(r.detail).not.toContain('npx')
   })
 })

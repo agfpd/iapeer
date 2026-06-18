@@ -1,7 +1,12 @@
-// `iapeer update` — the SINGLE deploy path: pull the latest published foundation
-// from npm (the cloud) and restart the daemon onto it. There is deliberately NO
-// "deploy from a working tree" — every host, including the dev host, activates a
+// `updateIapeer` — the FOUNDATION leg of the deploy: pull the latest published
+// foundation from npm (the cloud) and restart the daemon onto it. There is deliberately
+// NO "deploy from a working tree" — every host, including the dev host, activates a
 // release the same way: `npm run release` (publish) → `iapeer update` (pull + restart).
+//
+// NB the `iapeer update` VERB cascades the whole stack (FU12): it runs this foundation
+// leg FIRST (aborting on a hard failure), then `updateAllRuntimes` + the memory provider
+// (best-effort) via cascadeTail (below). updateIapeer itself stays foundation-scoped —
+// the cascade is composed in the CLI verb.
 //
 // Flow:
 //   1. latest = `npm view @agfpd/iapeer version`           (the cloud's truth)
@@ -43,6 +48,10 @@ import {
 } from '../launch/launchd.ts'
 import { cycleShadowJob, SHADOW_PERSONALITY, SHADOW_PLIST_LABEL } from '../shadow/install.ts'
 import { defaultDaemonSocketPath } from '../daemon/index.ts'
+// Type-only (erased at runtime → no import cycle): the cascade tail renders these
+// shapes but receives the component-updaters as injected deps.
+import type { UpdateRuntimeResult } from '../runtime/update.ts'
+import type { MemoryUpdateResult } from '../onboard/memory.ts'
 
 /** The npm package the foundation publishes / updates from. */
 export const IAPEER_PACKAGE = '@agfpd/iapeer'
@@ -315,4 +324,43 @@ export function updateIapeer(deps: UpdateDeps = {}): UpdateResult {
     infra,
     reason: d.state === 'failed' ? `binary updated but daemon restart failed: ${d.detail ?? ''}`.trim() : undefined,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cascadeTail — the runtimes + memory legs of the cascade `iapeer update` (FU12).
+// Runs AFTER a healthy foundation update (the CLI owns that, abort-on-hard-fail);
+// here we update every installed runtime then the memory provider, BEST-EFFORT — a
+// component failure is reported, never aborts the rest. Pure orchestration over
+// injected component-updaters (no value-import of runtime/onboard → no cycle), so it
+// is hermetically testable. Returns whether anything failed (→ exit≠0).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CascadeTailDeps {
+  /** = updateAllRuntimes (runtime/update.ts). */
+  runtimes: () => Promise<UpdateRuntimeResult[]>
+  /** = updateMemoryProvider (onboard/memory.ts). */
+  memory: () => MemoryUpdateResult | Promise<MemoryUpdateResult>
+  out: (s: string) => void
+}
+
+export async function cascadeTail(deps: CascadeTailDeps): Promise<{ failed: boolean }> {
+  let failed = false
+
+  deps.out('runtimes:\n')
+  const rs = await deps.runtimes()
+  if (rs.length === 0) deps.out('  (none installed)\n')
+  for (const r of rs) {
+    const ver = r.from || r.to ? ` ${r.from ?? '?'} → ${r.to ?? '?'}` : ''
+    deps.out(`  ${r.runtime}: ${r.state}${ver}${r.detail ? ` — ${r.detail}` : ''}\n`)
+    for (const p of r.restarted) deps.out(`    restart ${p.personality}: ${p.state}${p.detail ? ` — ${p.detail}` : ''}\n`)
+    if (r.state === 'install-failed' || r.state === 'deploy-failed' || r.state === 'npm-unreachable') failed = true
+    if (r.restarted.some(p => p.state === 'failed')) failed = true
+  }
+
+  const m = await deps.memory()
+  const mver = m.from || m.to ? ` ${m.from ?? '?'} → ${m.to ?? '?'}` : ''
+  deps.out(`memory: ${m.state}${m.package ? ` (${m.package}${mver})` : ''}${m.detail ? ` — ${m.detail}` : ''}\n`)
+  if (m.state === 'failed') failed = true
+
+  return { failed }
 }

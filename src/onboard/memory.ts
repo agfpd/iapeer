@@ -144,3 +144,74 @@ export async function onboardMemoryProvider(opts: MemoryOnboardOptions = {}): Pr
   }
   return { state: 'installed', provider: after }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// updateMemoryProvider — the memory leg of the cascade `iapeer update` (FU12)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MemoryUpdateResult {
+  state:
+    | 'updated' // provider update ran and the slot version advanced
+    | 'already-latest' // ran but the slot version is unchanged
+    | 'no-slot' // no provider claimed — nothing to update
+    | 'skipped-unavailable' // package not published / no network — soft skip
+    | 'failed' // provider update exited non-zero
+  package?: string
+  from?: string
+  to?: string
+  detail?: string
+}
+
+/** The provider's CLI bin name = the unscoped package name (`@agfpd/iapeer-memory` →
+ *  `iapeer-memory`). */
+function memoryBinName(pkg: string): string {
+  return pkg.replace(/^@[^/]+\//, '')
+}
+
+function defaultRunMemoryUpdate(pkg: string, env: NodeJS.ProcessEnv): { status: number | null; unavailable: boolean } {
+  // Availability probe FIRST (cheap, bounded): unpublished / no network → soft-skip.
+  const probe = spawnSync('npm', ['view', `${pkg}@latest`, 'version'], { encoding: 'utf8', env, timeout: 60_000 })
+  if (probe.status !== 0) return { status: probe.status, unavailable: true }
+  // The provider ships a COMPILED bin on PATH (~/.local/bin/<bin>), NOT an npm package,
+  // so a bare `npx <bin>` / `npx <pkg>@latest` re-runs the STALE installed binary —
+  // verified by the provider: it reports the OLD version, "running FROM the installed
+  // binary", a SILENT non-update (fatal for the upgrade case). `npm exec
+  // --package=<pkg>@latest -- <bin> update` fetches latest + rebuilds, bypassing the PATH
+  // name-shadow. The provider OWNS update + slot-write + its own daemon (memoryd) restart.
+  const r = spawnSync(
+    'npm',
+    ['exec', '--yes', `--package=${pkg}@latest`, '--', memoryBinName(pkg), 'update'],
+    { stdio: 'inherit', env },
+  )
+  return { status: r.status, unavailable: false }
+}
+
+/**
+ * Update the CLAIMED memory provider via ITS OWN npx update verb (slot contract: the
+ * provider owns install/update + slot-write + peer restart; the core only invokes +
+ * reads the slot). No slot → nothing to update. Reports from→to by reading the slot
+ * version before/after. BEST-EFFORT by the caller (the cascade never aborts on it).
+ */
+export function updateMemoryProvider(opts: {
+  env?: NodeJS.ProcessEnv
+  dryRun?: boolean
+  runUpdate?: (pkg: string, env: NodeJS.ProcessEnv) => { status: number | null; unavailable: boolean }
+} = {}): MemoryUpdateResult {
+  const env = opts.env ?? process.env
+  const slot = readMemoryProvider(env)
+  if (!slot) return { state: 'no-slot', detail: 'no memory provider claimed — nothing to update' }
+  const pkg = slot.package
+  const from = slot.version
+  if (opts.dryRun) {
+    return { state: 'updated', package: pkg, from, detail: `would run: npm exec --package=${pkg}@latest -- ${memoryBinName(pkg)} update` }
+  }
+  const run = opts.runUpdate ?? defaultRunMemoryUpdate
+  const r = run(pkg, env)
+  if (r.unavailable) {
+    return { state: 'skipped-unavailable', package: pkg, from, detail: `${pkg}@latest not reachable (no network / unpublished)` }
+  }
+  if (r.status !== 0) return { state: 'failed', package: pkg, from, detail: `provider update exited ${r.status ?? 'null'}` }
+  const to = readMemoryProvider(env)?.version
+  if (from && to && from === to) return { state: 'already-latest', package: pkg, from, to }
+  return { state: 'updated', package: pkg, from, to }
+}

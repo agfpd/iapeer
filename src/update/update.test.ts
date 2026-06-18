@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { IAPEER_VERSION, recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaemonHealthy } from '../index.ts'
+import { cascadeTail } from './index.ts'
 import type { DaemonRestartResult } from '../launch/launchd.ts'
 
 const restarted = (): DaemonRestartResult => ({ state: 'restarted' })
@@ -204,5 +205,57 @@ describe('waitForDaemonHealthy', () => {
     const h = await waitForDaemonHealthy({ env: { IAPEER_TEST_SANDBOX: '1' } as NodeJS.ProcessEnv })
     expect(h.healthy).toBe(true)
     expect(h.detail).toBe('skipped-sandbox')
+  })
+})
+
+describe('cascadeTail (FU12 — runtimes + memory legs, best-effort)', () => {
+  const cap = (): { out: (s: string) => void; text: () => string } => {
+    const lines: string[] = []
+    return { out: (s: string) => void lines.push(s), text: () => lines.join('') }
+  }
+
+  test('all green → not failed; renders per-component X→Y', async () => {
+    const c = cap()
+    const res = await cascadeTail({
+      out: c.out,
+      runtimes: async () => [
+        { runtime: 'telegram', state: 'updated', from: '0.17.0', to: '0.18.0', peers: [], restarted: [{ personality: 'arthur', state: 'restarted' }] },
+        { runtime: 'notifier', state: 'already-latest', from: '0.3.0', to: '0.3.0', peers: [], restarted: [] },
+      ],
+      memory: () => ({ state: 'updated', package: '@agfpd/iapeer-memory', from: '0.4.0', to: '0.4.1' }),
+    })
+    expect(res.failed).toBe(false)
+    expect(c.text()).toContain('telegram: updated 0.17.0 → 0.18.0')
+    expect(c.text()).toContain('memory: updated')
+  })
+
+  test('a runtime install-failed → failed (still best-effort rendered, not aborted)', async () => {
+    const res = await cascadeTail({
+      out: () => {},
+      runtimes: async () => [{ runtime: 'telegram', state: 'install-failed', peers: [], restarted: [] }],
+      memory: () => ({ state: 'no-slot' }),
+    })
+    expect(res.failed).toBe(true)
+  })
+
+  test('a restarted peer failed → failed', async () => {
+    const res = await cascadeTail({
+      out: () => {},
+      runtimes: async () => [{ runtime: 'notifier', state: 'updated', peers: [], restarted: [{ personality: 'timer', state: 'failed' }] }],
+      memory: () => ({ state: 'already-latest' }),
+    })
+    expect(res.failed).toBe(true)
+  })
+
+  test('memory failed → failed; zero runtimes renders "(none installed)"', async () => {
+    const c = cap()
+    const res = await cascadeTail({ out: c.out, runtimes: async () => [], memory: () => ({ state: 'failed', detail: 'exited 1' }) })
+    expect(res.failed).toBe(true)
+    expect(c.text()).toContain('(none installed)')
+  })
+
+  test('memory skipped-unavailable / no-slot are SOFT → not failed', async () => {
+    const res = await cascadeTail({ out: () => {}, runtimes: async () => [], memory: () => ({ state: 'skipped-unavailable' }) })
+    expect(res.failed).toBe(false)
   })
 })

@@ -47,25 +47,32 @@ You'll see the core version, the daemon's health, and the memory-slot state. The
 
 A breakdown of each onboard step is in [02 — Quick start](02-quickstart.md); runtimes and memory in detail — in [09](09-runtimes.md) and [11](11-extensions-and-memory.md).
 
-## Updating the core
+## Updating
 
 ```bash
-iapeer update            # to the latest version
-iapeer update 0.2.80     # to a specific version
-iapeer update --force    # reinstall even if the version is already in place
+iapeer update                   # cascade-update the WHOLE stack: core + runtimes + memory
+iapeer update --foundation-only # update just the core
+iapeer update 0.2.80            # pin the CORE to a specific version (core only)
+iapeer update --force           # reinstall even if the version is already in place
 ```
 
-An update pulls the core version from npm and restarts the daemon onto it. Step by step:
+A bare `iapeer update` updates the **whole host stack** in one command — the core (foundation), every installed runtime, and the memory provider — so "updated" means the whole machine, not just the core. The core goes first; the runtimes and memory follow only if the core came up healthy.
+
+**1. Core (foundation)** — and it ABORTS the cascade on a hard failure (never update runtimes onto a broken core):
 
 1. Learns the target version from npm. If the installed one already matches and there's no `--force` — it does nothing.
-2. Downloads and builds the new binary. This is done via `npm pack`, not `npx`: the binary doesn't rebuild itself.
+2. Downloads and builds the new binary via `npm pack`, not `npx` (the binary doesn't rebuild itself).
 3. Restarts the daemon onto the new binary.
-4. Restarts the infrastructure launchd jobs the core owns (`com.iapeer.*` — the `timer`, `watcher`, Telegram routers), moving them onto the just-replaced binary. Their plists launch the same core binary as the daemon — without a restart a job would stay on the old code. It's the job that's restarted (booted out and back in); the runtimes' **package code** (telegram-runtime, notifier-runtime) is not updated by this — that's the separate `update-runtime` operation. The memory provider (`iapeer-memory`) and ordinary peers' plists aren't touched at all. If the daemon didn't come up in step 3, this step is skipped — no point moving jobs onto a binary the daemon didn't revive on.
-5. Verifies the daemon actually came up healthy — not by the restart command exiting successfully, but by a probe: it connects to the daemon's socket (the one the daemon opens right before the readiness signal). The daemon counts as healthy only when the socket accepts a connection **twice in a row** — a single probe would also pass for a daemon that bound the socket and immediately crashed. The check is given 15 seconds; if a run of successful probes doesn't accumulate in that time, the command says so directly and advises rolling back.
+4. Restarts the infrastructure launchd jobs the core owns (`com.iapeer.*` — the `timer`, `watcher`, Telegram routers), moving them onto the just-replaced binary. It's the JOBS that restart, not the runtimes' package code — that's the next step. If the daemon didn't come up in step 3, this is skipped.
+5. Verifies the daemon came up healthy — by a probe, not by the restart command exiting: it connects to the daemon's socket and counts it healthy only when it accepts a connection **twice in a row** (a single probe would also pass a daemon that bound the socket and immediately crashed). The check is given 15 seconds; on failure the command says so and advises rolling back.
 
-An update touches **only the core**. The daemon plist and third-party packages stay as they are.
+**2. Runtimes** — each installed runtime package (telegram-runtime, notifier-runtime) is version-gated, re-installed, re-provisioned, and its peers restarted (via the regular stop/start — the persistent-peer fleet is refused, never forced).
 
-Naming a specific version (`iapeer update <version>`) is useful when you need to roll back deeper than one step, or pin a proven version.
+**3. Memory provider** — if a provider is claimed, its own update verb runs (the provider owns its update, its slot version, and its memory-daemon restart).
+
+Runtimes and memory are **best-effort**: a component failure is reported and the rest still run; the command exits non-zero if anything failed. Agentic peers (Claude/Codex) pick up new core doctrine lazily on their next wake.
+
+`iapeer update --foundation-only` does just step 1 (the narrow case). A pinned `iapeer update <version>` is **core-only** by design — a version pin is core-specific (downgrade, or pin a proven version, deeper than one rollback step).
 
 ## Rollback
 
