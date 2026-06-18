@@ -21,6 +21,7 @@ import { IapError } from '../core/errors.ts'
 import {
   ensureLocalIapScaffold,
   pluginStateDir,
+  resolveGlobalRoot,
   writeFileAtomic,
   type StorageOptions,
 } from '../storage/index.ts'
@@ -238,6 +239,36 @@ export function ensureDoctrineTemplate(cwd: string): { path: string; created: bo
       '<!-- This is the local doctrine for this peer — its role, personality, and mandate.',
       '     It is merged into the system prompt at launch (Канал A). Replace this with',
       '     who this peer is and what it does. An empty doctrine launches a bare peer. -->',
+      '',
+    ].join('\n'),
+    { mode: 0o644 },
+  )
+  return { path, created: true }
+}
+
+/**
+ * Create the GLOBAL host-doctrine template `~/.iapeer/IAPEER.md` if absent — the
+ * host-wide owner doctrine (Layer-2 GLOBAL in composeSystemPrompt, shared by EVERY
+ * peer; the general layer ABOVE each peer's own `.iapeer/IAPEER.md`). It is consumed at
+ * launch but was never scaffolded, so a fresh install left no host-doctrine file for the
+ * owner to find — asymmetric with the per-peer stub (ensureDoctrineTemplate). This
+ * mirrors that stub at host scope (discoverability + consistency). NEVER overwrites an
+ * existing host doctrine. Returns {path, created}.
+ */
+export function ensureGlobalDoctrineTemplate(env: NodeJS.ProcessEnv = process.env): { path: string; created: boolean } {
+  const root = resolveGlobalRoot(env)
+  const path = join(root, IAPEER_DOCTRINE_FILE)
+  if (existsSync(path)) return { path, created: false }
+  mkdirSync(root, { recursive: true })
+  writeFileSync(
+    path,
+    [
+      '# Host doctrine',
+      '',
+      '<!-- Host-wide rules shared by EVERY peer on this machine — the general layer,',
+      "     merged into every peer's system prompt at launch ABOVE that peer's own",
+      '     .iapeer/IAPEER.md. Replace this with your host-wide conventions. An empty',
+      '     file contributes nothing. -->',
       '',
     ].join('\n'),
     { mode: 0o644 },

@@ -11,6 +11,7 @@ import {
   codexConfigPath,
   ensureCodexUpdateCheckDisabled,
   ensureDoctrineTemplate,
+  ensureGlobalDoctrineTemplate,
   initPeer,
   resolveDaemonMcpUrl,
   resolvePrimaryRuntime,
@@ -92,6 +93,23 @@ describe('ensureDoctrineTemplate', () => {
     const { created } = ensureDoctrineTemplate(cwd)
     expect(created).toBe(false)
     expect(readFileSync(join(cwd, '.iapeer', 'IAPEER.md'), 'utf8')).toBe('I am boris.')
+  })
+})
+
+describe('ensureGlobalDoctrineTemplate (FU11 — host-wide stub)', () => {
+  test('creates the global ~/.iapeer/IAPEER.md stub when absent', () => {
+    const { path, created } = ensureGlobalDoctrineTemplate(cleanEnv())
+    expect(created).toBe(true)
+    expect(path).toBe(join(root, 'IAPEER.md'))
+    expect(existsSync(path)).toBe(true)
+    expect(readFileSync(path, 'utf8')).toContain('Host doctrine')
+  })
+  test('never overwrites an existing host doctrine', () => {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'IAPEER.md'), 'host rules by the owner')
+    const { created } = ensureGlobalDoctrineTemplate(cleanEnv())
+    expect(created).toBe(false)
+    expect(readFileSync(join(root, 'IAPEER.md'), 'utf8')).toBe('host rules by the owner')
   })
 })
 

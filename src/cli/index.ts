@@ -1853,7 +1853,12 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // npx; the compiled binary cannot rebuild itself from source (its
         // import.meta.url is the binary → build fails with a clear error).
         const { installIapeer, scaffoldHostDocs } = await import('../install/index.ts')
+        const { ensureGlobalDoctrineTemplate } = await import('../init/index.ts')
         ensureGlobalIapScaffold({ env })
+        // FU11 — scaffold the GLOBAL host-doctrine stub ~/.iapeer/IAPEER.md (Layer-2
+        // global doctrine, consumed at launch but previously never created — asymmetric
+        // with the per-peer stub). Idempotent: never overwrites an owner's host doctrine.
+        const hostDoctrine = ensureGlobalDoctrineTemplate(env)
         const r = installIapeer(fileURLToPath(import.meta.url), env)
         // FU6 — copy the foundation contract docs to the stable per-package host path
         // ~/.iapeer/docs/iapeer/ (the ecosystem convention: each package copies its OWN
@@ -1873,6 +1878,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             `${r.size ? ` (${Math.round(r.size / 1e6)}M)` : ''}\n` +
             signingLine +
             `  scaffold: ~/.iapeer/ ensured (peers/, state, logs, cache, runtimes)\n` +
+            `  host doctrine: ${hostDoctrine.path}${hostDoctrine.created ? ' (stub created — fill it in)' : ' (kept)'}\n` +
             `  docs: ${docs.copied ? docs.dest : `skipped (${docs.reason})`}\n` +
             `  daemon plist ${plistChanged ? 'written' : 'unchanged (byte-identical — no write, no BTM notification)'}: ${plist}\n` +
             `  (NOT loaded — a live daemon migration is a separate step: launchctl bootstrap gui/$(id -u) ${plist})\n`,
