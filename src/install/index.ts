@@ -13,10 +13,11 @@
 // signInstalledBinary (signing.ts) re-signs each install with the
 // stable local identity so the designated requirement — and the grants — survive.
 
-import { copyFileSync, existsSync, mkdirSync, renameSync, statSync } from 'fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, relative, sep } from 'path'
 import { spawnSync } from 'child_process'
+import { resolveGlobalRoot } from '../storage/index.ts'
 import { signInstalledBinary, type SigningOutcome } from './signing.ts'
 
 /** The stable host-wide install path of the `iapeer` binary. Standard user-bin (no
@@ -93,6 +94,62 @@ export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = pr
     /* best-effort */
   }
   return { binPath, prevPath, size, signing }
+}
+
+/**
+ * Scaffold an ecosystem package's docs to the STABLE, versioned, per-package host
+ * path `~/.iapeer/docs/<pkg>/` so an agent can read the contract OFFLINE (a compiled
+ * binary embeds no docs; the npm tarball's docs/ is discarded after install — proven:
+ * `iapeer update` extracts to a temp dir it rm's in a `finally`, and the bunx cache
+ * does not retain the package findably). This is the FOUNDATION-OWNED CONVENTION every
+ * ecosystem package follows: each copies its OWN docs on its OWN install/update, so a
+ * package's on-host docs always match its installed version.
+ *
+ * Mechanics: copy <docsSource> → ~/.iapeer/docs/<pkg> EXCLUDING internals/ (mirroring
+ * the npm `files` exclusion), via an atomic temp-dir swap so a reader never sees a
+ * half-copied tree. BEST-EFFORT — a missing source or copy hiccup NEVER fails the
+ * install (the binary works without on-host docs); the caller logs the outcome.
+ */
+export function scaffoldHostDocs(
+  pkg: string,
+  docsSource: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { copied: boolean; dest: string; reason?: string } {
+  const root = resolveGlobalRoot(env)
+  const dest = join(root, 'docs', pkg)
+  // Fail-closed sandbox guard (in spirit with assertInstallSandboxIsolated): never write
+  // the REAL machine ~/.iapeer under a sandboxed test that forgot to set IAPEER_ROOT.
+  // Compared against the ACTUAL OS home (homedir()), not env.HOME — the root IS the docs
+  // isolation, so an env.HOME-based check would false-trip when a test legitimately
+  // points IAPEER_ROOT at <tmp>/.iapeer (with env.HOME also <tmp>).
+  if (env.IAPEER_TEST_SANDBOX === '1' && root === join(homedir(), '.iapeer')) {
+    throw new Error(`refusing to scaffold docs into the REAL ${join(root, 'docs')} under IAPEER_TEST_SANDBOX=1 — set IAPEER_ROOT`)
+  }
+  if (!existsSync(docsSource)) return { copied: false, dest, reason: `docs source not found: ${docsSource}` }
+  const tmp = `${dest}.tmp-${process.pid}`
+  try {
+    rmSync(tmp, { recursive: true, force: true })
+    mkdirSync(join(dest, '..'), { recursive: true })
+    cpSync(docsSource, tmp, {
+      recursive: true,
+      // Skip the internals/ subtree (matches package.json files: "!docs/internals").
+      // Returning false for a directory skips its whole subtree.
+      filter: src => {
+        const rel = relative(docsSource, src)
+        return rel !== 'internals' && !rel.startsWith(`internals${sep}`)
+      },
+    })
+    rmSync(dest, { recursive: true, force: true })
+    renameSync(tmp, dest)
+    return { copied: true, dest }
+  } catch (e) {
+    try {
+      rmSync(tmp, { recursive: true, force: true })
+    } catch {
+      /* best-effort cleanup */
+    }
+    return { copied: false, dest, reason: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 /** The previous-binary path kept by the last install for one-step rollback. */

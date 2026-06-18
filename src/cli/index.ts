@@ -13,6 +13,7 @@
 import { spawnSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import {
   isInfraRuntime,
   isRuntime,
@@ -1851,9 +1852,14 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Bootstrap path — run from the src tree (`bun src/cli/index.ts install`) or
         // npx; the compiled binary cannot rebuild itself from source (its
         // import.meta.url is the binary → build fails with a clear error).
-        const { installIapeer } = await import('../install/index.ts')
+        const { installIapeer, scaffoldHostDocs } = await import('../install/index.ts')
         ensureGlobalIapScaffold({ env })
         const r = installIapeer(fileURLToPath(import.meta.url), env)
+        // FU6 — copy the foundation contract docs to the stable per-package host path
+        // ~/.iapeer/docs/iapeer/ (the ecosystem convention: each package copies its OWN
+        // docs on its OWN install, version = its binary). install runs from source, so
+        // docs/ sits at <entry>/../../docs. Best-effort: never fails the install.
+        const docs = scaffoldHostDocs('iapeer', join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs'), env)
         const { path: plist, changed: plistChanged } = installDaemonPlist({ env })
         const signingLine =
           r.signing == null
@@ -1867,6 +1873,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             `${r.size ? ` (${Math.round(r.size / 1e6)}M)` : ''}\n` +
             signingLine +
             `  scaffold: ~/.iapeer/ ensured (peers/, state, logs, cache, runtimes)\n` +
+            `  docs: ${docs.copied ? docs.dest : `skipped (${docs.reason})`}\n` +
             `  daemon plist ${plistChanged ? 'written' : 'unchanged (byte-identical — no write, no BTM notification)'}: ${plist}\n` +
             `  (NOT loaded — a live daemon migration is a separate step: launchctl bootstrap gui/$(id -u) ${plist})\n`,
         )
