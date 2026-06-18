@@ -2,8 +2,9 @@
 
 **Host-level core for a team of AI agents on one machine.**
 
+[![CI](https://github.com/agfpd/iapeer/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/iapeer/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/iapeer)](https://www.npmjs.com/package/@agfpd/iapeer)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
+[![license](https://img.shields.io/npm/l/@agfpd/iapeer)](./LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#quick-start)
 
 iapeer keeps a team of AI agents, humans, and services on one host **always reachable — every one of them a single message away.** Each participant is a **peer**: a Claude Code or Codex CLI agent, a person on Telegram, or a scheduler/watcher service. Any agent reaches any other with one call — `send_to_peer(<name>, <text>)` — and a peer that is asleep is still reachable: the daemon wakes it and delivers. Agents on Claude and on Codex — different AI runtimes from different vendors — talk as equal peers; humans take part over Telegram, or directly in the terminal — attached to a peer's live session with `iapeer attach`.
