@@ -1,0 +1,52 @@
+name: Deploy installer to Pages
+
+# Serves the public installer at https://agfpd.github.io/iapeer/install.sh by
+# uploading install.sh STRAIGHT FROM main — so the served bytes are, by
+# construction, the same bytes reviewable at github.com/agfpd/iapeer/blob/main/install.sh.
+# (curl|sh review-trust: what a cautious user reads on main IS what runs. No
+# mirror branch, no drift.) Deploys a fixed artifact via Actions — independent of
+# the flaky Jekyll-from-root page build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage site (install.sh verbatim from main + a redirect index)
+        run: |
+          mkdir -p _site
+          cp install.sh _site/install.sh
+          touch _site/.nojekyll
+          printf '%s\n' \
+            '<!doctype html>' \
+            '<meta charset="utf-8">' \
+            '<meta http-equiv="refresh" content="0; url=https://github.com/agfpd/iapeer">' \
+            '<title>iapeer</title>' \
+            '<p>iapeer — see <a href="https://github.com/agfpd/iapeer">github.com/agfpd/iapeer</a>.' \
+            'Install (macOS): <code>curl -fsSL https://agfpd.github.io/iapeer/install.sh | sh</code></p>' \
+            > _site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
