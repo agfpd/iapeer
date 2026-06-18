@@ -943,6 +943,7 @@ const USAGE = `usage: iapeer <verb> [args]
   install                                                        build binary + global scaffold + daemon plist (one bootstrap)
   update [version] [--force]                                     pull latest (or exact) @agfpd/iapeer from npm + restart daemon + recycle owned infra jobs
   rollback                                                       revert to the previous binary (.prev) + restart daemon + recycle owned infra jobs
+  uninstall [--dry-run] [--yes] [--remove-codesign-identity]     remove THIS foundation install (binary, ~/.iapeer, daemon plist, PATH lines); refuses if a persistent-peer fleet is present
   version | --version | -v                                       print the installed binary's version
   help | --help | -h                                             print this usage (works appended to any verb; executes nothing)
   daemon [--install-plist]                                       run the host-wide HTTP-MCP router (launchd-held)
@@ -1638,6 +1639,53 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const failed = restart.state === 'failed' || infraFailed
         ;(failed ? errOut : out)(msg)
         return failed ? 1 : 0
+      }
+      case 'uninstall': {
+        // Symmetric foundation removal (namespace-safe; REFUSES on a foreign fleet).
+        // DESTRUCTIVE — removes ~/.iapeer (all peers/memory/logs). --dry-run previews;
+        // --yes skips the confirm; --remove-codesign-identity also drops the shared
+        // agfpd signing identity (otherwise kept).
+        const { planUninstall, executeUninstall } = await import('../uninstall/index.ts')
+        const removeCodesign = flags['remove-codesign-identity'] === true
+        const plan = planUninstall({ env, removeCodesignIdentity: removeCodesign })
+        if (plan.refused) {
+          errOut(`uninstall refused — ${plan.refused.reason}\n`)
+          return 1
+        }
+        out('iapeer uninstall — will remove:\n')
+        for (const it of plan.items) {
+          const mark = it.present ? '•' : '·'
+          const tail = it.detail ? ` — ${it.detail}` : it.present ? '' : ' — already gone'
+          out(`  ${mark} ${it.what}${it.path ? `  (${it.path})` : ''}${tail}\n`)
+        }
+        if (flags['dry-run'] === true) {
+          out('\n(dry-run — nothing removed)\n')
+          return 0
+        }
+        if (flags.yes !== true) {
+          if (process.stdin.isTTY !== true) {
+            errOut('\nuninstall is destructive (removes ~/.iapeer) — re-run with --yes in a non-interactive shell.\n')
+            return 2
+          }
+          const { createInterface } = await import('node:readline/promises')
+          const rl = createInterface({ input: process.stdin, output: process.stdout })
+          let answer = ''
+          try {
+            answer = (await rl.question('\nThis permanently removes iapeer and ALL its data. Continue? [y/N] ')).trim().toLowerCase()
+          } finally {
+            rl.close()
+          }
+          if (answer !== 'y' && answer !== 'yes') {
+            out('uninstall aborted.\n')
+            return 1
+          }
+        }
+        const res = executeUninstall({ env, removeCodesignIdentity: removeCodesign })
+        for (const r of res.removed) out(`  removed: ${r}\n`)
+        for (const s of res.skipped) out(`  skipped (absent): ${s}\n`)
+        for (const f of res.failed) errOut(`  FAILED: ${f.what} — ${f.detail}\n`)
+        out(res.failed.length ? '\nuninstall finished with errors (see above).\n' : '\niapeer uninstalled. (bun left in place.)\n')
+        return res.failed.length ? 1 : 0
       }
       case 'install': {
         // UNIFIED foundation install (contract Установка §1 — "один npx ставит

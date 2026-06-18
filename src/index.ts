@@ -23,6 +23,8 @@ export * from './init/index.ts'
 export * from './install/index.ts'
 // Update — the cloud-only deploy path (`iapeer update`: npm latest → rebuild → restart).
 export * from './update/index.ts'
+// Uninstall — symmetric foundation removal (namespace-safe; refuses on a foreign fleet).
+export * from './uninstall/index.ts'
 // Onboard — the host-phase (idempotent marketplace registration in claude + codex).
 export * from './onboard/index.ts'
 // Memory slot — the declarative provider slot (контракт «Слот памяти»): status read + onboard step.
