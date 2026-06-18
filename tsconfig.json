@@ -4,6 +4,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
@@ -14,5 +16,5 @@
     "types": ["bun", "node"],
     "lib": ["ESNext"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }

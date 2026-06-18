@@ -1002,6 +1002,24 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
   try {
     switch (verb) {
       case 'onboard': {
+        // Interactive TUI wizard (Фаза TUI-редизайн). OPT-IN during dev via
+        // IAPEER_ONBOARD_WIZARD=1; routed ONLY in a real interactive terminal and
+        // never for an automation path (--accept-risk / --dry-run / --no-memory /
+        // --infra) which stay on the deterministic linear flow below. The wizard
+        // owns its own gate screen, so we route BEFORE the readline gate. It fails
+        // closed: no real TTY → WIZARD_NOT_INTERACTIVE → fall through to linear.
+        const wizardOptIn = /^(1|true|yes)$/i.test((env.IAPEER_ONBOARD_WIZARD ?? '').trim())
+        const automationFlag =
+          flags['accept-risk'] === true ||
+          flags['dry-run'] === true ||
+          flags['no-memory'] === true ||
+          typeof flags.infra === 'string'
+        if (wizardOptIn && !automationFlag && process.stdin.isTTY === true && process.stdout.isTTY === true) {
+          const { runOnboardWizard, WIZARD_NOT_INTERACTIVE } = await import('../tui/onboard/run.tsx')
+          const wc = await runOnboardWizard({ env })
+          if (wc !== WIZARD_NOT_INTERACTIVE) return wc
+          // not a real interactive TTY after all → linear path below
+        }
         // SECURITY GATE (pre-release): the operator must consciously accept the risk of
         // beta infra with live agents BEFORE onboard mutates the host. --accept-risk /
         // IAPEER_ACCEPT_RISK accepts non-interactively (one-liner installers / CI); a
