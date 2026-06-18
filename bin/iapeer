@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# npx @agfpd/iapeer bootstrap.
+#
+# Runs the iapeer foundation CLI from the package SOURCE via bun (the foundation is a
+# bun project; there is no precompiled JS shipped). A BARE invocation (`npx
+# @agfpd/iapeer`, no args) runs the `install` verb — compile the stable
+# ~/.local/bin/iapeer binary + the global ~/.iapeer scaffold + the daemon plist —
+# implementing the `npx @agfpd/iapeer` install contract. Any args pass straight through
+# to the CLI (`npx @agfpd/iapeer onboard`, `… create <p>`, …).
+set -euo pipefail
+
+# Resolve the real path of this script BEFORE computing the package root. npm/npx
+# expose the bin as a SYMLINK at node_modules/.bin/iapeer → ../@agfpd/iapeer/bin/iapeer;
+# without resolving it, dirname/.. lands on node_modules (not the package dir) and
+# "$PKG_ROOT/src/cli/index.ts" points at node_modules/src/... → "Module not found".
+# Walk the symlink chain so PKG_ROOT is always the actual package directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PKG_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+CLI="$PKG_ROOT/src/cli/index.ts"
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "iapeer: 'bun' is required on PATH to run the foundation CLI — install it from https://bun.sh" >&2
+  exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+  # Bare bootstrap → install the foundation (binary + scaffold + daemon plist).
+  exec bun "$CLI" install
+fi
+
+exec bun "$CLI" "$@"

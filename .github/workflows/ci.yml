@@ -1,0 +1,22 @@
+name: CI
+
+# Runs the test + typecheck gate on every push to main and on PRs — a safety net
+# independent of any local machine (the local `preversion` hook gates releases; this
+# gates the repo itself). macOS runner: the foundation is macOS-targeted (launchd /
+# tmux); a green CI must reflect the real platform.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run typecheck

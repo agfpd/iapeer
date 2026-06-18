@@ -1,0 +1,1970 @@
+// iapeer CLI — the unified operator/agent entrypoint (`iapeer <verb> …`, contract
+// Примитивы §Карта verbs). Thin verbs over the foundation primitives: list (registry
+// + liveness + C1 stopped), stop/start (C1 durable flag for warm; launchctl for
+// always-on), send (routeSend fallback). init delegates to src/init; launch (folder)
+// and attach (last-active resume) land in the next increment.
+//
+// FLEET SAFETY (H4): the live persistent-peer fleet is launchd-managed (com.iapeer.<p>
+// plists the foundation does NOT own). stop/start REFUSE such a peer — the foundation
+// is read-only for it; stopping it would fight PP's KeepAlive / tear a live telegram
+// bridge off launchd. Only foundation-owned peers (warm no-plist, or our own
+// sentinel-marked always-on plist) are stop/start-able.
+
+import { spawnSync } from 'child_process'
+import { existsSync, readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import {
+  isInfraRuntime,
+  isRuntime,
+  type Intelligence,
+  type Runtime,
+} from '../core/constants.ts'
+import { IAPEER_VERSION } from '../core/version.ts'
+import { recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaemonHealthy } from '../update/index.ts'
+import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
+import { ensureGlobalIapScaffold } from '../storage/index.ts'
+import { findPeer, readPeersIndex, removePeer, type PeerRecord } from '../registry/index.ts'
+import { compactDoneBaseline, isPeerLive, routeControl, routeSend, waitForCompactDone, type WakeFn } from '../transport/index.ts'
+import {
+  attachPeer,
+  clearIdleReaped,
+  clearNewEager,
+  clearStopped,
+  folderLaunch,
+  hasIdleReaped,
+  isLaunchdManaged,
+  isEphemeralPeer,
+  isStopped,
+  killSession,
+  lastActiveRuntime,
+  loadLifecycleConfig,
+  purgeIdentityState,
+  removeSessionState,
+  setEphemeralArmed,
+  setFreshNext,
+  setIdleReaped,
+  setNewEager,
+  setStopped,
+  wakeOrSpawn,
+  type WakeResult,
+} from '../lifecycle/index.ts'
+import { getAdapter } from '../launch/index.ts'
+import { hostRunDir, hostSessionAlive } from '../launch/ptyHost.ts' // spawn-flip Ф0b-3: host-aware attach
+import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
+import { cycleDaemon, isFoundationOwnedPlist, launchctlBootstrap, launchdLabel, launchdPlistPath } from '../launch/launchd.ts'
+import { readPeerProfile, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
+import { peerProfilePath } from '../storage/index.ts'
+import {
+  isConformant,
+  migrateProfileRuntimeField,
+  reconcileIndex,
+  reindexFromLocals,
+  validateProfileStandard,
+} from '../identity/profileStandard.ts'
+import { runAlwaysOn } from '../launch/launchdRun.ts'
+import { ensureDaemonStarted, installDaemonPlist, startConfiguredDaemon } from '../daemon/main.ts'
+import { MARKETPLACE_NAME, onboardHost, runtimeAuthNote, tccFullDiskAccessNote } from '../onboard/index.ts'
+import { probeFullDiskAccess, readMemoryProvider } from '../status/index.ts'
+import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
+import { pluginLogsDir } from '../storage/index.ts'
+
+function infraRecycleNote(infra: readonly { personality: string; state: string; detail?: string }[] | undefined): string {
+  if (!infra?.length) return ''
+  const touched = infra.filter(i => i.state === 'restarted').map(i => i.personality)
+  const failed = infra.filter(i => i.state === 'failed')
+  const passive = infra.filter(i => i.state !== 'restarted' && i.state !== 'failed')
+  const parts: string[] = []
+  if (touched.length) parts.push(`infra recycled: ${touched.join(', ')}`)
+  if (passive.length) parts.push(`infra ${passive.map(i => `${i.personality} ${i.state}`).join(', ')}`)
+  if (failed.length) parts.push(`infra FAILED: ${failed.map(i => `${i.personality}${i.detail ? ` (${i.detail})` : ''}`).join('; ')}`)
+  return parts.length ? `; ${parts.join('; ')}` : ''
+}
+
+function infraRecycleFailed(infra: readonly { state: string }[] | undefined): boolean {
+  return (infra ?? []).some(i => i.state === 'failed')
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// list — registry + per-runtime liveness (contract Примитивы §list)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type RuntimeLiveness = 'live' | 'asleep' | 'stopped'
+export interface RuntimeStatus {
+  runtime: Runtime
+  status: RuntimeLiveness
+}
+export interface PeerListing {
+  personality: string
+  default_runtime: Runtime
+  /** Runtime with the freshest activity (what `attach` resumes); undefined if none. */
+  last_active_runtime?: Runtime
+  intelligence: Intelligence
+  description: string
+  /** The peer's working directory (registry fact). Machine-readable so host-local
+   *  tooling (e.g. the memory provider's init/verify rendering doctrine into
+   *  <cwd>/.iapeer/) keys on the REGISTRY instead of copying the layout default —
+   *  a layout change must not silently strand consumers. */
+  cwd: string
+  runtimes: RuntimeStatus[]
+}
+
+export interface CliEnvOptions {
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * Gather the peer listing: one row per registered peer, per-runtime liveness (live
+ * via tmux has-session / stopped via the C1 durable flag / else asleep) and the
+ * last-active runtime by transcript-mtime (the same proxy `attach` keys on).
+ */
+export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const index = readPeersIndex({ env })
+  return index.peers.map(peer => {
+    const runtimes: RuntimeStatus[] = peer.runtimes.map(rt => ({
+      runtime: rt,
+      status: isPeerLive(rt, peer.personality, cfg.sockDir)
+        ? 'live'
+        : isStopped(cfg, buildProcessAddress(rt, peer.personality))
+          ? 'stopped'
+          : 'asleep',
+    }))
+    let lastActive: Runtime | undefined
+    let bestMt = -1
+    for (const rt of peer.runtimes) {
+      try {
+        const mt = getAdapter(rt).newestActivityMtime(peer.cwd)
+        if (mt !== null && mt > bestMt) {
+          bestMt = mt
+          lastActive = rt
+        }
+      } catch {
+        /* no adapter / no proxy for this runtime */
+      }
+    }
+    return {
+      personality: peer.personality,
+      default_runtime: peer.runtime,
+      last_active_runtime: lastActive,
+      intelligence: peer.intelligence,
+      description: peer.description,
+      cwd: peer.cwd,
+      runtimes,
+    }
+  })
+}
+
+const GLYPH: Record<RuntimeLiveness, string> = { live: '●', asleep: '○', stopped: '✕' }
+
+/** Render the scriptable list table (non-tty default). */
+export function formatListTable(rows: PeerListing[]): string {
+  if (rows.length === 0) return 'no peers registered\n'
+  const lines = rows.map(r => {
+    const status = r.runtimes.map(s => `${GLYPH[s.status]} ${s.runtime}`).join('  ')
+    const la = r.last_active_runtime ? ` last-active:${r.last_active_runtime}` : ''
+    return `${r.personality}  [${r.default_runtime}]  ${r.intelligence}  ${status}${la}`
+  })
+  return lines.join('\n') + '\n'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stop / start — dispatch by runtime class, with the FLEET GUARD (H4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface StopStartOutcome {
+  personality: string
+  runtime: Runtime
+  action: 'stopped' | 'started' | 'bootout' | 'bootstrap' | 'refused-foreign-launchd'
+  reason?: string
+}
+
+function uid(): string {
+  const r = spawnSync('id', ['-u'], { encoding: 'utf8' })
+  const u = (r.stdout ?? '').trim()
+  // Audit #29: NEVER fall back to '0' — that would aim launchctl bootout/bootstrap at
+  // the ROOT gui domain. A non-numeric/empty result means `id -u` failed; refuse.
+  if (!/^\d+$/.test(u)) {
+    throw new Error('cannot resolve the current uid (id -u failed) — refusing to target launchctl at an unknown domain')
+  }
+  return u
+}
+
+/** FLEET GUARD: a peer launchd-managed by a NON-foundation plist (persistent-peer)
+ *  is off-limits to stop/start — the foundation is read-only for it (H4). */
+function isForeignLaunchd(personality: string, env: NodeJS.ProcessEnv): boolean {
+  return isLaunchdManaged(personality, env) && !isFoundationOwnedPlist(launchdPlistPath(personality, env))
+}
+
+function targetRuntimes(peer: PeerRecord, runtime: string | undefined): Runtime[] {
+  if (runtime) {
+    // Audit #28: an explicit runtime the peer does not declare would act on a PHANTOM
+    // identity — a spurious durable stop-flag or a no-op bootout on a label that isn't
+    // this peer's. Refuse instead of silently targeting a non-existent runtime.
+    if (peer.runtime !== runtime && !peer.runtimes.includes(runtime as Runtime)) {
+      throw new Error(
+        `peer "${peer.personality}" does not declare runtime "${runtime}" (declared: ${peer.runtimes.join(', ')})`,
+      )
+    }
+    return [runtime as Runtime]
+  }
+  return peer.runtimes
+}
+
+/**
+ * stop <peer> [runtime]: warm runtime → durable C1 stop flag + kill the session (the
+ * daemon will not wake it until `start`); always-on (infra, foundation-owned) → launchctl
+ * bootout + kill. REFUSES a foreign-launchd peer (live PP fleet) — fleet guard.
+ */
+export function stopPeer(personality: string, runtime: string | undefined, opts: CliEnvOptions = {}): StopStartOutcome[] {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  if (isForeignLaunchd(personality, env)) {
+    return [{ personality, runtime: peer.runtime, action: 'refused-foreign-launchd', reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation does not stop it` }]
+  }
+  const out: StopStartOutcome[] = []
+  for (const rt of targetRuntimes(peer, runtime)) {
+    const identity = buildProcessAddress(rt, personality)
+    const sock = buildSocketPath(rt, personality, cfg.sockDir)
+    if (isInfraRuntime(rt)) {
+      // Audit #13: do NOT swallow the launchctl result. (bootout returns non-zero when
+      // the service was already not loaded — benign for stop — but surface the detail in
+      // the reason rather than silently claiming success.)
+      const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
+      killSession(sock, identity)
+      out.push({ personality, runtime: rt, action: 'bootout', reason: r.status === 0 ? undefined : `launchctl bootout exited ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''}` })
+    } else {
+      // A deliberate stop is a CLEAN PARK, not a death (stop→start must survive ≥
+      // idle-reap): park-mark BEFORE the kill so the post-`start`
+      // wake RESUMES, and drop the supervise session-state with the session so
+      // the tick never tags this kill as a death (crash-loop ring stays clean,
+      // no reaped-gone death class for a state the daemon knows 100%).
+      setStopped(cfg, identity)
+      setIdleReaped(cfg, identity)
+      killSession(sock, identity)
+      removeSessionState(cfg, identity)
+      out.push({ personality, runtime: rt, action: 'stopped' })
+    }
+  }
+  return out
+}
+
+/**
+ * start <peer> [runtime]: warm runtime → clear the C1 stop flag (wakeable again on
+ * the next message); always-on → launchctl bootstrap the plist. REFUSES a foreign-
+ * launchd peer (fleet guard).
+ */
+export function startPeer(personality: string, runtime: string | undefined, opts: CliEnvOptions = {}): StopStartOutcome[] {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  if (isForeignLaunchd(personality, env)) {
+    return [{ personality, runtime: peer.runtime, action: 'refused-foreign-launchd', reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation does not start it` }]
+  }
+  const out: StopStartOutcome[] = []
+  for (const rt of targetRuntimes(peer, runtime)) {
+    const identity = buildProcessAddress(rt, personality)
+    if (isInfraRuntime(rt)) {
+      const plist = launchdPlistPath(personality, env)
+      // UNDEAD-JOB-SAFE start: a bootstrap right after a bootout used to hit the
+      // still-dismantling job (exit 5 I/O
+      // error) and leave the router DOWN. launchctlBootstrap now waits for the
+      // job to vanish and retries with backoff (~22 s budget); a failure after
+      // every attempt is LOUD with the manual rescue recipe. (Also gains the
+      // sentinel fleet-guard + sandbox guard the raw spawn never had.)
+      const r = launchctlBootstrap(personality, plist, env)
+      const ok = r.state === 'loaded' || r.state === 'already-loaded' || r.state === 'skipped-sandbox'
+      out.push({
+        personality,
+        runtime: rt,
+        action: 'bootstrap',
+        reason: ok
+          ? undefined
+          : `launchctl bootstrap FAILED${r.detail ? `: ${r.detail}` : ''} — peer not started; manual rescue: launchctl bootstrap gui/$(id -u) ${plist}`,
+      })
+    } else {
+      clearStopped(cfg, identity)
+      out.push({ personality, runtime: rt, action: 'started' })
+    }
+  }
+  return out
+}
+
+export interface RefreshOutcome {
+  personality: string
+  runtime: Runtime
+  action: 'refresh-armed' | 'skipped-non-agentic'
+}
+
+/** Runtimes that consume the layered system prompt (doctrine/fragments) — the only ones a soft-reload
+ *  affects. Routers (notifier/telegram) and absent runtimes carry no doctrine. */
+const AGENTIC_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex'])
+
+/**
+ * refresh <peer> [runtime] (or --all): arm a LAZY soft-reload. Each agentic (claude/codex) runtime of the
+ * peer comes up FRESH on its NEXT natural wake — re-reading doctrine/fragments from disk — WITHOUT killing
+ * the live session and WITHOUT eager-relaunch / burst-wake. Non-agentic runtimes (notifier/telegram/absent)
+ * are skipped (no doctrine). H4-safe: writes a `.fresh-next` marker only — never wakes / reaps / kills, so
+ * it is inert for launchd-managed peers (their lifecycle is KeepAlive's, resolveWakeMode is not their path).
+ * The lazy counterpart to `iapeer new` (hard kill) and self-fresh/.new-eager (eager relaunch + burst wake).
+ */
+export function refreshPeer(personality: string, runtime: string | undefined, opts: CliEnvOptions = {}): RefreshOutcome[] {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  const out: RefreshOutcome[] = []
+  for (const rt of targetRuntimes(peer, runtime)) {
+    if (!AGENTIC_RUNTIMES.has(rt)) {
+      out.push({ personality, runtime: rt, action: 'skipped-non-agentic' })
+      continue
+    }
+    setFreshNext(cfg, buildProcessAddress(rt, personality))
+    out.push({ personality, runtime: rt, action: 'refresh-armed' })
+  }
+  return out
+}
+
+export interface AddRuntimeOutcome {
+  personality: string
+  action: 'added' | 'already' | 'skipped-infra-peer' | 'failed'
+  detail?: string
+}
+
+/**
+ * add-runtime <runtime> (--peer <p> | --all) — give EXISTING peers an additional
+ * AGENTIC runtime in one command (the fleet-switch enabler — a claude-only peer
+ * has nothing to switch to).
+ * Per target: initPeer({cwd, runtime}) — ensurePeerProfile MERGES runtimes (the
+ * default_runtime lever is deliberately untouched — capability ≠ routing flip; see
+ * `default-runtime`), scaffolds the runtime scope, and the codex side runs its
+ * whole birth chain: cwd pre-trust, native-memory lever, memory provision
+ * (occasion=birth), host-wide MCP block + update-check-off. Idempotent by
+ * construction (merge + append-if-absent everywhere). Infra PEERS (telegram/
+ * notifier defaults) are skipped — adding an agentic runtime to a router peer is
+ * an operator decision, not a sweep.
+ */
+export async function addRuntime(
+  runtime: string,
+  opts: CliEnvOptions & { peer?: string; all?: boolean },
+): Promise<AddRuntimeOutcome[]> {
+  const env = opts.env ?? process.env
+  if (!isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
+  if (isInfraRuntime(runtime)) {
+    throw new Error(`"${runtime}" is an infra runtime — infra presence is operator-add via \`iapeer create\` (plist semantics), not a sweep`)
+  }
+  const index = readPeersIndex({ env })
+  const targets = opts.all === true ? index.peers : index.peers.filter(p => p.personality === opts.peer)
+  if (targets.length === 0) throw new Error(opts.peer ? `peer "${opts.peer}" is not registered` : 'no targets — pass --peer <p> or --all')
+  // CROSS-PEER operation: strip the CALLER's identity env (PEER_*) — an operator
+  // (or an agent peer) running this from inside their own session would otherwise
+  // poison the TARGET's ensurePeerProfile identity check (the caller's
+  // PEER_PERSONALITY would mismatch the target personality → failed).
+  const cleanEnv: NodeJS.ProcessEnv = { ...env }
+  delete cleanEnv.PEER_PERSONALITY
+  delete cleanEnv.PEER_RUNTIME
+  delete cleanEnv.PEER_IDENTITY
+  const { initPeer } = await import('../init/index.ts')
+  const out: AddRuntimeOutcome[] = []
+  for (const p of targets) {
+    if (isInfraRuntime(p.runtime)) {
+      out.push({ personality: p.personality, action: 'skipped-infra-peer', detail: `default runtime "${p.runtime}" is infra` })
+      continue
+    }
+    if (p.runtimes.includes(runtime as Runtime)) {
+      out.push({ personality: p.personality, action: 'already' })
+      continue
+    }
+    try {
+      const warns: string[] = []
+      await initPeer({ cwd: p.cwd, runtime: runtime as Runtime, env: cleanEnv, warn: m => warns.push(m) })
+      out.push({ personality: p.personality, action: 'added', detail: warns.length ? warns.join(' | ') : undefined })
+    } catch (e) {
+      out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  // Self-heal the registry from the locals: provisionPeer's upsert sets the record's
+  // default to the PROVISIONED runtime («args.runtime wins» — right for births, wrong
+  // here: add-runtime is capability-only and must NOT flip routing). The reindex
+  // REPLACE projection restores the local profile's untouched default (otherwise
+  // the registry default flips to the added runtime while the local keeps its own).
+  if (out.some(o => o.action === 'added')) await reindexFromLocals({ env })
+  return out
+}
+
+export interface DefaultRuntimeOutcome {
+  personality: string
+  action: 'flipped' | 'already' | 'refused-undeclared-runtime' | 'skipped-infra-peer' | 'failed'
+  detail?: string
+}
+
+/**
+ * default-runtime <runtime> (--peer <p> | --all) — flip the PRIMARY lever
+ * (contract Идентичность: primary держит default_runtime, НЕ порядок runtimes[]).
+ * This is the routing/wake/first-launch default — the
+ * actual fleet-switch moment is a mass flip of exactly this field. The local
+ * profile is rewritten through the H1 merge-writer (default_runtime + the legacy
+ * in-sync mirror; normalizeRuntimes re-prepends the new default), then the
+ * registry is self-healed from the flipped locals (the reindex REPLACE rail —
+ * same as `verify --fix`), so routing flips in the same command. REFUSES a peer
+ * that does not declare the runtime (add-runtime first) and skips infra peers.
+ * Symmetric back: `default-runtime claude --all` reverts the fleet.
+ */
+export async function defaultRuntime(
+  runtime: string,
+  opts: CliEnvOptions & { peer?: string; all?: boolean },
+): Promise<DefaultRuntimeOutcome[]> {
+  const env = opts.env ?? process.env
+  if (!isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
+  if (isInfraRuntime(runtime)) throw new Error(`"${runtime}" is an infra runtime — not a warm routing default`)
+  const index = readPeersIndex({ env })
+  const targets = opts.all === true ? index.peers : index.peers.filter(p => p.personality === opts.peer)
+  if (targets.length === 0) throw new Error(opts.peer ? `peer "${opts.peer}" is not registered` : 'no targets — pass --peer <p> or --all')
+  const out: DefaultRuntimeOutcome[] = []
+  for (const p of targets) {
+    if (isInfraRuntime(p.runtime)) {
+      out.push({ personality: p.personality, action: 'skipped-infra-peer', detail: `default runtime "${p.runtime}" is infra` })
+      continue
+    }
+    try {
+      const profile = readPeerProfile(p.cwd)
+      if (!profile) {
+        out.push({ personality: p.personality, action: 'failed', detail: `no local profile at ${p.cwd}` })
+        continue
+      }
+      if (profile.runtime === runtime) {
+        out.push({ personality: p.personality, action: 'already' })
+        continue
+      }
+      if (!profile.runtimes.includes(runtime as Runtime)) {
+        out.push({
+          personality: p.personality,
+          action: 'refused-undeclared-runtime',
+          detail: `declares [${profile.runtimes.join(', ')}] — run \`iapeer add-runtime ${runtime} --peer ${p.personality}\` first`,
+        })
+        continue
+      }
+      writePeerProfileAtomic(p.cwd, { ...profile, runtime: runtime as Runtime })
+      out.push({ personality: p.personality, action: 'flipped' })
+    } catch (e) {
+      out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  // Self-heal the registry from the flipped locals so routing flips in the same
+  // command (REPLACE projection — the verify --fix rail).
+  if (out.some(o => o.action === 'flipped')) await reindexFromLocals({ env })
+  return out
+}
+
+export interface NewPeerOutcome {
+  personality: string
+  runtime: string
+  action: 'fresh' | 'refused-foreign-launchd' | 'refused-infra' | 'refused-undeclared-runtime' | 'failed'
+  reason?: string
+}
+
+/**
+ * new <peer> [runtime] — the UNCONDITIONAL fresh-restart control command
+ * (docs/Control-команды §new).
+ *
+ * The emergency lever for a HUNG or dead agent session: /alias-new covers only
+ * the COOPERATIVE path (a live peer reads the expanded prompt and runs
+ * `iapeer self-fresh`); a stuck/raving/dead peer never reads a prompt — this
+ * command restarts it MECHANICALLY, bypassing the peer entirely:
+ *   fresh-slate markers (un-park C1 stop, clear stale .idle-reaped/.new-eager) →
+ *   canary-clean teardown of any live session (killSession — a deliberate kill,
+ *   never a death class; session-state dropped so supervise stays silent) →
+ *   wakeOrSpawn(resume:false, task:'') — fresh BY CONSTRUCTION, the same recipe
+ *   as the eager relaunch (the C2 initial_prompt seeds the first turn).
+ *
+ * exit-0 contract: success ⟺ the fresh session is UP
+ * and READY (verified by the wake's ready gate, not merely scheduled) — for a
+ * sleeping, dead AND hung target alike. Duration is a real TUI boot: typically
+ * 5–30 s, bounded by cfg.bootDeadlineSecs. Idempotent in effect: each repeat
+ * leaves exactly one fresh live session (concurrent calls serialize on the
+ * wake lock). REFUSES foreign-launchd peers (fleet guard) and infra runtimes
+ * (launchd-held — their restart is `launchctl kickstart`'s domain), like
+ * stop/start; an explicitly-passed runtime the peer does not declare is an
+ * explicit refusal (never a silent launch of an undeclared runtime).
+ */
+export async function newPeer(
+  personality: string,
+  runtime: string | undefined,
+  opts: CliEnvOptions & { wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: false }) => Promise<WakeResult> } = {},
+): Promise<NewPeerOutcome> {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  if (isForeignLaunchd(personality, env)) {
+    return {
+      personality,
+      runtime: peer.runtime,
+      action: 'refused-foreign-launchd',
+      reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation does not restart it`,
+    }
+  }
+  if (runtime && !isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
+  const rt: Runtime = (runtime as Runtime | undefined) ?? peer.runtime
+  if (!peer.runtimes.includes(rt)) {
+    return {
+      personality,
+      runtime: rt,
+      action: 'refused-undeclared-runtime',
+      reason: `peer "${personality}" does not declare runtime "${rt}" (declared: ${peer.runtimes.join(', ')})`,
+    }
+  }
+  if (isInfraRuntime(rt)) {
+    return {
+      personality,
+      runtime: rt,
+      action: 'refused-infra',
+      reason: `infra runtime "${rt}" is launchd-held — restart it with: launchctl kickstart -k gui/$(id -u)/${launchdLabel(personality)}`,
+    }
+  }
+  const identity = buildProcessAddress(rt, personality)
+  const sock = buildSocketPath(rt, personality, cfg.sockDir)
+  // Fresh slate: an explicit operator /new outranks a C1 park (it demands a live
+  // fresh session NOW) and any stale death/fresh markers (the wake below is fresh
+  // by construction — markers must not leak into a LATER wake's decision).
+  clearStopped(cfg, identity)
+  clearIdleReaped(cfg, identity)
+  clearNewEager(cfg, identity)
+  killSession(sock, identity) // canary-clean deliberate teardown; no-op when dead
+  removeSessionState(cfg, identity) // never a death class — supervise stays silent
+  const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
+  const r = await wake({ personality, runtime: rt, task: '', resume: false })
+  if (r.status !== 'READY') {
+    return { personality, runtime: rt, action: 'failed', reason: r.reason ?? 'wake failed' }
+  }
+  return { personality, runtime: rt, action: 'fresh' }
+}
+
+export interface CompactPeerOutcome {
+  personality: string
+  runtime: string
+  action: 'compacted' | 'nothing-to-compact' | 'refused-foreign-launchd' | 'refused-infra' | 'refused-undeclared-runtime' | 'failed'
+  woke?: boolean
+  reason?: string
+}
+
+/**
+ * compact <peer> [runtime] — compact the DIALOGUE, not merely the currently-live
+ * session. A live target receives the in-session `/compact` control; a cleanly
+ * idle-reaped target is first resumed into the same dialogue, then controlled.
+ * SUCCESS is gated on actual compaction completion (structured transcript marker
+ * after the command + input surface ready), not on keystrokes being accepted. A
+ * crashed / never-run / non-resumable target returns an honest "nothing to compact"
+ * instead of starting a fresh empty session and compacting that.
+ */
+export async function compactPeer(
+  personality: string,
+  runtime: string | undefined,
+  opts: CliEnvOptions & {
+    wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: true }) => Promise<WakeResult>
+    controlFn?: typeof routeControl
+    compactDoneFn?: typeof waitForCompactDone
+  } = {},
+): Promise<CompactPeerOutcome> {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  if (isForeignLaunchd(personality, env)) {
+    return {
+      personality,
+      runtime: peer.runtime,
+      action: 'refused-foreign-launchd',
+      reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation does not control it`,
+    }
+  }
+  if (runtime && !isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
+  if (runtime && peer.runtime !== runtime && !peer.runtimes.includes(runtime as Runtime)) {
+    return {
+      personality,
+      runtime,
+      action: 'refused-undeclared-runtime',
+      reason: `peer "${personality}" does not declare runtime "${runtime}" (declared: ${peer.runtimes.join(', ')})`,
+    }
+  }
+
+  const control = opts.controlFn ?? routeControl
+  const compactDone = opts.compactDoneFn ?? waitForCompactDone
+  const waitDone = (rt: Runtime, baseline: ReturnType<typeof compactDoneBaseline>, woke: boolean): CompactPeerOutcome | null => {
+    const done = compactDone(
+      {
+        personality,
+        runtime: rt,
+        address: buildProcessAddress(rt, personality),
+        socketPath: buildSocketPath(rt, personality, cfg.sockDir),
+      },
+      peer.cwd,
+      baseline,
+      { env },
+    )
+    if (!done.ok) return { personality, runtime: rt, action: 'failed', woke, reason: done.error.message }
+    return null
+  }
+  const liveRuntimes = peer.runtimes.filter(rt => isPeerLive(rt, personality, cfg.sockDir))
+  if (runtime ? liveRuntimes.includes(runtime as Runtime) : liveRuntimes.length > 0) {
+    const rt = (runtime as Runtime | undefined)
+      ?? (liveRuntimes.includes(peer.runtime) ? peer.runtime : liveRuntimes.length === 1 ? liveRuntimes[0] : undefined)
+    if (!rt) {
+      return {
+        personality,
+        runtime: peer.runtime,
+        action: 'failed',
+        reason: `${personality} is online in multiple runtimes (${liveRuntimes.join(', ')}) — specify runtime`,
+      }
+    }
+    const baseline = compactDoneBaseline(rt, peer.cwd, { env })
+    const r = await control(personality, rt, { name: 'compact' })
+    if (!r.ok) return { personality, runtime: rt, action: 'failed', reason: r.error.message }
+    const waited = waitDone(r.value.controlled.runtime as Runtime, baseline, false)
+    if (waited) return waited
+    return { personality, runtime: r.value.controlled.runtime, action: 'compacted', woke: false }
+  }
+
+  const rt: Runtime = (runtime as Runtime | undefined) ?? lastActiveRuntime(peer, cfg) ?? peer.runtime
+  if (!peer.runtimes.includes(rt)) {
+    return {
+      personality,
+      runtime: rt,
+      action: 'refused-undeclared-runtime',
+      reason: `peer "${personality}" does not declare runtime "${rt}" (declared: ${peer.runtimes.join(', ')})`,
+    }
+  }
+  if (isInfraRuntime(rt)) {
+    return {
+      personality,
+      runtime: rt,
+      action: 'refused-infra',
+      reason: `infra runtime "${rt}" is launchd-held and has no compactable TUI dialogue`,
+    }
+  }
+  const identity = buildProcessAddress(rt, personality)
+  if (!hasIdleReaped(cfg, identity)) {
+    return { personality, runtime: rt, action: 'nothing-to-compact', reason: 'context is fresh; nothing to compact' }
+  }
+  const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
+  const w = await wake({ personality, runtime: rt, task: '', resume: true })
+  if (w.status !== 'READY') {
+    const reason = w.reason ?? 'wake failed'
+    if (/no .*session to resume|no transcript to resume|nothing to resume/i.test(reason)) {
+      return { personality, runtime: rt, action: 'nothing-to-compact', reason: 'context is fresh; nothing to compact' }
+    }
+    return { personality, runtime: rt, action: 'failed', reason }
+  }
+  clearIdleReaped(cfg, identity)
+  const baseline = compactDoneBaseline(rt, peer.cwd, { env })
+  const r = await control(personality, rt, { name: 'compact' })
+  if (!r.ok) return { personality, runtime: rt, action: 'failed', woke: true, reason: r.error.message }
+  const waited = waitDone(rt, baseline, true)
+  if (waited) return waited
+  return { personality, runtime: rt, action: 'compacted', woke: true }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// remove — delete a peer's record from the registry through the LOCKED writer
+// (registry.removePeer). Direct edits of peers-profiles.json are refused at
+// storage.ts:304 (locked-writer invariant); this is the operator path that used
+// to require dropping into `bun -e removePeer(...)`. The use case is reaping the
+// ephemeral zombie records a retired spawn leaves behind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RemoveOutcome {
+  personality: string
+  action: 'removed' | 'absent' | 'refused-live'
+  reason?: string
+  /** The removed peer's cwd (registry fact, captured BEFORE the removal). remove
+   *  deliberately keeps the folder — user data is never deleted by a registry reap
+   *  (say so in the output instead of leaving silent orphans). */
+  cwd?: string
+  /** v1.2: per-runtime unprovision outcomes (`<rt>:<state>`), present when the
+   *  slot declares an unprovision command (occasion=remove ran before the purge). */
+  unprovision?: string[]
+  /** Codex pre-trust cleanup outcome: 'removed' when the peer's cwd trust entry
+   *  was dropped from the host codex config; a failure detail otherwise. Absent
+   *  for non-codex peers and when no entry existed. */
+  codexTrust?: string
+  /** Codex hooks-trust cleanup outcome: `removed <n>` when pre-seeded
+   *  `[hooks.state."<cwd>/…"]` entries were dropped (trust-hooks verb is the
+   *  writer); a failure detail otherwise. Absent when nothing matched. */
+  codexHooksTrust?: string
+  /** Identity-keyed lifecycle artifacts purged with the record (state/lifecycle/
+   *  `<identity>.*` per runtime). Without this purge a NEWBORN peer reusing the
+   *  personality inherits the dead namesake's parking (defect: stale .stopped →
+   *  `mode=refused cause=stopped` on a freshly-created peer). */
+  purgedState?: string[]
+}
+
+/**
+ * remove <peer> [--force]: drop the registry record via the locked writer.
+ * IDEMPOTENT — an absent peer is a no-op success (`absent`), never an error.
+ * SAFETY: refuses a peer that is currently LIVE on any runtime — deleting a
+ * running session's record would orphan it from routing (resolveCallerIdentity /
+ * findPeer would no longer resolve it while it still runs). --force overrides.
+ * A zombie record is dead by definition, so the guard never blocks the cleanup
+ * it exists for.
+ */
+export async function removePeerCli(
+  personality: string,
+  opts: CliEnvOptions & { force?: boolean } = {},
+): Promise<RemoveOutcome> {
+  const env = opts.env ?? process.env
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) return { personality, action: 'absent' }
+  if (!opts.force) {
+    const cfg = loadLifecycleConfig(env)
+    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, personality, cfg.sockDir))
+    if (liveRt) {
+      return {
+        personality,
+        action: 'refused-live',
+        reason: `"${personality}" is LIVE on ${liveRt} — removing its registry record would orphan the running session from routing; stop it first or pass --force`,
+      }
+    }
+  }
+  await removePeer(personality, { env })
+  // v1.2 UNPROVISION joint (контракт §Provision провайдера): a provision-declaring
+  // slot gets its unprovision command per agentic runtime with occasion=remove —
+  // BEFORE purgeIdentityState, so the provider sees the peer's last consistent
+  // state while unwinding its surfaces. Best-effort: a provider hiccup must not
+  // block the reap (the outcome line says what happened; repair is the provider's
+  // verify sweep).
+  const unprovisionOutcomes: string[] = []
+  try {
+    const slot = readMemoryProvider(env)
+    if (slot?.unprovision) {
+      const { runProvisionCommand } = await import('../enable/provisionCommand.ts')
+      const agentic = peer.runtimes.filter((r): r is 'claude' | 'codex' => r === 'claude' || r === 'codex')
+      for (const rt of agentic) {
+        const o = runProvisionCommand({
+          block: slot.unprovision,
+          cwd: peer.cwd,
+          runtime: rt,
+          personality,
+          occasion: 'remove',
+          env,
+        })
+        appendLifecycleEvent(
+          pluginLogsDir('iapeer', { env }),
+          {
+            ev: 'memory-provision',
+            identity: `${rt}-${personality}`,
+            occasion: 'remove',
+            state: o.state,
+            exit: o.exitCode ?? undefined,
+            ms: o.durationMs,
+            detail: o.detail,
+          },
+          { env },
+        )
+        unprovisionOutcomes.push(`${rt}:${o.state}${o.state !== 'ok' && o.detail ? ` (${o.detail})` : ''}`)
+      }
+    }
+  } catch (e) {
+    unprovisionOutcomes.push(`failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  // Codex pre-trust cleanup (reap-side counterpart of the birth-time
+  // preTrustCodexCwd): a removed codex peer must
+  // not leave its cwd trusted in the host ~/.codex/config.toml forever. After
+  // unprovision (the provider sees the peer's last consistent state first),
+  // best-effort like everything else on this path.
+  let trustCleaned: string | undefined
+  let hooksTrustCleaned: string | undefined
+  if (peer.runtimes.includes('codex')) {
+    try {
+      const { removeCodexCwdTrust } = await import('../launch/nativeMemory.ts')
+      const t = removeCodexCwdTrust(peer.cwd, env)
+      trustCleaned = t.state === 'written' ? 'removed' : t.state === 'already' ? undefined : `${t.state}${t.detail ? ` (${t.detail})` : ''}`
+    } catch (e) {
+      trustCleaned = `failed (${e instanceof Error ? e.message : String(e)})`
+    }
+    // Same class, hooks edition: pre-seeded `[hooks.state."<cwd>/…"]` entries
+    // (trust-hooks verb) must not outlive the peer either.
+    try {
+      const { removeCodexHooksTrustUnder } = await import('../launch/codexHooksTrust.ts')
+      const h = removeCodexHooksTrustUnder(peer.cwd, env)
+      hooksTrustCleaned =
+        h.state === 'written' ? `removed ${h.removed.length}` : h.state === 'already' ? undefined : `${h.state}${h.detail ? ` (${h.detail})` : ''}`
+    } catch (e) {
+      hooksTrustCleaned = `failed (${e instanceof Error ? e.message : String(e)})`
+    }
+  }
+  // Purge identity-keyed lifecycle state WITH the record (per runtime): stale
+  // .stopped/.idle-reaped/... must never outlive the peer and ambush a future
+  // namesake (purgeIdentityState doc). After the registry write, so a failed
+  // remove never half-purges a still-registered peer.
+  const cfg = loadLifecycleConfig(env)
+  const purgedState = peer.runtimes.flatMap(rt => purgeIdentityState(cfg, buildProcessAddress(rt, personality)))
+  return {
+    personality,
+    action: 'removed',
+    cwd: peer.cwd,
+    purgedState,
+    ...(unprovisionOutcomes.length ? { unprovision: unprovisionOutcomes } : {}),
+    ...(trustCleaned ? { codexTrust: trustCleaned } : {}),
+    ...(hooksTrustCleaned ? { codexHooksTrust: hooksTrustCleaned } : {}),
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send — manual IAP send fallback (contract Примитивы §send). Goes through the
+// same router path as send_to_peer (resolve → deliver / wake), in-process so it
+// works even when the daemon HTTP listener is down. --from sets the sender.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SendOptions extends CliEnvOptions {
+  /** Sender identity `<runtime>-<personality>`; default = the cwd peer's identity. */
+  from: string
+  target: string
+  runtime?: string
+  message: string
+  topic?: string
+  attachments?: string[]
+}
+
+const cliWake: WakeFn = req =>
+  wakeOrSpawn({ personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task })
+
+export async function sendMessage(
+  opts: SendOptions,
+): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number }> {
+  const env = opts.env ?? process.env
+  const caller = resolveCallerIdentity(parseIdentity(opts.from), readPeersIndex({ env }))
+  // wake_policy:ephemeral M3 parity: the CLI path used
+  // to route an ephemeral target through the normal live/miss path — a notifier
+  // burst landed as TURNS in one live worker session instead of serializing
+  // through the disk FIFO the daemon path uses. Same seam, ONE difference: the
+  // drain kick is a NOOP here — a CLI process exits right after the ack, so an
+  // unawaited in-process wake would die with it; the daemon's supervise-tick
+  // drain scan (≤60 s) picks the queue up — the EXISTING retry path for failed
+  // kicks, not a new mechanism.
+  const { makeArmEphemeralOnDelivered, makeEphemeralRouteDeps, makeNoteLiveTopic } = await import('../daemon/main.ts')
+  const cfg = loadLifecycleConfig(env)
+  const t0 = Date.now()
+  const result = await routeSend(
+    caller,
+    {
+      personality: opts.target,
+      runtime: opts.runtime,
+      message: opts.message,
+      topic: opts.topic,
+      attachments: opts.attachments,
+    },
+    // noteLiveTopic — CLI-path parity (same seam the daemon wires): a live delivery
+    // through the CLI fallback must update the target's .topic marker too, or a
+    // daemon-restart-window send re-opens the stale-marker false-fresh.
+    { wake: cliWake, ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}), noteLiveTopic: makeNoteLiveTopic(cfg, env) },
+  )
+  // delivery.log sink — CLI-path parity (observability gap: enqueues routed
+  // through the CLI left to=<peer> at ZERO while real wakes happened; the daemon
+  // tool-path logs, this path was blind). Same fields, plus
+  // path=cli so the two entry points are distinguishable. Both branches logged.
+  const { appendDeliveryEvent } = await import('../daemon/deliverylog.ts')
+  appendDeliveryEvent(cfg.eventLogDir, {
+    ev: 'delivery',
+    path: 'cli',
+    caller: caller.address,
+    to: opts.target,
+    rt: opts.runtime,
+    ok: String(result.ok),
+    via: result.ok ? `${result.value.delivered_to.runtime}-${result.value.delivered_to.personality}` : undefined,
+    woke: result.ok ? String(result.value.woke) : undefined,
+    queued: result.ok && result.value.queued ? 'true' : undefined,
+    qkind: result.ok ? result.value.queuedBy : undefined,
+    qd: result.ok ? result.value.queueDepth : undefined,
+    ms: Date.now() - t0,
+    len: opts.message.length,
+    att: opts.attachments?.length || undefined,
+    topic: opts.topic,
+    err: result.ok ? undefined : result.error.message,
+  })
+  if (!result.ok) throw new Error(result.error.message)
+  // M2 arm-on-outbound — CLI-path parity (gap: an ephemeral worker's final reply
+  // sent through the CLI fallback — e.g. inside a daemon-restart window — never
+  // armed, so the worker idled to the unarmed bound and stalled its FIFO). Same
+  // hook the daemon path uses; ONLY on
+  // an ok outcome, errors swallowed (arming is best-effort, never fails the send).
+  try {
+    makeArmEphemeralOnDelivered(cfg)(caller)
+  } catch {
+    /* best-effort */
+  }
+  return {
+    ok: true,
+    delivered_to: result.value.delivered_to,
+    queued: result.value.queued,
+    queueDepth: result.value.queueDepth,
+  }
+}
+
+function parseIdentity(identity: string): { personality: string; runtime: Runtime } {
+  const dash = identity.indexOf('-')
+  if (dash <= 0) throw new Error(`invalid --from identity "${identity}" — expected <runtime>-<personality>`)
+  const runtime = identity.slice(0, dash)
+  if (!isRuntime(runtime)) throw new Error(`invalid runtime in --from "${identity}"`)
+  return { runtime, personality: identity.slice(dash + 1) }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI dispatch — `iapeer <verb> …`
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function parseArgs(argv: string[]): { positionals: string[]; flags: Record<string, string | true> } {
+  const positionals: string[] = []
+  const flags: Record<string, string | true> = {}
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('--')) {
+      // Audit #27: support `--key=value` so a value that itself starts with '--' (e.g.
+      // `send --message=--look-at-this`) is not silently dropped by the look-ahead form.
+      const eq = a.indexOf('=')
+      if (eq > 2) {
+        flags[a.slice(2, eq)] = a.slice(eq + 1)
+        continue
+      }
+      const key = a.slice(2)
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('--')) flags[key] = true
+      else flags[key] = argv[++i]
+    } else {
+      positionals.push(a)
+    }
+  }
+  return { positionals, flags }
+}
+
+const USAGE = `usage: iapeer <verb> [args]
+  install                                                        build binary + global scaffold + daemon plist (one bootstrap)
+  update [version] [--force]                                     pull latest (or exact) @agfpd/iapeer from npm + restart daemon + recycle owned infra jobs
+  rollback                                                       revert to the previous binary (.prev) + restart daemon + recycle owned infra jobs
+  version | --version | -v                                       print the installed binary's version
+  help | --help | -h                                             print this usage (works appended to any verb; executes nothing)
+  daemon [--install-plist]                                       run the host-wide HTTP-MCP router (launchd-held)
+  onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--infra <csv>]
+                                                                 backbone host-phase: marketplace → notifier → telegram (human peer) → memory (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively
+  status                                                         host snapshot: version, daemon health, memory slot (<provider> | none)
+  install-runtime <runtime> [--package pkg] [--npx]              npx-install a runtime package + deploy its declared peer-set
+  update-runtime <runtime> | --all [--force]                     version-gate → re-install + re-provision declared set → restart the runtime's peers
+  init [cwd] [--runtime r] [--description d]                     onboard the CURRENT folder as a peer (name = folder name; identity + MCP + doctrine)
+  create <personality> [--runtime r] [--path dir] [--bin abs]   create a peer anywhere (default ~/.iapeer/peers/<p>) + provision
+  list [--json]                                                  registered peers + per-runtime liveness
+  verify [--json] [--fix]                                        profile-standard conformance + index↔local drift (--fix self-heals the index + migrates legacy runtime→default_runtime in local profiles)
+  stop <peer> [runtime] | --all                                  warm peer: kill the live session + set a durable stop-flag — the daemon will NOT wake it
+                                                                 until \`start\`; always-on (notifier/telegram): launchctl bootout. --all = every registered peer
+  start <peer> [runtime] | --all                                 warm peer: clear the stop-flag — wakeable again; does NOT launch a session (the daemon brings
+                                                                 it up on the peer's first message); always-on: launchctl bootstrap. --all = every registered peer
+  refresh <peer> [runtime] | --all                               LAZY soft-reload: agentic peer comes up FRESH (re-reads doctrine) on its NEXT natural wake — no
+                                                                 kill, no burst-wake; non-agentic runtimes skipped. --all = whole fleet. (eager: \`new\`/self-fresh)
+  remove <peer> [--force]                                        delete a peer's registry record (locked writer); refuses a LIVE peer unless --force
+  send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]   manual IAP send (fallback)
+  <runtime>                                                      launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached
+  connect telegram <peer> [--token <t>]                          attach a telegram bot to a peer (bot add → interface → router restart; asks only the token)
+  enable <plugin> [peer] [--no-setup]                            install + enable an agfpd capability for a peer
+  new <peer> [runtime]                                           UNCONDITIONAL fresh restart: canary-clean kill + fresh wake (emergency lever for a hung/dead session — bypasses the peer; exit 0 = fresh session up+ready)
+  add-runtime <runtime> (--peer <p> | --all)                     add an agentic runtime to existing peer(s): runtimes-merge + scaffold + codex birth chain (pre-trust, native-memory, memory provision, MCP). default_runtime untouched
+  default-runtime <runtime> (--peer <p> | --all)                 flip the PRIMARY (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command
+  attach <peer> [runtime]                                        ensure-live + resume, then tmux attach
+  interrupt <peer> [runtime]                                     interrupt the current turn (Escape) — context intact
+  compact <peer> [runtime]                                       compact the peer's dialogue (/compact); resumes clean-asleep first
+  self-fresh                                                     (agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh
+  self-done                                                      (agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one
+  native-memory <off|on> (--peer <p> | --all)                    gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)
+  trust-hooks <hooks.json> [--check]                             pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report
+  shadow [--once | --minutes <m>] [--interval <ms>]              READ-ONLY tmux→pty fidelity observer (migration burn-in): compares pty-model verdicts vs live tmux on the warm fleet → ~/.iapeer/logs/iapeer/shadow-fidelity.json. Never delivers/mutates.
+  shadow-install                                                 install + load the always-on shadow burn-in launchd job (com.iapeer.shadow-fidelity); idempotent, re-cycled by update/rollback
+  shadow-uninstall                                               bootout + remove the shadow burn-in launchd job (the correct way to stop it; STOP file is respawned past by KeepAlive)
+  supervisor up|start|attach|list|kill <sess> [runtime]         DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)
+`
+
+export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const [verb, ...rest] = argv
+  // CLI hygiene (design «Onboard костяка» §CLI-гигиена): an explicit help request —
+  // `--help`/`-h` ANYWHERE on the line, or the bare `help` verb — prints usage and
+  // executes NOTHING. Checked on the RAW argv BEFORE the switch: parseArgs would
+  // bury `--help` in flags no case reads (a cold-start `onboard --help` EXECUTED on
+  // prod — idempotency saved it), and `-h` would land in positionals. Token-exact
+  // match is safe: the look-ahead parser never consumes a `--`-token as a value, so
+  // a LITERAL "--help" value is only expressible as `--key=--help` (not intercepted).
+  if (verb === 'help' || argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(USAGE)
+    return 0
+  }
+  const { positionals, flags } = parseArgs(rest)
+  const out = (s: string) => process.stdout.write(s)
+  const errOut = (s: string) => process.stderr.write(s)
+
+  try {
+    switch (verb) {
+      case 'onboard': {
+        // SECURITY GATE (pre-release): the operator must consciously accept the risk of
+        // beta infra with live agents BEFORE onboard mutates the host. --accept-risk /
+        // IAPEER_ACCEPT_RISK accepts non-interactively (one-liner installers / CI); a
+        // TTY is prompted; a non-TTY without the flag is REFUSED with how-to (never a
+        // silent proceed / hang). SKIPPED for --dry-run (a read-only preview mutates
+        // nothing, so there is no risk to accept yet). Runs BEFORE daemon/peer steps.
+        if (flags['dry-run'] !== true) {
+          const { confirmOnboardRisk } = await import('../onboard/risk.ts')
+          const gate = await confirmOnboardRisk({ accept: flags['accept-risk'] === true, env, out, errOut })
+          if (gate === 'refused-non-tty') return 2 // explicit refusal: how-to printed
+          if (gate === 'declined') return 1 // operator said no
+        }
+        // Host-phase: register OUR marketplace in claude + codex (IDEMPOTENT — detect
+        // → skip when present; an already-configured host is a no-op). --dry-run
+        // reports the would-be actions without touching anything. --infra <csv> ALSO
+        // onboards infra runtimes (§6): npx-install each package (auto-resolved) + deploy
+        // its declared set. notifier → timer+watcher auto; telegram → operator-add after.
+        // STEP 0 (non-disableable): ensure the router daemon is up. Onboard is the
+        // explicit "set up the host" action, so starting the always-on daemon belongs
+        // here — the operator never types raw `launchctl bootstrap`. Idempotent (no-op
+        // if already loaded). A failure here is a real, host-breaking problem → exit 1.
+        const dstart = await ensureDaemonStarted({ dryRun: flags['dry-run'] === true, env })
+        const dLabel = dstart.state === 'would-start' ? 'would-start (dry-run)' : dstart.state
+        out(`daemon: ${dLabel}${dstart.healthy === false ? ' — UNHEALTHY' : ''}${dstart.detail ? ` — ${dstart.detail}` : ''}\n`)
+        const daemonFailed = dstart.state === 'failed' || dstart.healthy === false
+        const r = onboardHost({ dryRun: flags['dry-run'] === true, env })
+        for (const m of r.marketplaces) {
+          out(`marketplace ${MARKETPLACE_NAME} @ ${m.runtime}: ${m.state}${m.detail ? ` — ${m.detail}` : ''}\n`)
+        }
+        out(r.noop ? 'onboard: no marketplace changes (already configured / dry-run)\n' : 'onboard: marketplace(s) registered\n')
+        let infraFailed = false
+        const infra = typeof flags.infra === 'string' ? flags.infra.split(',').map(s => s.trim()).filter(Boolean) : []
+        // Backbone default-yes steps (design «Onboard костяка»). ORDER is
+        // significant: notifier → TELEGRAM (creates the human peer) → memory below
+        // (its --human resolves from the natural peer that just appeared). Each step
+        // is soft-skip on unavailability; only a REAL deploy/create break fails.
+        const { onboardNotifierStep, onboardTelegramStep } = await import('./../onboard/steps.ts')
+        // An explicit `--infra notifier` takes the fail-closed explicit path below —
+        // the default-yes (soft-skip) step then stands aside to avoid double-deploy.
+        const ns = await onboardNotifierStep({
+          skip: flags['no-notifier'] === true || infra.includes('notifier'),
+          dryRun: flags['dry-run'] === true,
+          env,
+          warn: m => errOut(`warn: ${m}\n`),
+        })
+        if (ns.state !== 'skipped-flag') {
+          const peersLine = ns.peers.length ? ` — ${ns.peers.map(p => `${p.personality} (bootstrap ${p.bootstrap ?? 'n/a'})`).join(', ')}` : ''
+          out(`notifier: ${ns.state}${ns.detail ? ` — ${ns.detail}` : ''}${peersLine}\n`)
+          if (ns.state === 'deploy-failed') infraFailed = true
+        }
+        const ts = await onboardTelegramStep({
+          skip: flags['no-telegram'] === true,
+          human: typeof flags['telegram-human'] === 'string' ? flags['telegram-human'] : undefined,
+          userId: typeof flags['telegram-user-id'] === 'string' ? flags['telegram-user-id'] : undefined,
+          dryRun: flags['dry-run'] === true,
+          env,
+          warn: m => errOut(`warn: ${m}\n`),
+        })
+        if (ts.state !== 'skipped-flag') {
+          const line = `telegram: ${ts.state}${ts.personality ? ` — ${ts.personality}` : ''}${ts.detail ? ` — ${ts.detail}` : ''}\n`
+          // a refusal/failure goes to stderr (loud), the rest to stdout
+          if (ts.state === 'refused-non-tty' || ts.state === 'invalid-input' || ts.state === 'create-failed') errOut(line)
+          else out(line)
+          if (ts.state === 'invalid-input' || ts.state === 'create-failed') infraFailed = true
+        }
+        if (infra.length && flags['dry-run'] !== true) {
+          const { onboardRuntime } = await import('../runtime/deploy.ts')
+          for (const rt of infra) {
+            try {
+              const or = await onboardRuntime({ runtime: rt as Runtime, env, warn: m => errOut(`warn: ${m}\n`) })
+              out(`infra ${rt}: package ${or.install.package ?? '(none)'} ${or.install.state}; ` +
+                (or.deploy!.operatorAddOnly ? `operator-add (use \`iapeer create <peer> --runtime ${rt}\`)` : `${or.deploy!.peers.length} peer(s) deployed`) + '\n')
+              if (or.deploy!.peers.some(p => p.bootstrap === 'failed' || p.selfConfig === 'failed')) infraFailed = true
+            } catch (e) {
+              infraFailed = true
+              errOut(`infra ${rt}: ${e instanceof Error ? e.message : String(e)}\n`)
+            }
+          }
+        } else if (infra.length) {
+          out(`onboard --dry-run: would onboard infra runtimes: ${infra.join(', ')}\n`)
+        }
+        // Memory slot (контракт «Слот памяти»): optional DEFAULT-YES install of
+        // the default provider; its own init runs with INHERITED stdio (the provider
+        // owns the install questions). The step is REPORT-ONLY for the exit code — an
+        // empty slot is a valid state regardless of why.
+        const { onboardMemoryProvider } = await import('../onboard/memory.ts')
+        const mem = await onboardMemoryProvider({
+          skip: flags['no-memory'] === true,
+          package: typeof flags.memory === 'string' ? flags.memory : undefined,
+          dryRun: flags['dry-run'] === true,
+          env,
+        })
+        const memLabel = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
+        out(`memory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${memLabel})\n`)
+        // Runtime auth readiness (clean-host prerequisite): a peer runs the runtime's
+        // interactive TUI; the launcher auto-clears first-run modals (theme/trust) but
+        // CANNOT complete a login OAuth flow. Warn for every INSTALLED runtime (marketplace
+        // state != runtime-missing) that has no positive auth evidence — before it ships a
+        // peer that would fail to wake on the login screen.
+        for (const m of r.marketplaces) {
+          if (m.state === 'runtime-missing') continue
+          const authNote = runtimeAuthNote(m.runtime, env)
+          if (authNote) errOut(authNote + '\n')
+        }
+        // macOS TCC advisory (manual grant — no flag/setting/script can): PROBE-DRIVEN, not
+        // memory-gated — a missing grant silently breaks file I/O (EPERM, no prompt/hang) on
+        // any TCC-protected path (iCloud vault, Documents/Desktop/Downloads peer cwd). Silent
+        // when granted / non-macOS / undeterminable.
+        const { iapeerBinPath } = await import('../install/index.ts')
+        const tcc = tccFullDiskAccessNote({ fda: probeFullDiskAccess(env), binPath: iapeerBinPath(env) })
+        if (tcc) out(tcc)
+        return daemonFailed || r.marketplaces.some(m => m.state === 'failed') || infraFailed ? 1 : 0
+      }
+      case 'native-memory': {
+        // The canonized runtime-memory lever (контракт «Слот памяти» §Native-память):
+        // off = explicit disable merged into the peer's runtime config files; on =
+        // remove the key (restore the runtime's own default). Consumers: the operator
+        // and the memory provider's install-time sweep (`--all`). NOT slot-gated here —
+        // an explicit operator/provider action; only the BIRTH-time hook is slot-gated.
+        const state = positionals[0]
+        if (state !== 'off' && state !== 'on') return usage(errOut)
+        const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
+        if (flags.all !== true && !peerName) return usage(errOut)
+        const { applyNativeMemory } = await import('../launch/nativeMemory.ts')
+        const index = readPeersIndex({ env })
+        const targets = flags.all === true ? index.peers : index.peers.filter(p => p.personality === peerName)
+        if (targets.length === 0) {
+          errOut(`peer "${peerName ?? ''}" is not in the iapeer peers index\n`)
+          return 1
+        }
+        let failed = false
+        for (const p of targets) {
+          const outcomes = applyNativeMemory(p.cwd, p.runtimes, state)
+          if (outcomes.length === 0) {
+            out(`${p.personality}: no claude/codex runtime — skipped\n`)
+            continue
+          }
+          for (const o of outcomes) {
+            out(`${p.personality} (${o.runtime}): ${o.state}${o.detail ? ` — ${o.detail}` : ''}\n`)
+            if (o.state === 'failed') failed = true
+          }
+        }
+        return failed ? 1 : 0
+      }
+      case 'trust-hooks': {
+        // Deterministic pre-seed of the codex hooks trust state for a FILE-form
+        // hooks.json (user- or project-local layer) — the headless replacement for
+        // the "Hooks need review" modal: codex trusts per hook-command HASH, and in
+        // `codex exec` an untrusted hook is SILENTLY skipped (no modal, no error).
+        // Verified on codex-cli 0.138.0 (golden hashes in the module tests).
+        // Consumers: the memory provider's provision command (writes its per-peer
+        // <cwd>/.codex/hooks.json, then shells this verb), operators. `--check` is
+        // the read-only drift detector for verify pipelines — per-hook
+        // trusted/missing/drift, exit 1 on anything but full trust.
+        const target = positionals[0]
+        if (!target) return usage(errOut)
+        const { preSeedCodexHooksTrust, checkCodexHooksTrust } = await import('../launch/codexHooksTrust.ts')
+        if (flags.check === true) {
+          let checks
+          try {
+            checks = checkCodexHooksTrust(target, env)
+          } catch (e) {
+            errOut(`trust-hooks --check: ${e instanceof Error ? e.message : String(e)}\n`)
+            return 1
+          }
+          for (const c of checks.checks) {
+            out(`${c.status}\t${c.event}\t${c.key}${c.status === 'drift' ? ` (state: ${c.found ?? '?'} ≠ expected: ${c.hash})` : ''}\n`)
+          }
+          if (checks.checks.length === 0) out('no command hooks found — nothing to check\n')
+          return checks.checks.every(c => c.status === 'trusted') ? 0 : 1
+        }
+        const r = preSeedCodexHooksTrust(target, env)
+        if (r.state === 'failed') {
+          errOut(`trust-hooks: ${r.detail}\n`)
+          return 1
+        }
+        out(
+          r.state === 'already'
+            ? `already trusted: ${r.entries.length} hook(s) from ${r.source}${r.detail ? ` — ${r.detail}` : ''}\n`
+            : `trusted ${r.entries.length} hook(s) from ${r.source} → ${r.path}\n`,
+        )
+        return 0
+      }
+      case 'status': {
+        // Host snapshot (контракт «Слот памяти» §status): version + daemon health +
+        // the memory-slot line. Exit 1 iff the daemon is unhealthy (usable as a
+        // health gate); an EMPTY memory slot is a valid state and never fails.
+        const { hostStatus, formatHostStatus } = await import('../status/index.ts')
+        const s = await hostStatus({ env })
+        out(formatHostStatus(s))
+        return s.daemon.healthy ? 0 : 1
+      }
+      case 'install-runtime': {
+        // §6 onboard a runtime END-TO-END: npx-install the package (auto-resolved from
+        // the built-in runtime→package registry, or --package; self-deploys bin +
+        // manifest), THEN deploy its declared peer-set (each → provision + per-peer
+        // self-config + auto-bootstrap). A runtime whose manifest declares no peers
+        // (telegram) is operator-add — use `iapeer create <human> --runtime telegram`.
+        if (!positionals[0]) return usage(errOut)
+        const { onboardRuntime } = await import('../runtime/deploy.ts')
+        const r = await onboardRuntime({
+          runtime: positionals[0] as Runtime,
+          package: typeof flags.package === 'string' ? flags.package : undefined,
+          npx: flags.npx === true,
+          bootstrap: flags['no-bootstrap'] === true ? false : undefined,
+          env,
+          warn: m => errOut(`warn: ${m}\n`),
+        })
+        out(`package ${r.install.package ?? '(none)'}: ${r.install.state}${r.install.detail ? ` — ${r.install.detail}` : ''}\n`)
+        const d = r.deploy!
+        if (d.operatorAddOnly) {
+          out(`runtime "${d.runtime}": no declared peer-set (operator-add — use \`iapeer create <peer> --runtime ${d.runtime}\`)\n`)
+          return 0
+        }
+        for (const p of d.peers) {
+          out(`  ${p.personality} @ ${p.location}: self-config ${p.selfConfig ?? 'n/a'}; bootstrap ${p.bootstrap ?? 'n/a'}\n`)
+        }
+        out(`deployed runtime "${d.runtime}" (${d.peers.length} peer(s))\n`)
+        return d.peers.some(p => p.bootstrap === 'failed' || p.selfConfig === 'failed') ? 1 : 0
+      }
+      case 'update-runtime': {
+        // §(г) runtime-package update: version-gate (npm vs the manifest stamp) →
+        // forced re-npx → idempotent re-provision (same path as install-runtime) →
+        // restart the runtime's peers via the regular stop/start. The core's own
+        // `update` stays foundation-only — this is the runtimes' counterpart.
+        const all = flags.all === true
+        if (!all && !positionals[0]) return usage(errOut)
+        const { updateRuntime, updateAllRuntimes } = await import('../runtime/update.ts')
+        const results = all
+          ? await updateAllRuntimes({ force: flags.force === true, env, warn: m => errOut(`warn: ${m}\n`) })
+          : [await updateRuntime({ runtime: positionals[0] as Runtime, force: flags.force === true, env, warn: m => errOut(`warn: ${m}\n`) })]
+        let failed = false
+        for (const r of results) {
+          const ver = r.from || r.to ? ` ${r.from ?? '?'} → ${r.to ?? '?'}` : ''
+          out(`${r.runtime}: ${r.state}${ver}${r.detail ? ` — ${r.detail}` : ''}\n`)
+          for (const p of r.peers) out(`  re-provisioned ${p.personality}: self-config ${p.selfConfig ?? 'n/a'}\n`)
+          for (const p of r.restarted) out(`  restart ${p.personality}: ${p.state}${p.detail ? ` — ${p.detail}` : ''}\n`)
+          if (r.state === 'install-failed' || r.state === 'deploy-failed' || r.state === 'npm-unreachable') failed = true
+          if (r.restarted.some(p => p.state === 'failed')) failed = true
+          if (!all && r.state === 'not-installed') failed = true
+        }
+        return failed ? 1 : 0
+      }
+      case 'init': {
+        // cwd-DEPENDENT: onboard the CURRENT folder (or positional cwd) as a peer —
+        // identity + MCP wiring + doctrine, runtime resolved from the cwd's markers
+        // when not explicit. Auto-bootstraps an infra plist unless --no-bootstrap.
+        // A peer's name IS its folder name (normalize(basename(cwd))) — personality ↔ folder
+        // is 1:1, so `--personality` is gone: name the folder, don't pass a separate name.
+        if (flags.personality !== undefined) {
+          errOut("init: --personality was removed — a peer's name is its folder name; rename the folder to set the name\n")
+          return 2
+        }
+        const { initPeer } = await import('../init/index.ts')
+        const r = await initPeer({
+          cwd: positionals[0] ?? process.cwd(),
+          runtime: typeof flags.runtime === 'string' ? (flags.runtime as Runtime) : undefined,
+          description: typeof flags.description === 'string' ? flags.description : undefined,
+          runtimeBin: typeof flags.bin === 'string' ? flags.bin : undefined,
+          bootstrap: flags['no-bootstrap'] === true ? false : undefined,
+          env,
+          warn: m => errOut(`warn: ${m}\n`),
+        })
+        out(
+          `initialized "${r.personality}" (${r.runtime}); mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
+            `${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
+        )
+        return 0
+      }
+      case 'create': {
+        // cwd-INDEPENDENT: resolve a location (default ~/.iapeer/peers/<p> or --path),
+        // scaffold the folder (no-clobber), then init it. Operator-add for an infra
+        // human (telegram) or any agentic peer; provisions + auto-bootstraps infra.
+        if (!positionals[0]) return usage(errOut)
+        const { createPeer } = await import('../create/index.ts')
+        const r = await createPeer({
+          personality: positionals[0],
+          runtime: typeof flags.runtime === 'string' ? (flags.runtime as Runtime) : undefined,
+          path: typeof flags.path === 'string' ? flags.path : undefined,
+          description: typeof flags.description === 'string' ? flags.description : undefined,
+          intelligence: typeof flags.intelligence === 'string' ? (flags.intelligence as Intelligence) : undefined,
+          runtimeBin: typeof flags.bin === 'string' ? flags.bin : undefined,
+          bootstrap: flags['no-bootstrap'] === true ? false : undefined,
+          env,
+          warn: m => errOut(`warn: ${m}\n`),
+        })
+        out(
+          `created "${r.personality}" (${r.runtime}) at ${r.location}; mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
+            `${r.plistPath ? `; plist: ${r.plistPath}` : ''}${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
+        )
+        return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
+      }
+      case 'list': {
+        // tty + no --json → the interactive control-panel (↑/↓ · Enter=attach · / · q);
+        // non-tty / --json → the scriptable table (machine-parsable).
+        if (flags.json !== true && process.stdout.isTTY && process.stdin.isTTY) {
+          const { runListTui } = await import('./listTui.ts')
+          return await runListTui(env)
+        }
+        const rows = listPeers({ env })
+        out(flags.json ? JSON.stringify(rows, null, 2) + '\n' : formatListTable(rows))
+        return 0
+      }
+      case 'verify': {
+        // Profile conformance + index↔local self-heal reconciliation. Read-only by
+        // default; --fix self-heals the index (reindex from local profiles) AND
+        // migrates conformant local profiles off the legacy `runtime` field shape
+        // (Phase 2 of the staged default_runtime story). A drift is a signal that
+        // the index self-heal lapsed — caught by construction here.
+        const index = readPeersIndex({ env })
+        let errors = 0
+        let driftCount = 0
+        const lines: string[] = []
+        // Conformant profiles still carrying the LEGACY runtime field shape (no
+        // default_runtime, or a diverged mirror) — candidates for the --fix data
+        // migration (Phase 2 of the staged default_runtime story).
+        const legacyRuntimeProfiles: Array<{ personality: string; cwd: string }> = []
+        for (const peer of index.peers) {
+          const path = peerProfilePath(peer.cwd)
+          if (!existsSync(path)) {
+            errors++
+            lines.push(`✗ ${peer.personality}: no local profile at ${path}`)
+            continue
+          }
+          let raw: unknown
+          try {
+            raw = JSON.parse(readFileSync(path, 'utf8'))
+          } catch (e) {
+            errors++
+            lines.push(`✗ ${peer.personality}: profile is invalid JSON — ${e instanceof Error ? e.message : String(e)}`)
+            continue
+          }
+          const issues = validateProfileStandard(raw, peer.cwd)
+          const errs = issues.filter(i => i.severity === 'error')
+          const warns = issues.filter(i => i.severity === 'warn')
+          if (errs.length > 0) errors += errs.length
+          if (!isConformant(issues)) {
+            lines.push(`✗ ${peer.personality}: ${errs.map(i => `${i.field} — ${i.message}`).join('; ')}`)
+          } else if (warns.length > 0 && flags.json !== true) {
+            lines.push(`⚠ ${peer.personality}: ${warns.map(i => i.field).join(', ')}`)
+          }
+          // Migration candidate: conformant, but the default_runtime warn fired
+          // (legacy-only field or diverged mirror). Errored profiles are NEVER
+          // rewritten — migration heals shape, it does not guess at broken data.
+          if (errs.length === 0 && warns.some(i => i.field === 'default_runtime')) {
+            legacyRuntimeProfiles.push({ personality: peer.personality, cwd: peer.cwd })
+          }
+        }
+        const reconcile = reconcileIndex({ env })
+        for (const r of reconcile) {
+          if (r.drift === null) {
+            // missing local profile already reported above as an error
+          } else if (r.drift.length > 0) {
+            driftCount++
+            lines.push(`↯ ${r.personality}: index↔local drift on ${r.drift.join(', ')}`)
+          }
+        }
+        if (flags.json === true) {
+          out(JSON.stringify({ peers: index.peers.length, errors, drift: driftCount, reconcile }, null, 2) + '\n')
+        } else {
+          for (const l of lines) out(l + '\n')
+          out(`\n${index.peers.length} peers · ${errors} error(s) · ${driftCount} index↔local drift(s)\n`)
+        }
+        if (flags.fix === true) {
+          // Phase-2 data migration (staged default_runtime story): rewrite conformant
+          // local profiles still on the legacy field shape — the writer now emits
+          // `default_runtime` + the in-sync legacy `runtime` mirror. Runs BEFORE the
+          // reindex so the healed index is projected from migrated locals.
+          const migrated: string[] = []
+          for (const p of legacyRuntimeProfiles) {
+            if (migrateProfileRuntimeField(p.cwd)) migrated.push(p.personality)
+          }
+          if (migrated.length > 0) {
+            out(`migrated runtime→default_runtime (legacy mirror kept): ${migrated.join(', ')}\n`)
+          }
+          if (driftCount > 0 || errors === 0) {
+            const { healed, missing } = await reindexFromLocals({ env })
+            if (healed.length > 0) out(`self-healed index from local profiles:\n  ${healed.join('\n  ')}\n`)
+            if (missing.length > 0) errOut(`peers with no local profile (left untouched): ${missing.join(', ')}\n`)
+          }
+        }
+        return errors > 0 || (driftCount > 0 && flags.fix !== true) ? 1 : 0
+      }
+      case 'stop': {
+        // --all stops every registered peer (the fleet guard still refuses foreign
+        // persistent-peer plists, so the live fleet stays untouched).
+        const peers = flags.all === true
+          ? readPeersIndex({ env }).peers.map(p => p.personality)
+          : positionals[0]
+            ? [positionals[0]]
+            : null
+        if (!peers) return usage(errOut)
+        const outcomes = peers.flatMap(p => stopPeer(p, flags.all === true ? undefined : positionals[1], { env }))
+        for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
+      }
+      case 'add-runtime': {
+        // Fleet-switch enabler (codex-parity audit): add an agentic runtime to
+        // existing peer(s) — full codex birth chain per target, idempotent.
+        const rt = positionals[0]
+        if (!rt) return usage(errOut)
+        const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
+        if (flags.all !== true && !peerName) return usage(errOut)
+        const outcomes = await addRuntime(rt, { peer: peerName, all: flags.all === true, env })
+        for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
+        return outcomes.some(o => o.action === 'failed') ? 1 : 0
+      }
+      case 'default-runtime': {
+        // The PRIMARY flip (routing/wake default) — the fleet-switch moment itself.
+        const rt = positionals[0]
+        if (!rt) return usage(errOut)
+        const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
+        if (flags.all !== true && !peerName) return usage(errOut)
+        const outcomes = await defaultRuntime(rt, { peer: peerName, all: flags.all === true, env })
+        for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
+        return outcomes.some(o => o.action === 'failed') ? 1 : 0
+      }
+      case 'new': {
+        // UNCONDITIONAL fresh restart (control, system class — docs/Control-команды
+        // §new): the emergency lever for a hung/dead session, bypasses the peer.
+        // Source: operator CLI, or telegram-runtime's clean-/new detect (their bot
+        // shells `iapeer new <peer> <runtime>` — exit 0 ⟺ fresh session up+ready).
+        if (!positionals[0]) return usage(errOut)
+        const o = await newPeer(positionals[0], positionals[1], { env })
+        if (o.action === 'fresh') {
+          out(`new: ${o.runtime}-${o.personality} fresh session up\n`)
+          return 0
+        }
+        errOut(`new: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        return 1
+      }
+      case 'start': {
+        // --all re-enables every REGISTERED peer (mirror of `stop --all` — without
+        // it, bringing a stopped fleet back required a manual loop over every
+        // peer). Enumeration is the registry, so unregistered garbage (stray flag
+        // files for identities no record claims) is never touched. NOTE: for warm
+        // peers this clears the stop flag only — no session is launched; each peer
+        // becomes wakeable and the daemon brings its session up on the first message.
+        const peers = flags.all === true
+          ? readPeersIndex({ env }).peers.map(p => p.personality)
+          : positionals[0]
+            ? [positionals[0]]
+            : null
+        if (!peers) return usage(errOut)
+        const outcomes = peers.flatMap(p => startPeer(p, flags.all === true ? undefined : positionals[1], { env }))
+        for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
+      }
+      case 'refresh': {
+        // LAZY soft-reload (fleet doctrine refresh): arm `.fresh-next` so each agentic peer comes up FRESH
+        // on its NEXT natural wake (re-reads doctrine/fragments) — no kill, no eager relaunch, no burst-wake.
+        // --all marks the whole registered fleet. H4-safe (marker only); non-agentic runtimes are skipped.
+        const peers = flags.all === true
+          ? readPeersIndex({ env }).peers.map(p => p.personality)
+          : positionals[0]
+            ? [positionals[0]]
+            : null
+        if (!peers) return usage(errOut)
+        const outcomes = peers.flatMap(p => refreshPeer(p, flags.all === true ? undefined : positionals[1], { env }))
+        for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}\n`)
+        return 0
+      }
+      case 'remove': {
+        // Reap a registry record through the locked writer (the operator path over
+        // registry.removePeer). Idempotent on an absent peer (exit 0). Refuses a LIVE
+        // peer unless --force (orphaning a running session from routing is the risk).
+        if (!positionals[0]) return usage(errOut)
+        const o = await removePeerCli(positionals[0], { force: flags.force === true, env })
+        if (o.action === 'removed') {
+          out(`removed "${o.personality}" from the registry\n`)
+          // v1.2: the provider unwound its surfaces (occasion=remove) — say how it went.
+          if (o.unprovision?.length) {
+            out(`memory unprovision: ${o.unprovision.join(', ')}\n`)
+          }
+          // Codex pre-trust cleanup — the cwd's trust entry must die with the peer.
+          if (o.codexTrust) {
+            out(`codex trust entry: ${o.codexTrust}\n`)
+          }
+          // Same for pre-seeded hooks trust state (trust-hooks verb's writes).
+          if (o.codexHooksTrust) {
+            out(`codex hooks trust: ${o.codexHooksTrust}\n`)
+          }
+          // Stale identity-keyed markers must die with the record (a namesake
+          // newborn inherited a dead peer's .stopped → refused to wake).
+          if (o.purgedState?.length) {
+            out(`lifecycle state purged: ${o.purgedState.join(', ')}\n`)
+          }
+          // Deliberate: the registry reap never deletes user data — but SAY so, or
+          // the default-location peers leave silent orphan folders.
+          if (o.cwd && existsSync(o.cwd)) {
+            out(`folder kept: ${o.cwd} (remove never deletes peer data — \`rm -rf\` it yourself if it was a throwaway)\n`)
+          }
+        } else if (o.action === 'absent') out(`"${o.personality}" not registered — no-op\n`)
+        else errOut(`remove: ${o.reason}\n`)
+        return o.action === 'refused-live' ? 1 : 0
+      }
+      case 'send': {
+        // Message body from EITHER --message <text> OR --message-file <f> (f='-' →
+        // stdin). The runtime packages (telegram/notifier) + monitor deliver via
+        // --message-file (large/multi-line bodies, special chars); manual/peer-voice
+        // use --message. Both supported; keep both — do not replace one with the other.
+        let message: string | null = null
+        if (typeof flags.message === 'string') {
+          message = flags.message
+        } else if (typeof flags['message-file'] === 'string') {
+          const mf = flags['message-file']
+          message = mf === '-' ? readFileSync(0, 'utf8') : readFileSync(mf, 'utf8')
+        }
+        if (!positionals[0] || message === null) return usage(errOut)
+        // --attachment is REPEATABLE; parseArgs collapses repeats (last-wins), so
+        // re-scan the raw rest argv to collect every attachment path (else files
+        // silently drop — a text-only smoke test would not catch it).
+        const attachments: string[] = []
+        for (let i = 0; i < rest.length; i++) {
+          if (rest[i] === '--attachment' && rest[i + 1] !== undefined) attachments.push(rest[++i])
+          else if (rest[i].startsWith('--attachment=')) attachments.push(rest[i].slice('--attachment='.length))
+        }
+        const r = await sendMessage({
+          target: positionals[0],
+          from: typeof flags.from === 'string' ? flags.from : defaultFromIdentity(env),
+          message,
+          runtime: typeof flags.runtime === 'string' ? flags.runtime : undefined,
+          topic: typeof flags.topic === 'string' ? flags.topic : undefined,
+          attachments: attachments.length ? attachments : undefined,
+          env,
+        })
+        out(
+          r.queued
+            ? `queued for ${r.delivered_to.personality} (${r.delivered_to.runtime}), depth ${r.queueDepth ?? '?'} — the daemon tick drains it\n`
+            : `delivered to ${r.delivered_to.personality} (${r.delivered_to.runtime})\n`,
+        )
+        return 0
+      }
+      case 'version':
+      case '--version':
+      case '-v': {
+        out(`${IAPEER_VERSION}\n`)
+        return 0
+      }
+      case 'update': {
+        // The single deploy path: pull a version of the foundation from npm and restart
+        // the daemon onto it (cloud-only — never a working-tree build). No arg → latest;
+        // an explicit `update <version>` pins to that exact version (downgrade / recover
+        // deeper than the single .prev). Foundation ONLY; the plist and other host packages
+        // are untouched. --force reinstalls even when already at the desired version. (Run
+        // from the installed binary; the first-ever install is `npx @agfpd/iapeer`.)
+        const r = updateIapeer({ env, force: flags.force === true, targetVersion: positionals[0] })
+        if (r.status === 'failed') {
+          errOut(`update failed: ${r.reason}\n`)
+          return 1
+        }
+        if (r.status === 'already-latest') {
+          out(`already at version ${r.from}\n`)
+          return 0
+        }
+        // 'updated': the binary is swapped. If the daemon was restarted, VERIFY it
+        // actually came back up before declaring success — a new binary that fails to
+        // boot must not read as a healthy deploy (it's the cue to roll back).
+        if (r.daemon === 'restarted') {
+          const h = await waitForDaemonHealthy({ env })
+          if (!h.healthy) {
+            errOut(`updated ${r.from} → ${r.to} but the daemon is NOT healthy after restart (${h.detail}).\n` +
+              `roll back now: iapeer rollback\n`)
+            return 1
+          }
+          const note = infraRecycleNote(r.infra)
+          if (infraRecycleFailed(r.infra)) {
+            errOut(`updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
+            return 1
+          }
+          out(`updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
+          return 0
+        }
+        const daemonNote =
+          r.daemon === 'not-loaded'
+            ? 'daemon not loaded — new binary will be used on next start'
+            : r.daemon === 'failed'
+              ? `WARNING — ${r.reason}; roll back with: iapeer rollback`
+              : String(r.daemon)
+        const note = infraRecycleNote(r.infra)
+        const failed = r.daemon === 'failed' || infraRecycleFailed(r.infra)
+        ;(failed ? errOut : out)(`updated ${r.from} → ${r.to}; ${daemonNote}${note}\n`)
+        return failed ? 1 : 0
+      }
+      case 'rollback': {
+        // Recovery: restore the .prev binary kept by the last install, restart the
+        // daemon onto it, and verify health. ONE level deep (single .prev). Cloud is
+        // still the source of truth — rollback is the local "undo the last update" while
+        // a fixed version is published.
+        const { rollbackIapeer } = await import('../install/index.ts')
+        const rb = rollbackIapeer(env)
+        if (rb.status === 'failed') {
+          errOut(`rollback failed: ${rb.reason}\n`)
+          return 1
+        }
+        const restart = cycleDaemon(env)
+        const infra = recycleFoundationOwnedInfraJobs(env)
+        const infraNote = infraRecycleNote(infra)
+        const infraFailed = infraRecycleFailed(infra)
+        if (restart.state === 'restarted') {
+          const h = await waitForDaemonHealthy({ env })
+          const msg = h.healthy
+            ? `rolled back to the previous binary; daemon restarted and healthy${infraNote}\n`
+            : `rolled back, but the daemon is NOT healthy after restart (${h.detail})${infraNote}\n`
+          ;(h.healthy && !infraFailed ? out : errOut)(msg)
+          return h.healthy && !infraFailed ? 0 : 1
+        }
+        const msg =
+          `rolled back to the previous binary; ${
+            restart.state === 'not-loaded'
+              ? 'daemon not loaded — previous binary will be used on next start'
+              : `daemon restart ${restart.state}${restart.detail ? ` (${restart.detail})` : ''}`
+          }${infraNote}\n`
+        const failed = restart.state === 'failed' || infraFailed
+        ;(failed ? errOut : out)(msg)
+        return failed ? 1 : 0
+      }
+      case 'install': {
+        // UNIFIED foundation install (contract Установка §1 — "один npx ставит
+        // фундамент"): ONE command does all three install-phase steps that used to be
+        // split across `install` + `daemon --install-plist`:
+        //   (1) global scaffold ~/.iapeer/ (+ peers/, state/logs/cache, runtime scopes)
+        //   (2) build + place the stable ~/.local/bin/iapeer binary (atomic)
+        //   (3) WRITE the daemon's com.agfpd.iapeer plist (NOT bootstrapped — a live
+        //       daemon already runs; migrating it onto the installed binary is a
+        //       separate coordinated wave, contract Установка §1).
+        // Bootstrap path — run from the src tree (`bun src/cli/index.ts install`) or
+        // npx; the compiled binary cannot rebuild itself from source (its
+        // import.meta.url is the binary → build fails with a clear error).
+        const { installIapeer } = await import('../install/index.ts')
+        ensureGlobalIapScaffold({ env })
+        const r = installIapeer(fileURLToPath(import.meta.url), env)
+        const { path: plist, changed: plistChanged } = installDaemonPlist({ env })
+        const signingLine =
+          r.signing == null
+            ? ''
+            : r.signing.state === 'failed-soft'
+              ? `  WARNING signing: ${r.signing.detail}\n`
+              : `  signing: ${r.signing.state}${r.signing.state === 'signed-new-identity' ? ' (local identity created — the one install-time event)' : ''}\n`
+        out(
+          `installed iapeer → ${r.binPath}` +
+            `${r.prevPath ? ` (previous kept: ${r.prevPath})` : ''}` +
+            `${r.size ? ` (${Math.round(r.size / 1e6)}M)` : ''}\n` +
+            signingLine +
+            `  scaffold: ~/.iapeer/ ensured (peers/, state, logs, cache, runtimes)\n` +
+            `  daemon plist ${plistChanged ? 'written' : 'unchanged (byte-identical — no write, no BTM notification)'}: ${plist}\n` +
+            `  (NOT loaded — a live daemon migration is a separate step: launchctl bootstrap gui/$(id -u) ${plist})\n`,
+        )
+        return 0
+      }
+      case 'daemon': {
+        // Ф-F: the prod daemon entrypoint. The launchd plist runs `iapeer daemon`
+        // (the INSTALLED binary), decoupling prod from the mutable src tree.
+        if (flags['install-plist'] === true) {
+          const { path: p, changed } = installDaemonPlist({ env })
+          out(`daemon plist ${changed ? 'written' : 'unchanged'}: ${p}\nNOT loaded — to start: launchctl bootstrap gui/$(id -u) ${p}\n`)
+          return 0
+        }
+        const handle = await startConfiguredDaemon({
+          port: env.IAPEER_PORT?.trim() ? Number(env.IAPEER_PORT) : undefined,
+          socketPath: env.IAPEER_DAEMON_SOCKET?.trim() || undefined,
+          env,
+        })
+        errOut(`[iapeer] daemon READY tcp=${handle.url} sock=${handle.socketPath}\n`)
+        const shutdown = () => void handle.close().then(() => process.exit(0))
+        process.on('SIGTERM', shutdown)
+        process.on('SIGINT', shutdown)
+        await new Promise(() => {}) // launchd KeepAlive holds this process; block forever
+        return 0
+      }
+      case 'run-infra': {
+        // Ф-F: the always-on infra entrypoint (telegram/notifier), held by launchd.
+        // The infra plist runs `iapeer run-infra <personality> <runtime>` (installed
+        // binary) instead of `bun launchdRun.ts`. cwd = the launchd WorkingDirectory.
+        if (!positionals[0] || !positionals[1]) return usage(errOut)
+        return await runAlwaysOn(positionals[0], positionals[1], process.cwd())
+      }
+      case 'self-done': {
+        // SILENT-FINISH self-call for an ephemeral worker (контракт ЖЦ §wake_policy):
+        // a worker whose task produced NOTHING to send must still release its M3
+        // FIFO — but an EMPTY report would violate the invariant
+        // «событие-всё-отфильтровано = тишина» (no empty wakes of the
+        // target). This verb is the non-waking arm: it sets the worker's OWN
+        // .ephemeral-armed (same marker the ok-outbound hook sets), so the quiet
+        // window reaps it within seconds and the drain feeds the next task — nobody
+        // is woken. Doctrine for silent finishers: «нечего отправлять → iapeer
+        // self-done вместо ответа». The unarmed idle bound (ephemeralUnarmedIdleSecs)
+        // remains the backstop for workers that do neither. On a NON-ephemeral peer
+        // the marker is inert (quiet-reap keys on wake_policy) — warn, exit 0.
+        const identity = env.PEER_IDENTITY?.trim()
+        if (!identity) {
+          errOut('self-done: PEER_IDENTITY is not set — this verb is an agent self-call from inside a session\n')
+          return 1
+        }
+        if (!parseSessionName(identity)) {
+          errOut(`self-done: invalid PEER_IDENTITY "${identity}" — expected <runtime>-<personality>\n`)
+          return 1
+        }
+        const cfg = loadLifecycleConfig(env)
+        setEphemeralArmed(cfg, identity)
+        // The ephemeral check keys on the peer's CANONICAL cwd (registry), NOT on
+        // process.cwd(): the verb is invoked from wherever the agent's shell
+        // happens to be, and a foreign cwd made this warning LIE — «marker is
+        // inert» on a genuinely ephemeral peer (the false warning sends the reader
+        // down a wrong root-cause chase). The marker itself was never affected — it is
+        // identity-keyed and supervise checks the SESSION's canonical cwd.
+        const addr = parseSessionName(identity)!
+        const canonicalCwd = findPeer(readPeersIndex({ env }), addr.personality)?.cwd ?? process.cwd()
+        const ephemeral = isEphemeralPeer(canonicalCwd)
+        out(
+          `self-done: armed ${identity} for the quiet-window reap (no one woken)` +
+            (ephemeral ? '' : ' — NOTE: this peer is not wake_policy:ephemeral, the marker is inert') +
+            '\n',
+        )
+        return 0
+      }
+      case 'self-fresh': {
+        // /new AGENT-FACING TRIGGER (TARGET redesign). Run BY the agent itself as the
+        // FINAL step of a /new graceful wind-down (the owner triggers it via a per-peer
+        // telegram alias: "write a handoff to durable memory, then run iapeer self-fresh"
+        // — the alias text is telegram-owned, NOT global doctrine). It: resolves the
+        // caller identity from PEER_IDENTITY (<runtime>-<personality>), writes the
+        // .new-eager mark, then self-kills the caller's OWN tmux session. The daemon's
+        // superviseTick then sees the dead session carrying .new-eager → eager fresh
+        // relaunch (with initial_prompt) so the agent reports it is back up.
+        const identity = env.PEER_IDENTITY?.trim()
+        if (!identity) {
+          errOut('self-fresh: PEER_IDENTITY is not set — this verb is an agent self-call from inside a session\n')
+          return 1
+        }
+        const addr = parseSessionName(identity)
+        if (!addr) {
+          errOut(`self-fresh: invalid PEER_IDENTITY "${identity}" — expected <runtime>-<personality>\n`)
+          return 1
+        }
+        const cfg = loadLifecycleConfig(env)
+        // Mark FIRST, kill SECOND: if the kill races ahead of the mark the daemon would
+        // see a dead session with no .new-eager → a plain reaped-gone (lazy fresh on the
+        // next message), not the eager relaunch — degrade gracefully, never lose the mark.
+        setNewEager(cfg, identity)
+        out(`self-fresh: marked ${identity} for eager fresh re-launch; self-killing session\n`)
+        const sock = buildSocketPath(addr.runtime, addr.personality, cfg.sockDir)
+        killSession(sock, identity)
+        return 0
+      }
+      case 'interrupt': {
+        // In-session control (Ф-E, clean-slash namespace): interrupt a stuck/raving
+        // turn (Escape). UNCONDITIONAL — acts on the live session.
+        if (!positionals[0]) return usage(errOut)
+        const r = await routeControl(positionals[0], positionals[1], { name: verb })
+        if (!r.ok) {
+          errOut(`${verb}: ${r.error.message}\n`)
+          return 1
+        }
+        out(`${verb} → ${r.value.controlled.personality} (${r.value.controlled.runtime})\n`)
+        return 0
+      }
+      case 'compact': {
+        // Dialogue control: if the session is merely asleep
+        // after a clean idle-reap, resume the same dialogue and compact it; if there
+        // is no resumable dialogue, fail honestly instead of compacting a fresh one.
+        if (!positionals[0]) return usage(errOut)
+        const o = await compactPeer(positionals[0], positionals[1], { env })
+        if (o.action === 'compacted') {
+          out(`compact → ${o.personality} (${o.runtime})${o.woke ? ' after resume' : ''}\n`)
+          return 0
+        }
+        errOut(`compact: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        return 1
+      }
+      case 'connect': {
+        // Per-peer channel attachment in ONE flow (design «Onboard костяка» §(в)):
+        // `connect telegram <peer> [--token <t>]`. The human owes only the token;
+        // alias/bot-add/interface/router-restart are resolved by the system. The
+        // FIRST message from the human to the bot activates the chat (platform rule).
+        if (positionals[0] !== 'telegram' || !positionals[1]) return usage(errOut)
+        const { connectTelegram } = await import('../connect/index.ts')
+        const r = await connectTelegram({
+          peer: positionals[1],
+          token: typeof flags.token === 'string' ? flags.token : undefined,
+          env,
+        })
+        if (r.state === 'noop-same-token') {
+          out(`connect telegram ${r.peer}: ${r.detail}\n`)
+          return 0
+        }
+        if (r.state !== 'connected') {
+          errOut(`connect telegram ${r.peer}: ${r.state}${r.detail ? ` — ${r.detail}` : ''}\n`)
+          return 1
+        }
+        const rs = r.restart!
+        out(`bot ${r.username ?? `for "${r.peer}"`} added + interfaced to "${r.peer}"\n`)
+        out(
+          rs.state === 'restarted'
+            ? `router restarted — credentials loaded\n`
+            : `router restart ${rs.state}${rs.detail ? ` — ${rs.detail}` : ''} (the channel stays dead until the router restarts)\n`,
+        )
+        out(`activation: send the bot ${r.username ?? '(see @BotFather)'} its FIRST message — Telegram does not let a bot start the chat\n`)
+        return rs.state === 'restarted' ? 0 : 1
+      }
+      case 'enable': {
+        // Per-peer capability install (contract Установка §3): install <plugin>@agfpd
+        // per-runtime (claude project-scope IN the peer cwd / codex global) + enable +
+        // call the plugin's `setup` ONLY if its iapeer.json declares it. Idempotent and
+        // fleet-safe — claude is keyed by the peer's projectPath. `enable <plugin> [peer]`.
+        if (!positionals[0]) return usage(errOut)
+        const { enableCapability } = await import('../enable/index.ts')
+        const r = enableCapability({
+          plugin: positionals[0],
+          peer: positionals[1],
+          noSetup: flags['no-setup'] === true,
+          env,
+        })
+        for (const rt of r.runtimes) {
+          out(`  ${rt.runtime}: ${rt.state}${rt.detail ? ` — ${rt.detail}` : ''}\n`)
+        }
+        out(`enable ${r.plugin} @ ${r.personality}: setup ${r.setup}${r.setupDetail ? ` — ${r.setupDetail}` : ''}\n`)
+        return r.runtimes.some(rt => rt.state === 'failed') || r.setup === 'failed' ? 1 : 0
+      }
+      case 'attach': {
+        if (!positionals[0]) return usage(errOut)
+        const r = await attachPeer({ personality: positionals[0], runtime: positionals[1], env })
+        if (!r.ok) {
+          errOut(`attach: ${r.reason}\n`)
+          return 1
+        }
+        out(`${r.woke ? 'woke + ' : ''}attaching ${r.identity}…\n`)
+        const attachCfg = loadLifecycleConfig(env)
+        return await attachIntoSession(r.identity, r.socketPath, env, attachCfg.eventLogDir, r.woke)
+      }
+      case 'shadow': {
+        // Read-only fidelity OBSERVER for the tmux→pty migration burn-in (track «b»). Compares
+        // the pty-model verdicts (occupancy/ready-gate/liveness) vs live tmux verdicts on the
+        // warm fleet, logs to <eventLogDir>/shadow-fidelity.{jsonl,json}. STRICTLY read-only —
+        // nothing in delivery/lifecycle imports the shadow module; the dynamic import keeps
+        // @xterm OUT of the hot path (the daemon never loads it). --once | --minutes <m> |
+        // --interval <ms>; stop a long run with `touch <eventLogDir>/shadow-fidelity.STOP`.
+        const cfg = loadLifecycleConfig(env)
+        const { runShadowFidelity } = await import('../shadow/index.ts')
+        await runShadowFidelity({
+          logDir: cfg.logDir,
+          eventLogDir: cfg.eventLogDir,
+          sockDir: cfg.sockDir,
+          intervalMs: flags.interval ? Number(flags.interval) : 5000,
+          maxMinutes: flags.minutes ? Number(flags.minutes) : 0,
+          once: flags.once === true,
+          log: errOut,
+        })
+        out(`shadow-fidelity → ${cfg.eventLogDir}/shadow-fidelity.json\n`)
+        return 0
+      }
+      case 'shadow-install': {
+        // Code-managed install of the always-on shadow burn-in launchd job
+        // (com.iapeer.shadow-fidelity) — reproducible, ownership-sentinel-guarded, and
+        // re-cycled automatically by `iapeer update` / `rollback`. Replaces a hand-written
+        // plist. Idempotent (no-op on an unchanged, loaded job). install.ts carries NO @xterm
+        // — dynamic-imported anyway to keep the CLI's common path light.
+        const { installShadowJob } = await import('../shadow/install.ts')
+        const r = installShadowJob(env)
+        if (r.action === 'failed' || r.action === 'refused-foreign') {
+          errOut(`shadow-install: ${r.action}${r.detail ? ` — ${r.detail}` : ''}\n  plist: ${r.path}\n`)
+          return 1
+        }
+        out(`shadow burn-in job ${r.action} (plist ${r.changed ? 'written' : 'unchanged'}): ${r.path}\n`)
+        return 0
+      }
+      case 'shadow-uninstall': {
+        // Stop + remove the burn-in job (bootout + rm) — the CORRECT halt (KeepAlive would
+        // respawn past the STOP sentinel). Refuses a non-foundation plist (ownership guard).
+        const { uninstallShadowJob } = await import('../shadow/install.ts')
+        const r = uninstallShadowJob(env)
+        if (r.action === 'failed' || r.action === 'refused-foreign') {
+          errOut(`shadow-uninstall: ${r.action}${r.detail ? ` — ${r.detail}` : ''}\n  plist: ${r.path}\n`)
+          return 1
+        }
+        out(`shadow burn-in job ${r.action}: ${r.path}\n`)
+        return 0
+      }
+      case 'supervisor': {
+        // DARK (cutover Block 2): the detach-persistent pty-supervisor (PoC pts.mjs port). NOT
+        // wired into delivery/launch — it serves NOTHING on the live fleet; it is validated on
+        // throwaway `tick` sessions. The dynamic import keeps @xterm OUT of the daemon hot path
+        // (the daemon never loads this). Sub-commands: up|start|attach|list|kill|daemon.
+        const { runSupervisorCli } = await import('../supervisor/index.ts')
+        return await runSupervisorCli(rest)
+      }
+      default: {
+        // `iapeer <runtime>` (launch) — folder-launch the cwd's peer, ALWAYS fresh. On a TTY this is
+        // the human "start a fresh session and work in it" verb (parallel to `attach`, which resumes):
+        // after a successful fresh bring-up it drops the operator straight into the new session.
+        // Non-TTY (scripted / piped) keeps the fire-and-forget behavior — report the launch and exit.
+        if (verb && isRuntime(verb)) {
+          const cfg = loadLifecycleConfig(env)
+          const id = resolveIdentity({ env })
+          const r = await folderLaunch({ cwd: process.cwd(), runtime: verb, env, cfg })
+          if (r.status === 'FAILED') {
+            errOut(`launch: ${r.reason}\n`)
+            return 1
+          }
+          const identity = r.process_address ?? buildProcessAddress(verb, id.personality)
+          if (process.stdin.isTTY && process.stdout.isTTY) {
+            const socketPath = buildSocketPath(verb, id.personality, cfg.sockDir)
+            out(`launched ${identity} (fresh) — attaching…\n`)
+            return await attachIntoSession(identity, socketPath, env, cfg.eventLogDir, true)
+          }
+          out(`launched ${identity} (fresh)\n`)
+          return 0
+        }
+        return usage(errOut)
+      }
+    }
+  } catch (e) {
+    errOut(`iapeer ${verb ?? ''}: ${e instanceof Error ? e.message : String(e)}\n`)
+    return 1
+  }
+}
+
+function usage(errOut: (s: string) => void): number {
+  errOut(USAGE)
+  return 2
+}
+
+/** Default --from for `send`: the identity of the peer in the current cwd (contract:
+ *  "по умолчанию — identity пира текущей папки"). Requires running from a peer cwd. */
+function defaultFromIdentity(env: NodeJS.ProcessEnv): string {
+  return resolveIdentity({ env }).address
+}
+
+/** Drop the operator into a live peer session — the interactive open shared by `attach` (resume)
+ *  and a TTY `iapeer <runtime>` (fresh launch). A supervisor-HOSTED session has no tmux to attach,
+ *  so the operator is handed to the supervisor client (raw passthrough + repaint-on-attach + Ctrl-]
+ *  detach); otherwise `tmux attach`. The operator window is bracketed in lifecycle.log
+ *  (ev=attach … ev=attach-end) so a death timestamp inside the window reads directly off the log.
+ *  Returns the client exit code. */
+async function attachIntoSession(
+  identity: string,
+  socketPath: string,
+  env: NodeJS.ProcessEnv,
+  eventLogDir: string,
+  woke: boolean,
+): Promise<number> {
+  appendLifecycleEvent(eventLogDir, { ev: 'attach', identity, woke: String(woke) }, { env })
+  if (hostSessionAlive(identity)) {
+    // runSupervisorClient calls process.exit on every terminal path → bracket attach-end via an
+    // exit hook (appendFileSync is signal/exit-safe).
+    process.on('exit', () =>
+      appendLifecycleEvent(eventLogDir, { ev: 'attach-end', identity, rc: process.exitCode ?? 0 }, { env }),
+    )
+    await runSupervisorClient(hostRunDir(), identity)
+    return 0 // unreachable — runSupervisorClient exits on detach / session end
+  }
+  // `env -u TMUX` so a nested attach from inside tmux does not error ("sessions should be nested
+  // with care").
+  const attachEnv = { ...env }
+  delete attachEnv.TMUX
+  const a = spawnSync('tmux', ['-S', socketPath, 'attach', '-t', identity], {
+    stdio: 'inherit',
+    env: attachEnv as Record<string, string>,
+  })
+  appendLifecycleEvent(eventLogDir, { ev: 'attach-end', identity, rc: a.status ?? -1 }, { env })
+  return a.status ?? 0
+}
+
+if (import.meta.main) {
+  runCli(process.argv.slice(2)).then(code => process.exit(code))
+}

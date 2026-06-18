@@ -1,0 +1,19 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local-only — NOT tracked, NOT to GitHub. Only docs/ + src/bin go to the repo.
+# Claude Code / Codex local project config, this peer's local doctrine + runtime
+# scope, the daemon-socket MCP wiring, the agent dev-docs and internal planning.
+.claude/
+.codex/
+.agents/
+.iapeer/
+.mcp.json
+CLAUDE.md
+AGENTS.md
+_planning/
+
+# Internal architecture/contract notes — kept locally for development, NOT public.
+# Product docs (docs/*.md) ship; docs/internals/ does not.
+docs/internals/

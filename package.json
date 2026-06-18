@@ -1,0 +1,66 @@
+{
+  "name": "@agfpd/iapeer",
+  "version": "0.2.98",
+  "description": "Foundation core for the iapeer multi-agent ecosystem: identity, registry, storage, codec.",
+  "license": "Apache-2.0",
+  "author": "agfpd",
+  "homepage": "https://github.com/agfpd/iapeer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agfpd/iapeer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agfpd/iapeer/issues"
+  },
+  "keywords": [
+    "multi-agent",
+    "agents",
+    "mcp",
+    "ipc",
+    "launchd",
+    "bun"
+  ],
+  "type": "module",
+  "bin": {
+    "iapeer": "bin/iapeer"
+  },
+  "files": [
+    "src",
+    "bin",
+    "tsconfig.json",
+    "!src/**/*.test.ts"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./storage": "./src/storage/index.ts",
+    "./identity": "./src/identity/index.ts",
+    "./registry": "./src/registry/index.ts",
+    "./codec": "./src/codec/index.ts"
+  },
+  "scripts": {
+    "test": "IAPEER_TEST_SANDBOX=1 bun test",
+    "typecheck": "tsc --noEmit",
+    "preversion": "npm run test && npm run typecheck",
+    "release": "npm version patch && npm publish && git push --follow-tags",
+    "release:minor": "npm version minor && npm publish && git push --follow-tags",
+    "release:major": "npm version major && npm publish && git push --follow-tags",
+    "prepublishOnly": "test -z \"$(git status --porcelain)\" || (echo 'release: working tree is dirty — commit or stash before release' >&2 && exit 1)"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/headless": "6.0.0",
+    "proper-lockfile": "^4.1.2",
+    "transliteration": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.6.0"
+  }
+}
