@@ -10,10 +10,10 @@
 #   3. installs @agfpd/iapeer (compiles the stable ~/.local/bin/iapeer binary +
 #      the ~/.iapeer scaffold + the always-on daemon plist)
 #   4. makes sure ~/.local/bin is on your PATH
-#   5. hands off to `iapeer onboard` — the interactive host-setup step. Onboard
-#      surfaces the security checks (runtime auth, macOS Full Disk Access) and
-#      asks before installing the memory provider; this installer NEVER bypasses
-#      it — you see and answer the gate yourself.
+#   5. prints a NEXT-STEP — run `iapeer onboard` yourself in a normal terminal.
+#      The interactive wizard needs a real TTY; this installer never runs it under
+#      curl|sh (a raw-mode prompt fed by the script pipe would wedge). Onboard then
+#      surfaces the security checks + asks before installing the memory provider.
 #
 # Prefer not to pipe to a shell? The README documents the same steps run by hand:
 #   https://github.com/agfpd/iapeer#install
@@ -56,8 +56,24 @@ else
 fi
 
 # ── 3. install @agfpd/iapeer (builds the binary + scaffold + daemon plist) ───
-say "installing @agfpd/iapeer (this compiles ~/.local/bin/iapeer) …"
-run 'bunx @agfpd/iapeer'
+# Pin the EXACT latest version. A bare `bunx @agfpd/iapeer` can reuse a STALE
+# locally-cached package (bun: "checks for a locally installed package first"), so
+# a re-install on a non-pristine machine may rebuild an OLD binary. Resolving the
+# exact version from the npm registry (curl — no npm needed) forces a fresh fetch.
+IAPEER_PKG='@agfpd/iapeer'
+IAPEER_VER="$(curl -fsSL https://registry.npmjs.org/@agfpd/iapeer/latest 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1)"
+if [ -n "$IAPEER_VER" ]; then
+  IAPEER_PKG="@agfpd/iapeer@$IAPEER_VER"
+else
+  IAPEER_PKG='@agfpd/iapeer@latest'
+  warn "could not resolve exact version from the registry — falling back to @latest"
+fi
+# Heads-up BEFORE the build code-signs the binary (no surprise: a mid-install Mac
+# password prompt otherwise reads as a bug to a new user).
+say "installing $IAPEER_PKG — this compiles and code-signs ~/.local/bin/iapeer."
+say "macOS may ask for your LOGIN KEYCHAIN PASSWORD — that is the local signing"
+say "identity that keeps Full Disk Access across updates. It's expected; allow it."
+run "bunx $IAPEER_PKG"
 
 # ── 4. ensure ~/.local/bin is on PATH (now, and for future shells) ──────────
 LOCAL_BIN="$HOME/.local/bin"
