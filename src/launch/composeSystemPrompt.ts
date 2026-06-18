@@ -103,6 +103,14 @@ export function composeSystemPrompt(input: ComposePromptInput): string {
   // The YAML identity block is the only Layer-1 section (synthesized, no marker).
   const sections: string[] = [yaml]
 
+  // Host-context pointer to the on-host ecosystem docs (FU6). Each package's install
+  // scaffolds its own contract docs to the stable, versioned, per-package path
+  // ~/.iapeer/docs/<package>/, so an agent can read "how does iapeer do X" offline
+  // instead of guessing. Synthesized Layer-1 fact (no marker). Wording: owner-approved.
+  sections.push(
+    'iapeer reference docs are on this host at ~/.iapeer/docs/ — one folder per package (start at iapeer/README.md). Consult them for how iapeer works instead of guessing.',
+  )
+
   // Layer 2 — IAPEER.md doctrine, GLOBAL then LOCAL (general → specific), each its
   // OWN marked file-section. The bash existence-gate (present-but-empty global → a
   // bare "\n") is dropped deliberately: an empty doctrine file now contributes no

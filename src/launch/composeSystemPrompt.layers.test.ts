@@ -387,13 +387,14 @@ describe('gatherPromptInput — FS discovery of all 4 layers', () => {
     expect(input.pluginDomains).toEqual([])
     expect(input.promptFragments).toEqual([]) // no fragments/ subdir → empty layer
     expect(input.peers).toEqual([])
-    // composes to just the YAML block (no doctrine, no layers); the per-file
-    // assembly normalizes the single section's trailing newlines to exactly one.
+    // composes to the YAML block + the always-present Layer-1 on-host docs pointer
+    // (no doctrine, no layers); the per-file assembly normalizes trailing newlines.
     const prompt = composeSystemPrompt(input)
     expect(prompt).not.toContain('## Known peers')
     expect(prompt).not.toContain('<!--') // no files → no markers
-    expect(prompt.endsWith('---\n')).toBe(true)
-    expect(prompt.endsWith('---\n\n')).toBe(false)
+    expect(prompt).toContain('---\n\niapeer reference docs are on this host at ~/.iapeer/docs/')
+    expect(prompt.endsWith('guessing.\n')).toBe(true)
+    expect(prompt.endsWith('\n\n')).toBe(false)
   })
 
   test('doctrine excluded from Layer 4 case-INSENSITIVELY; .MD ext picked up (verify edge-lens fix)', () => {

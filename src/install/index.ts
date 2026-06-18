@@ -15,7 +15,7 @@
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
 import { homedir } from 'os'
-import { join, relative, sep } from 'path'
+import { basename, join, relative, sep } from 'path'
 import { spawnSync } from 'child_process'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { signInstalledBinary, type SigningOutcome } from './signing.ts'
@@ -132,9 +132,11 @@ export function scaffoldHostDocs(
     mkdirSync(join(dest, '..'), { recursive: true })
     cpSync(docsSource, tmp, {
       recursive: true,
-      // Skip the internals/ subtree (matches package.json files: "!docs/internals").
-      // Returning false for a directory skips its whole subtree.
+      // Skip the internals/ subtree (matches package.json files: "!docs/internals";
+      // returning false for a directory skips its whole subtree) and macOS .DS_Store
+      // cruft (the foundation is macOS-targeted, so every dev/host tree carries it).
       filter: src => {
+        if (basename(src) === '.DS_Store') return false
         const rel = relative(docsSource, src)
         return rel !== 'internals' && !rel.startsWith(`internals${sep}`)
       },

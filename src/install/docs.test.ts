@@ -20,6 +20,7 @@ function writeDocsFixture(): void {
   writeFileSync(join(docsSrc, '03-peers.md'), 'peers')
   writeFileSync(join(docsSrc, 'ru', '03.md'), 'пиры')
   writeFileSync(join(docsSrc, 'internals', 'secret.md'), 'internal-only')
+  writeFileSync(join(docsSrc, '.DS_Store'), 'macos-cruft') // must NOT be copied
 }
 
 beforeEach(() => {
@@ -37,6 +38,7 @@ describe('scaffoldHostDocs', () => {
     expect(readFileSync(join(r.dest, 'README.md'), 'utf8')).toBe('# contract')
     expect(existsSync(join(r.dest, 'ru', '03.md'))).toBe(true)
     expect(existsSync(join(r.dest, 'internals'))).toBe(false) // internals subtree skipped
+    expect(existsSync(join(r.dest, '.DS_Store'))).toBe(false) // macOS cruft skipped
     expect(existsSync(`${r.dest}.tmp-${process.pid}`)).toBe(false) // no temp leftover
   })
 

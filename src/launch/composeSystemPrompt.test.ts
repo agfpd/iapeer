@@ -112,9 +112,14 @@ describe('composeSystemPrompt — per-file path markers (Layer 2 doctrine)', () 
     )
   })
 
-  test('marker sits AFTER the YAML block (one blank line between)', () => {
+  test('the on-host docs pointer is Layer 1 (after the YAML block, before doctrine)', () => {
     const out = composeSystemPrompt(input)
-    expect(out).toContain('---\n\n<!-- ~/.iapeer/IAPEER.md -->')
+    // FU6 — owner-approved wording (B, per-package adapted); verbatim guard so it
+    // cannot silently drift, and it sits between the YAML close and the first marker.
+    expect(out).toContain(
+      '---\n\niapeer reference docs are on this host at ~/.iapeer/docs/ — one folder per package (start at iapeer/README.md). Consult them for how iapeer works instead of guessing.',
+    )
+    expect(out.indexOf('iapeer reference docs are on this host')).toBeLessThan(out.indexOf('<!-- ~/.iapeer/IAPEER.md -->'))
   })
 
   test('a path-less content (pure-renderer caller) renders WITHOUT a marker', () => {
