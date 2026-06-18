@@ -44,9 +44,9 @@
     "test": "IAPEER_TEST_SANDBOX=1 bun test",
     "typecheck": "tsc --noEmit",
     "preversion": "npm run test && npm run typecheck",
-    "release": "npm version patch && npm publish && git push --follow-tags",
-    "release:minor": "npm version minor && npm publish && git push --follow-tags",
-    "release:major": "npm version major && npm publish && git push --follow-tags",
+    "release": "npm version patch && npm publish && git push origin main --follow-tags",
+    "release:minor": "npm version minor && npm publish && git push origin main --follow-tags",
+    "release:major": "npm version major && npm publish && git push origin main --follow-tags",
     "prepublishOnly": "test -z \"$(git status --porcelain)\" || (echo 'release: working tree is dirty — commit or stash before release' >&2 && exit 1)"
   },
   "publishConfig": {
