@@ -25,6 +25,11 @@ export interface MemoryOnboardOptions {
   skip?: boolean
   /** --memory <pkg>: override the provider package (default @agfpd/iapeer-memory). */
   package?: string
+  /** Host agentic runtime to thread to the provider init (`--runtime <rt>`) — the
+   *  onboard↔init contract: the provider provisions its role-peers (index/watcher/
+   *  timer) on THIS runtime instead of guessing. Omitted on a no-runtime host →
+   *  the provider degrades (base+BM25, role-peers skipped). */
+  runtime?: string
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
   /** Wall-clock backstop (ms) for the provider-init subprocess — a hung provider
@@ -108,7 +113,7 @@ export async function onboardMemoryProvider(opts: MemoryOnboardOptions = {}): Pr
       detail: `slot is occupied by "${existing.provider}" (${existing.package}) — uninstall it first`,
     }
   }
-  const args = ['init', ...coreKnownInitArgs(env)]
+  const args = ['init', ...coreKnownInitArgs(env), ...(opts.runtime ? ['--runtime', opts.runtime] : [])]
   if (opts.dryRun) {
     return { state: 'dry-run', provider: null, detail: `would run: npx -y ${pkg} ${args.join(' ')}` }
   }

@@ -63,7 +63,7 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     const ignore = (): void => {}
     process.on('SIGINT', ignore)
     try {
-      const mem = await onboardMemoryProvider({ env, timeoutMs: 12 * 60_000 })
+      const mem = await onboardMemoryProvider({ env, runtime: result.hostRuntime, timeoutMs: 12 * 60_000 })
       const label = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
       process.stdout.write(`\nmemory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${label})\n`)
     } catch (e) {

@@ -20,6 +20,10 @@ export interface WizardResult {
   memoryConsent: boolean
   advisories: string[]
   summary: string[]
+  /** Host agentic runtime detected during the run (claude if installed, else
+   *  codex, else undefined on a no-runtime host) — threaded to the memory
+   *  provider init as `--runtime` per the onboard↔init contract. */
+  hostRuntime?: OnboardRuntime
 }
 
 type Phase = 'gate' | 'running' | 'memory' | 'declined' | 'finishing'
@@ -85,6 +89,7 @@ export function OnboardApp({
   const [phase, setPhase] = useState<Phase>('gate')
   const [steps, setSteps] = useState<Step[]>([])
   const [advisories, setAdvisories] = useState<string[]>([])
+  const [hostRuntime, setHostRuntime] = useState<OnboardRuntime | undefined>(undefined)
   const spin = useSpinnerFrame(phase === 'running')
 
   const finish = (memoryConsent: boolean): void => {
@@ -94,7 +99,7 @@ export function OnboardApp({
       return `  ${mark} ${s.label}${s.detail ? ` — ${s.detail}` : ''}`
     })
     summary.unshift(failed ? 'Onboard finished with errors:' : 'Onboard complete:')
-    onResult({ code: failed ? 1 : 0, memoryConsent, advisories, summary })
+    onResult({ code: failed ? 1 : 0, memoryConsent, advisories, summary, hostRuntime })
     setPhase('finishing')
     setTimeout(() => exit(), 30)
   }
@@ -164,6 +169,9 @@ export function OnboardApp({
       const r = onboardHost({ env })
       const installed: OnboardRuntime[] = []
       for (const m of r.marketplaces) if (m.state !== 'runtime-missing') installed.push(m.runtime)
+      // host-runtime for the memory init contract: claude if present (covers
+      // both-installed → claude default), else codex, else undefined (no runtime).
+      setHostRuntime(installed.includes('claude') ? 'claude' : installed[0])
       const mFail = r.marketplaces.some(m => m.state === 'failed')
       const allMissing = r.marketplaces.length > 0 && r.marketplaces.every(m => m.state === 'runtime-missing')
       set('market', {
