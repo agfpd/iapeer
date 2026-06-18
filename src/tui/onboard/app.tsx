@@ -219,8 +219,11 @@ export function OnboardApp({
       if (installed.length === 0) {
         set('auth', { status: 'warn', detail: 'no runtime installed' })
         adv.push(
-          '⚠ SETUP INCOMPLETE — no agent runtime found. iapeer needs Claude Code or Codex CLI\n' +
-            '  to run peers. Install one, sign in, then re-run `iapeer onboard`.',
+          '⚠ SETUP INCOMPLETE — no agent runtime found. iapeer needs an agent runtime: Claude Code OR Codex (either works).\n' +
+            '  Install EITHER (commands verified against the official docs), sign in, then re-run `iapeer onboard`:\n' +
+            '    Claude Code:  curl -fsSL https://claude.ai/install.sh | bash   (or: brew install --cask claude-code)\n' +
+            '    Codex:        npm install -g @openai/codex                     (or: brew install --cask codex)\n' +
+            '  If a download is blocked in your region, try the brew form or the other runtime.',
         )
       } else {
         const notes = installed.map(rt => runtimeAuthNote(rt, env)).filter((n): n is string => n != null)

@@ -19,6 +19,7 @@
 import React from 'react'
 import { render } from 'ink'
 import { OnboardApp, type WizardResult } from './app.tsx'
+import { type Ansi, colorEnabled, makeAnsi } from '../ansi.ts'
 
 /** Sentinel: the environment is not a real interactive TTY — caller should fall
  *  back to the linear non-interactive onboard path (never render raw + hang). */
@@ -28,6 +29,36 @@ export interface OnboardWizardOptions {
   env?: NodeJS.ProcessEnv
 }
 
+/** Style one post-Ink summary line to match the Ink wizard exactly: the headline
+ *  (no leading glyph) bold — red when it announces errors; each item line keeps its
+ *  glyph colored by status (✓ green / ! yellow / ✗ red / · gray) and dims the
+ *  trailing " — detail", just as the in-wizard render does. */
+function paintSummaryLine(line: string, a: Ansi): string {
+  const m = line.match(/^(\s*)([✓!✗·]) (.*)$/)
+  if (!m) return /error/i.test(line) ? a.bold(a.red(line)) : a.bold(line)
+  const [, indent, mark, rest] = m
+  const paintMark = mark === '✓' ? a.green : mark === '!' ? a.yellow : mark === '✗' ? a.red : a.gray
+  const i = rest.indexOf(' — ')
+  const label = i >= 0 ? rest.slice(0, i) : rest
+  const detail = i >= 0 ? rest.slice(i) : ''
+  return `${indent}${paintMark(mark)} ${label}${detail ? a.dim(detail) : ''}`
+}
+
+/** Color a `prefix: state[ rest]` progress line by the state's semantics, matching
+ *  the wizard palette + the cross-CLI convention agreed with iapeer-memory: red for
+ *  failure, GRAY for a neutral skip/decline (· semantics — yellow is reserved for
+ *  warn/attention, not "user chose not to"), yellow for warn, green otherwise. */
+function paintResult(prefix: string, state: string, rest: string, a: Ansi): string {
+  const paint = /(fail|error|refus)/i.test(state)
+    ? a.red
+    : /(skip|declin)/i.test(state)
+      ? a.gray
+      : /(warn|missing|incomplete)/i.test(state)
+        ? a.yellow
+        : a.green
+  return `${a.bold(`${prefix}:`)} ${paint(state)}${rest}`
+}
+
 /** Render the interactive onboard wizard. Resolves with the process exit code, or
  *  WIZARD_NOT_INTERACTIVE when there is no real TTY to drive it. */
 export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise<number> {
@@ -35,6 +66,10 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
     return WIZARD_NOT_INTERACTIVE
   }
+  // Post-Ink lines are plain stdout (Ink has unmounted), so they carry their own
+  // ANSI to stay visually continuous with the wizard. Gated: real TTY here (the
+  // wizard only runs on one), off under NO_COLOR.
+  const a = makeAnsi(colorEnabled(env, process.stdout))
 
   let result: WizardResult = { code: 0, memoryConsent: false, telegramConsent: false, advisories: [], summary: [] }
   try {
@@ -57,54 +92,79 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
   try {
     if (result.telegramConsent) {
       const { onboardTelegramStep } = await import('../../onboard/steps.ts')
-      process.stdout.write('\nSetting up Telegram… (Ctrl-C to skip — add later: `iapeer create <you> --runtime telegram`)\n')
+      process.stdout.write(
+        '\n' +
+          a.bold('Setting up Telegram…') +
+          a.dim(' (Ctrl-C to skip — add later: `iapeer create <you> --runtime telegram`)') +
+          '\n',
+      )
       try {
         const ts = await onboardTelegramStep({ env })
-        process.stdout.write(`telegram: ${ts.state}${ts.detail ? ` — ${ts.detail}` : ''}\n`)
+        process.stdout.write(paintResult('telegram', ts.state, ts.detail ? ` — ${ts.detail}` : '', a) + '\n')
       } catch (e) {
-        process.stdout.write(`telegram: step skipped — ${e instanceof Error ? e.message : String(e)}\n`)
+        process.stdout.write(paintResult('telegram', 'step skipped', ` — ${e instanceof Error ? e.message : String(e)}`, a) + '\n')
       }
     } else {
-      process.stdout.write('\ntelegram: skipped — add later with `iapeer create <you> --runtime telegram`\n')
+      process.stdout.write(
+        '\n' + paintResult('telegram', 'skipped', ' — add later with `iapeer create <you> --runtime telegram`', a) + '\n',
+      )
     }
 
     if (result.memoryConsent) {
       const { onboardMemoryProvider } = await import('../../onboard/memory.ts')
       process.stdout.write(
-        '\nInstalling the shared-memory provider (@agfpd/iapeer-memory)…\n' +
-          'This can take a few minutes — it builds a native module. Memory is OPTIONAL:\n' +
-          'press Ctrl-C to skip it (set it up later with `npx @agfpd/iapeer-memory init`).\n\n',
+        '\n' +
+          a.bold('Installing the shared-memory provider (@agfpd/iapeer-memory)…') +
+          '\n' +
+          a.dim(
+            'This can take a few minutes — it builds a native module. Memory is OPTIONAL:\n' +
+              'press Ctrl-C to skip it (set it up later with `npx @agfpd/iapeer-memory init`).',
+          ) +
+          '\n\n',
       )
       try {
         const mem = await onboardMemoryProvider({ env, runtime: result.hostRuntime, timeoutMs: 12 * 60_000 })
         const label = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
-        process.stdout.write(`\nmemory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${label})\n`)
+        const rest = `${mem.detail ? ` — ${mem.detail}` : ''} ${a.dim(`(slot: ${label})`)}`
+        process.stdout.write('\n' + paintResult('memory', mem.state, rest, a) + '\n')
       } catch (e) {
-        process.stdout.write(
-          `\nmemory: step skipped — ${e instanceof Error ? e.message : String(e)} (set up later: \`npx @agfpd/iapeer-memory init\`)\n`,
-        )
+        const rest = ` — ${e instanceof Error ? e.message : String(e)} ${a.dim('(set up later: `npx @agfpd/iapeer-memory init`)')}`
+        process.stdout.write('\n' + paintResult('memory', 'step skipped', rest, a) + '\n')
       }
     } else {
-      process.stdout.write('\nmemory: skipped — set it up later with `npx @agfpd/iapeer-memory init`\n')
+      process.stdout.write(
+        '\n' + paintResult('memory', 'skipped', ' — set it up later with `npx @agfpd/iapeer-memory init`', a) + '\n',
+      )
     }
   } finally {
     process.removeListener('SIGINT', ignore)
     for (const h of prevInt) process.on('SIGINT', h as NodeJS.SignalsListener)
   }
 
-  // Final summary (plain text, post-Ink).
+  // Final summary (post-Ink, ANSI-styled to match the wizard's palette).
   process.stdout.write('\n')
-  for (const line of result.summary) process.stdout.write(line + '\n')
+  for (const line of result.summary) process.stdout.write(paintSummaryLine(line, a) + '\n')
   if (result.advisories.length > 0) {
     process.stdout.write('\n')
-    for (const a of result.advisories) process.stdout.write(a + '\n')
+    // Advisories mirror the wizard's yellow box (a multi-line entry stays yellow
+    // line-to-line until the trailing reset).
+    for (const adv of result.advisories) process.stdout.write(a.yellow(adv) + '\n')
   }
-  process.stdout.write('\nNext steps:\n')
-  process.stdout.write('  • Create your first agent:  iapeer create <name> --runtime claude\n')
+
+  // Next steps — an aligned 2-column block (label padded, command highlighted), the
+  // bot-token left as its own explicit step (no surprise / don't-make-them-guess).
+  const next: Array<{ label: string; cmd: string; note?: string }> = [
+    { label: 'Create your first agent', cmd: 'iapeer create <name> --runtime claude' },
+  ]
   if (result.telegramConsent) {
-    // The wizard set up the human peer (name + user_id) but NOT the bot itself —
-    // the bot token is a separate, explicit step (no surprise / don't-make-them-guess).
-    process.stdout.write('  • Activate Telegram:        iapeer connect telegram   (paste a bot token from @BotFather)\n')
+    next.push({ label: 'Activate Telegram', cmd: 'iapeer connect telegram', note: 'paste a bot token from @BotFather' })
+  }
+  const w = Math.max(...next.map(n => n.label.length))
+  process.stdout.write('\n' + a.bold('Next steps:') + '\n')
+  for (const n of next) {
+    process.stdout.write(
+      `  ${a.cyan('•')} ${n.label.padEnd(w)}   ${a.cyan(n.cmd)}${n.note ? '  ' + a.dim(`(${n.note})`) : ''}\n`,
+    )
   }
   return result.code
 }

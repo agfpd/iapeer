@@ -157,14 +157,23 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
 
 const GLYPH: Record<RuntimeLiveness, string> = { live: '●', asleep: '○', stopped: '✕' }
 
-/** Render the scriptable list table (non-tty default). */
+/** Render the scriptable list table (non-tty default). Columns are PADDED to align
+ *  (name · [default] · nature · liveness) — a ragged table reads as noise. The
+ *  trailing liveness column is variable-width, so it needs no padding. */
 export function formatListTable(rows: PeerListing[]): string {
   if (rows.length === 0) return 'no peers registered\n'
-  const lines = rows.map(r => {
-    const status = r.runtimes.map(s => `${GLYPH[s.status]} ${s.runtime}`).join('  ')
-    const la = r.last_active_runtime ? ` last-active:${r.last_active_runtime}` : ''
-    return `${r.personality}  [${r.default_runtime}]  ${r.intelligence}  ${status}${la}`
-  })
+  const cells = rows.map(r => ({
+    name: r.personality,
+    rt: `[${r.default_runtime}]`,
+    intel: r.intelligence,
+    status:
+      r.runtimes.map(s => `${GLYPH[s.status]} ${s.runtime}`).join('  ') +
+      (r.last_active_runtime ? `  last-active:${r.last_active_runtime}` : ''),
+  }))
+  const wName = Math.max(...cells.map(c => c.name.length))
+  const wRt = Math.max(...cells.map(c => c.rt.length))
+  const wIntel = Math.max(...cells.map(c => c.intel.length))
+  const lines = cells.map(c => `${c.name.padEnd(wName)}  ${c.rt.padEnd(wRt)}  ${c.intel.padEnd(wIntel)}  ${c.status}`)
   return lines.join('\n') + '\n'
 }
 
@@ -939,49 +948,146 @@ export function parseArgs(argv: string[]): { positionals: string[]; flags: Recor
   return { positionals, flags }
 }
 
-const USAGE = `usage: iapeer <verb> [args]
-  install                                                        build binary + global scaffold + daemon plist (one bootstrap)
-  update [version] [--force]                                     pull latest (or exact) @agfpd/iapeer from npm + restart daemon + recycle owned infra jobs
-  rollback                                                       revert to the previous binary (.prev) + restart daemon + recycle owned infra jobs
-  uninstall [--dry-run] [--yes] [--remove-codesign-identity]     remove THIS foundation install (binary, ~/.iapeer, daemon plist, PATH lines); refuses if a persistent-peer fleet is present
-  version | --version | -v                                       print the installed binary's version
-  help | --help | -h                                             print this usage (works appended to any verb; executes nothing)
-  daemon [--install-plist]                                       run the host-wide HTTP-MCP router (launchd-held)
-  onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--infra <csv>]
-                                                                 backbone host-phase: marketplace → notifier → telegram (human peer) → memory (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively
-  status                                                         host snapshot: version, daemon health, memory slot (<provider> | none)
-  install-runtime <runtime> [--package pkg] [--npx]              npx-install a runtime package + deploy its declared peer-set
-  update-runtime <runtime> | --all [--force]                     version-gate → re-install + re-provision declared set → restart the runtime's peers
-  init [cwd] [--runtime r] [--description d]                     onboard the CURRENT folder as a peer (name = folder name; identity + MCP + doctrine)
-  create <personality> [--runtime r] [--path dir] [--bin abs]   create a peer anywhere (default ~/.iapeer/peers/<p>) + provision
-  list [--json]                                                  registered peers + per-runtime liveness
-  verify [--json] [--fix]                                        profile-standard conformance + index↔local drift (--fix self-heals the index + migrates legacy runtime→default_runtime in local profiles)
-  stop <peer> [runtime] | --all                                  warm peer: kill the live session + set a durable stop-flag — the daemon will NOT wake it
-                                                                 until \`start\`; always-on (notifier/telegram): launchctl bootout. --all = every registered peer
-  start <peer> [runtime] | --all                                 warm peer: clear the stop-flag — wakeable again; does NOT launch a session (the daemon brings
-                                                                 it up on the peer's first message); always-on: launchctl bootstrap. --all = every registered peer
-  refresh <peer> [runtime] | --all                               LAZY soft-reload: agentic peer comes up FRESH (re-reads doctrine) on its NEXT natural wake — no
-                                                                 kill, no burst-wake; non-agentic runtimes skipped. --all = whole fleet. (eager: \`new\`/self-fresh)
-  remove <peer> [--force]                                        delete a peer's registry record (locked writer); refuses a LIVE peer unless --force
-  send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]   manual IAP send (fallback)
-  <runtime>                                                      launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached
-  connect telegram <peer> [--token <t>]                          attach a telegram bot to a peer (bot add → interface → router restart; asks only the token)
-  enable <plugin> [peer] [--no-setup]                            install + enable an agfpd capability for a peer
-  new <peer> [runtime]                                           UNCONDITIONAL fresh restart: canary-clean kill + fresh wake (emergency lever for a hung/dead session — bypasses the peer; exit 0 = fresh session up+ready)
-  add-runtime <runtime> (--peer <p> | --all)                     add an agentic runtime to existing peer(s): runtimes-merge + scaffold + codex birth chain (pre-trust, native-memory, memory provision, MCP). default_runtime untouched
-  default-runtime <runtime> (--peer <p> | --all)                 flip the PRIMARY (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command
-  attach <peer> [runtime]                                        ensure-live + resume, then tmux attach
-  interrupt <peer> [runtime]                                     interrupt the current turn (Escape) — context intact
-  compact <peer> [runtime]                                       compact the peer's dialogue (/compact); resumes clean-asleep first
-  self-fresh                                                     (agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh
-  self-done                                                      (agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one
-  native-memory <off|on> (--peer <p> | --all)                    gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)
-  trust-hooks <hooks.json> [--check]                             pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report
-  shadow [--once | --minutes <m>] [--interval <ms>]              READ-ONLY tmux→pty fidelity observer (migration burn-in): compares pty-model verdicts vs live tmux on the warm fleet → ~/.iapeer/logs/iapeer/shadow-fidelity.json. Never delivers/mutates.
-  shadow-install                                                 install + load the always-on shadow burn-in launchd job (com.iapeer.shadow-fidelity); idempotent, re-cycled by update/rollback
-  shadow-uninstall                                               bootout + remove the shadow burn-in launchd job (the correct way to stop it; STOP file is respawned past by KeepAlive)
-  supervisor up|start|attach|list|kill <sess> [runtime]         DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)
-`
+/** Verb catalog for `help` — structured so the renderer can wrap descriptions to
+ *  the terminal width instead of overflowing a hand-aligned column (the old static
+ *  USAGE ran long descriptions off the right edge → collided with the next row on a
+ *  narrow terminal). `sig` = the invocation signature, `desc` = one prose line. */
+const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
+  { sig: 'install', desc: 'build binary + global scaffold + daemon plist (one bootstrap)' },
+  { sig: 'update [version] [--force]', desc: 'pull latest (or exact) @agfpd/iapeer from npm + restart daemon + recycle owned infra jobs' },
+  { sig: 'rollback', desc: 'revert to the previous binary (.prev) + restart daemon + recycle owned infra jobs' },
+  {
+    sig: 'uninstall [--dry-run] [--yes] [--remove-codesign-identity]',
+    desc: 'remove THIS foundation install (binary, ~/.iapeer, daemon plist, PATH lines); refuses if a persistent-peer fleet is present',
+  },
+  { sig: 'version | --version | -v', desc: "print the installed binary's version" },
+  { sig: 'help | --help | -h', desc: 'print this usage (works appended to any verb; executes nothing)' },
+  { sig: 'daemon [--install-plist]', desc: 'run the host-wide HTTP-MCP router (launchd-held)' },
+  {
+    sig: 'onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--infra <csv>]',
+    desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
+  },
+  { sig: 'status', desc: 'host snapshot: version, daemon health, memory slot (<provider> | none)' },
+  { sig: 'install-runtime <runtime> [--package pkg] [--npx]', desc: 'npx-install a runtime package + deploy its declared peer-set' },
+  { sig: 'update-runtime <runtime> | --all [--force]', desc: "version-gate → re-install + re-provision declared set → restart the runtime's peers" },
+  { sig: 'init [cwd] [--runtime r] [--description d]', desc: 'onboard the CURRENT folder as a peer (name = folder name; identity + MCP + doctrine)' },
+  { sig: 'create <personality> [--runtime r] [--path dir] [--bin abs]', desc: 'create a peer anywhere (default ~/.iapeer/peers/<p>) + provision' },
+  { sig: 'list [--json]', desc: 'registered peers + per-runtime liveness' },
+  {
+    sig: 'verify [--json] [--fix]',
+    desc: 'profile-standard conformance + index↔local drift (--fix self-heals the index + migrates legacy runtime→default_runtime in local profiles)',
+  },
+  {
+    sig: 'stop <peer> [runtime] | --all',
+    desc: 'warm peer: kill the live session + set a durable stop-flag — the daemon will NOT wake it until `start`; always-on (notifier/telegram): launchctl bootout. --all = every registered peer',
+  },
+  {
+    sig: 'start <peer> [runtime] | --all',
+    desc: "warm peer: clear the stop-flag — wakeable again; does NOT launch a session (the daemon brings it up on the peer's first message); always-on: launchctl bootstrap. --all = every registered peer",
+  },
+  {
+    sig: 'refresh <peer> [runtime] | --all',
+    desc: 'LAZY soft-reload: agentic peer comes up FRESH (re-reads doctrine) on its NEXT natural wake — no kill, no burst-wake; non-agentic runtimes skipped. --all = whole fleet. (eager: `new`/self-fresh)',
+  },
+  { sig: 'remove <peer> [--force]', desc: 'delete a peer\'s registry record (locked writer); refuses a LIVE peer unless --force' },
+  {
+    sig: 'send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]',
+    desc: 'manual IAP send (fallback)',
+  },
+  { sig: '<runtime>', desc: "launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached" },
+  { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token)' },
+  { sig: 'enable <plugin> [peer] [--no-setup]', desc: 'install + enable an agfpd capability for a peer' },
+  {
+    sig: 'new <peer> [runtime]',
+    desc: 'UNCONDITIONAL fresh restart: canary-clean kill + fresh wake (emergency lever for a hung/dead session — bypasses the peer; exit 0 = fresh session up+ready)',
+  },
+  {
+    sig: 'add-runtime <runtime> (--peer <p> | --all)',
+    desc: 'add an agentic runtime to existing peer(s): runtimes-merge + scaffold + codex birth chain (pre-trust, native-memory, memory provision, MCP). default_runtime untouched',
+  },
+  {
+    sig: 'default-runtime <runtime> (--peer <p> | --all)',
+    desc: 'flip the PRIMARY (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command',
+  },
+  { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then tmux attach' },
+  { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact' },
+  { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
+  { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
+  { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
+  { sig: 'native-memory <off|on> (--peer <p> | --all)', desc: "gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)" },
+  { sig: 'trust-hooks <hooks.json> [--check]', desc: 'pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report' },
+  {
+    sig: 'shadow [--once | --minutes <m>] [--interval <ms>]',
+    desc: 'READ-ONLY tmux→pty fidelity observer (migration burn-in): compares pty-model verdicts vs live tmux on the warm fleet → ~/.iapeer/logs/iapeer/shadow-fidelity.json. Never delivers/mutates.',
+  },
+  { sig: 'shadow-install', desc: 'install + load the always-on shadow burn-in launchd job (com.iapeer.shadow-fidelity); idempotent, re-cycled by update/rollback' },
+  { sig: 'shadow-uninstall', desc: 'bootout + remove the shadow burn-in launchd job (the correct way to stop it; STOP file is respawned past by KeepAlive)' },
+  {
+    sig: 'supervisor up|start|attach|list|kill <sess> [runtime]',
+    desc: 'DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)',
+  },
+]
+
+/** Greedy word-wrap to `width` columns. A token longer than `width` keeps its own
+ *  line (overflows rather than being split — never break a flag/path mid-token). */
+export function wrapText(text: string, width: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return ['']
+  const out: string[] = []
+  let cur = ''
+  for (const w of words) {
+    if (cur === '') cur = w
+    else if (cur.length + 1 + w.length <= width) cur += ` ${w}`
+    else {
+      out.push(cur)
+      cur = w
+    }
+  }
+  if (cur !== '') out.push(cur)
+  return out
+}
+
+/** The terminal width to lay help out for — capped so an ultrawide terminal doesn't
+ *  stretch descriptions into unreadably long lines; 80 when not a TTY. */
+function helpWidth(): number {
+  const c = process.stdout.columns
+  return c && c > 0 ? Math.min(c, 100) : 80
+}
+
+/** Render `iapeer help` as an aligned two-column block that wraps to `width`.
+ *  Signatures that fit the left column print inline with their (wrapped) description
+ *  in the right column; over-long signatures wrap on their own lines first, then the
+ *  description follows at the same right-column indent. Deterministic + width-pure
+ *  so it is unit-testable. */
+export function renderUsage(width: number = helpWidth()): string {
+  const W = Math.max(40, width)
+  const INDENT = 2
+  const GUTTER = 2
+  // Left column: longest signature, but capped (≤44, and shrunk on a narrow
+  // terminal) so the right column always keeps a readable ~20+ cols.
+  const longest = Math.max(...VERBS.map(v => v.sig.length))
+  const leftCol = Math.min(longest, 44, Math.max(16, W - 26))
+  const rightStart = INDENT + leftCol + GUTTER
+  const rightWidth = Math.max(20, W - rightStart)
+  const rightPad = ' '.repeat(rightStart)
+  const lines: string[] = ['usage: iapeer <verb> [args]']
+  for (const v of VERBS) {
+    const desc = wrapText(v.desc, rightWidth)
+    if (v.sig.length <= leftCol) {
+      lines.push(`${' '.repeat(INDENT)}${v.sig.padEnd(leftCol)}${' '.repeat(GUTTER)}${desc[0] ?? ''}`)
+      for (const d of desc.slice(1)) lines.push(rightPad + d)
+    } else {
+      // Over-long signature: wrap it across its own lines (continuation indented),
+      // then the description at the shared right-column indent. Wrap to leave room
+      // for the deeper continuation indent (INDENT+2) so no wrapped sig line spills.
+      const sigLines = wrapText(v.sig, W - INDENT - 2)
+      lines.push(' '.repeat(INDENT) + sigLines[0])
+      for (const s of sigLines.slice(1)) lines.push(' '.repeat(INDENT + 2) + s)
+      for (const d of desc) lines.push(rightPad + d)
+    }
+  }
+  return lines.join('\n') + '\n'
+}
 
 export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const [verb, ...rest] = argv
@@ -993,7 +1099,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
   // match is safe: the look-ahead parser never consumes a `--`-token as a value, so
   // a LITERAL "--help" value is only expressible as `--key=--help` (not intercepted).
   if (verb === 'help' || argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(USAGE)
+    process.stdout.write(renderUsage())
     return 0
   }
   const { positionals, flags } = parseArgs(rest)
@@ -1297,10 +1403,40 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // scaffold the folder (no-clobber), then init it. Operator-add for an infra
         // human (telegram) or any agentic peer; provisions + auto-bootstraps infra.
         if (!positionals[0]) return usage(errOut)
+        const explicitRuntime = typeof flags.runtime === 'string' ? (flags.runtime as Runtime) : undefined
+        // FU5 — never SILENTLY default to claude when both agentic runtimes are
+        // installed. `--runtime` selects the DEFAULT (not the sole runtime); the
+        // model is `runtimes` = all installed agentic runtimes, `default_runtime` =
+        // the one chosen. So: resolve the default explicitly (prompt on a TTY, a loud
+        // note off it) and auto-configure the other installed runtime(s) so the
+        // `runtimes` list is TRUTHFUL — each listed runtime is actually wired.
+        let chosenRuntime = explicitRuntime
+        let extraRuntimes: Runtime[] = []
+        if (!explicitRuntime || !isInfraRuntime(explicitRuntime)) {
+          const { isRuntimeInstalled } = await import('../init/index.ts')
+          const { planCreateRuntimes, secondaryRuntimes } = await import('../create/index.ts')
+          const installed = (['claude', 'codex'] as Runtime[]).filter(rt => isRuntimeInstalled(rt, env))
+          const plan = planCreateRuntimes(explicitRuntime, installed)
+          if (plan.ambiguous) {
+            chosenRuntime =
+              process.stdin.isTTY === true && process.stdout.isTTY === true
+                ? await promptDefaultRuntime(plan.installedAgentic)
+                : (errOut(
+                    `note: ${plan.installedAgentic.join(' and ')} are both installed — defaulting to "${plan.fallbackDefault}". ` +
+                      'Pass --runtime to choose the default, or run create in a terminal to be asked.\n',
+                  ),
+                  plan.fallbackDefault)
+          } else {
+            chosenRuntime = plan.resolvedDefault
+          }
+          // installed.length === 0 → chosenRuntime stays undefined; createPeer surfaces
+          // the clear "no agentic runtime installed" error.
+          extraRuntimes = secondaryRuntimes(chosenRuntime, installed)
+        }
         const { createPeer } = await import('../create/index.ts')
         const r = await createPeer({
           personality: positionals[0],
-          runtime: typeof flags.runtime === 'string' ? (flags.runtime as Runtime) : undefined,
+          runtime: chosenRuntime,
           path: typeof flags.path === 'string' ? flags.path : undefined,
           description: typeof flags.description === 'string' ? flags.description : undefined,
           intelligence: typeof flags.intelligence === 'string' ? (flags.intelligence as Intelligence) : undefined,
@@ -1309,8 +1445,24 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           env,
           warn: m => errOut(`warn: ${m}\n`),
         })
+        // Wire the other installed agentic runtime(s) — addRuntime is capability-only
+        // (merges `runtimes`, runs the runtime's birth chain, NEVER flips the default).
+        // Best-effort: a peer is usable on its default even if a secondary warns.
+        const addedRuntimes: Runtime[] = []
+        for (const rt of extraRuntimes) {
+          try {
+            const outcomes = await addRuntime(rt, { peer: r.personality, env })
+            const o = outcomes.find(x => x.personality === r.personality)
+            if (o && (o.action === 'added' || o.action === 'already')) addedRuntimes.push(rt)
+            else errOut(`warn: could not add runtime "${rt}": ${o?.detail ?? o?.action ?? 'failed'}\n`)
+          } catch (e) {
+            errOut(`warn: could not add runtime "${rt}": ${e instanceof Error ? e.message : String(e)}\n`)
+          }
+        }
+        const allRuntimes = [r.runtime, ...addedRuntimes]
         out(
-          `created "${r.personality}" (${r.runtime}) at ${r.location}; mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
+          `created "${r.personality}" (default: ${r.runtime}; runtimes: ${allRuntimes.join(', ')}) at ${r.location}; ` +
+            `mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
             `${r.plistPath ? `; plist: ${r.plistPath}` : ''}${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
         )
         return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
@@ -1988,8 +2140,31 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
 }
 
 function usage(errOut: (s: string) => void): number {
-  errOut(USAGE)
+  errOut(renderUsage())
   return 2
+}
+
+/** Interactive default-runtime picker (FU5) — only called on a real TTY when more
+ *  than one agentic runtime is installed and no `--runtime` was given. Accepts a
+ *  number or the runtime name; empty input takes the first (the listed default). */
+async function promptDefaultRuntime(installed: Runtime[]): Promise<Runtime> {
+  const { createInterface } = await import('node:readline/promises')
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    process.stdout.write('More than one agent runtime is installed. Which should this peer default to?\n')
+    installed.forEach((rt, i) => process.stdout.write(`  [${i + 1}] ${rt}\n`))
+    for (;;) {
+      const ans = (await rl.question(`Choose [1-${installed.length}] (default 1): `)).trim().toLowerCase()
+      if (ans === '') return installed[0]!
+      const n = Number(ans)
+      if (Number.isInteger(n) && n >= 1 && n <= installed.length) return installed[n - 1]!
+      const byName = installed.find(rt => rt === ans)
+      if (byName) return byName
+      process.stdout.write(`Please enter a number 1-${installed.length} or a runtime name (${installed.join(' / ')}).\n`)
+    }
+  } finally {
+    rl.close()
+  }
 }
 
 /** Default --from for `send`: the identity of the peer in the current cwd (contract:

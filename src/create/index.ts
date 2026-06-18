@@ -28,6 +28,44 @@ import { defaultPeerCwd, ensureGlobalIapScaffold } from '../storage/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
 import { initPeer, type InitPeerResult } from '../init/index.ts'
 
+/** The default-runtime decision for `create` (FU5), factored out pure + testable.
+ *  `--runtime` selects the DEFAULT, not the sole runtime; the model is `runtimes` =
+ *  all installed agentic runtimes, `default_runtime` = the chosen one. */
+export interface CreateRuntimePlan {
+  /** True only when the default is AMBIGUOUS — more than one agentic runtime is
+   *  installed and no `--runtime` was given. The caller prompts on a TTY; off a TTY
+   *  it falls back to `fallbackDefault` with a loud note (never a silent claude). */
+  ambiguous: boolean
+  /** The resolved default when NOT ambiguous. `undefined` means "let initPeer
+   *  resolve it" — exactly one installed → that one, none → its clear error. */
+  resolvedDefault?: Runtime
+  /** The deterministic default to use when ambiguous + non-interactive. */
+  fallbackDefault?: Runtime
+  /** The installed agentic runtimes — the prompt candidates and the basis for the
+   *  secondary runtimes to wire (all of them except the chosen default). */
+  installedAgentic: Runtime[]
+}
+
+/**
+ * Decide create's default runtime + whether a prompt is needed, from the explicit
+ * `--runtime` (if any) and the set of installed agentic runtimes. Pure: the caller
+ * supplies `installedAgentic` (probed via isRuntimeInstalled) and performs the TTY
+ * prompt; this only encodes the policy.
+ */
+export function planCreateRuntimes(explicit: Runtime | undefined, installedAgentic: Runtime[]): CreateRuntimePlan {
+  if (explicit) return { ambiguous: false, resolvedDefault: explicit, installedAgentic }
+  if (installedAgentic.length > 1) return { ambiguous: true, fallbackDefault: installedAgentic[0], installedAgentic }
+  if (installedAgentic.length === 1) return { ambiguous: false, resolvedDefault: installedAgentic[0], installedAgentic }
+  return { ambiguous: false, resolvedDefault: undefined, installedAgentic }
+}
+
+/** The other installed agentic runtimes to wire after creating on `chosen` (so the
+ *  `runtimes` list is truthful). Empty when `chosen` is undefined/infra. */
+export function secondaryRuntimes(chosen: Runtime | undefined, installedAgentic: Runtime[]): Runtime[] {
+  if (!chosen) return []
+  return installedAgentic.filter(rt => rt !== chosen)
+}
+
 export interface CreatePeerOptions {
   /** The peer's personality (REQUIRED; validated/normalized). Drives the default
    *  location (~/.iapeer/peers/<personality>) and the registry/profile identity. */

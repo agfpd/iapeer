@@ -81,9 +81,11 @@ export function resolveCallerFromHeader(value: string | undefined, index: PeersI
 // Embedding it here ALSO duplicated the full list into every agent's context on every
 // turn — confirmed live: an agent saw the identical roster twice. The
 // description stays light: purpose + parameter semantics only; the model gets the
-// roster from its system prompt. Likewise the MCP server-level `instructions` field is
-// left unset (createMcpServer) — it would re-inject doctrine into the client system
-// prompt, re-creating the very duplication this removed. Static (no index needed).
+// roster from its system prompt. The MCP server-level `instructions` field carries
+// EXACTLY ONE cross-cutting behavioral rule (the owner-approved no-empty-acks guide,
+// SERVER_INSTRUCTIONS) — it loads ONCE per session at initialize (not per turn), so it
+// is cheap; it deliberately does NOT restate the roster/doctrine (that lives in the
+// system prompt — duplicating it here is the mistake this note warns of). Static.
 export function buildSendDescription(): string {
   return [
     'Send a message to a known iapeer peer through Inter-Agent-Protocol.',
@@ -93,6 +95,13 @@ export function buildSendDescription(): string {
     "Use `personality`, not a runtime-prefixed identity. Set `runtime` to target a specific declared runtime for this send. If that runtime is warm-asleep, the daemon wakes it and delivers there; use this to intentionally bring up a second session of the same peer in parallel to the default runtime (for example codex alongside claude). Inbound peer messages arrive as <iap from-personality=\"...\" from-runtime=\"...\" from-intelligence=\"...\"> blocks. The topic attribute is optional.",
   ].join('\n')
 }
+
+// MCP server-level `instructions` — returned in the initialize result, loaded ONCE
+// per session (NOT per turn like the tool description), so it is the cheap home for
+// a single cross-cutting behavioral rule. VERBATIM owner-approved (no-empty-acks):
+// keep the wording exact; do NOT expand it into doctrine/roster (see the note above).
+export const SERVER_INSTRUCTIONS =
+  'Reply only when a message needs one — a question, task, request, or awaited result. Skip bare acks/FYIs/thanks; they just loop. Silence is the right reply when nothing is asked.'
 
 // The daemon serves the AGENT exactly ONE MCP tool: send_to_peer. list_online_peers
 // is DEPRECATED by contract (docs/Примитивы и CLI: "list_online_peers УПРАЗДНЁН —
@@ -259,7 +268,7 @@ function headerFromRequestInfo(extra: { requestInfo?: { headers?: Record<string,
 }
 
 export function createMcpServer(deps: CallToolDeps = {}): Server {
-  const server = new Server(SERVER_INFO, { capabilities: { tools: {} } })
+  const server = new Server(SERVER_INFO, { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS })
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools() }))
 

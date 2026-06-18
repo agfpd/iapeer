@@ -4,7 +4,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   CALLER_HEADER,
+  SERVER_INSTRUCTIONS,
   callTool,
+  createMcpServer,
   listTools,
   parseCallerHeader,
   resolveCallerFromHeader,
@@ -263,5 +265,19 @@ describe('ephemeral serial-queue seam (M3)', () => {
     )
     expect(r.isError).toBe(true)
     expect(r.content[0].text).toMatch(/offline/) // took the ordinary miss path
+  })
+})
+
+describe('server instructions (no-empty-acks, FU7)', () => {
+  // VERBATIM owner-approved wording — a guard so a future edit can't silently drift
+  // the text Arthur signed off on.
+  test('SERVER_INSTRUCTIONS is the exact approved text', () => {
+    expect(SERVER_INSTRUCTIONS).toBe(
+      'Reply only when a message needs one — a question, task, request, or awaited result. Skip bare acks/FYIs/thanks; they just loop. Silence is the right reply when nothing is asked.',
+    )
+  })
+
+  test('createMcpServer builds without throwing (instructions wired into ServerOptions)', () => {
+    expect(() => createMcpServer()).not.toThrow()
   })
 })
