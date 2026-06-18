@@ -33,6 +33,9 @@ The same plugin can store data at both levels: shared in `~/.iapeer/`, peer-boun
 ├── cache/
 │   ├── iapeer/                core cache
 │   └── <plugin>/              plugin cache (safe to delete)
+├── docs/
+│   ├── iapeer/                foundation reference docs (this host's installed version)
+│   └── <package>/             each ecosystem package's docs (copied on its install)
 ├── plugins/
 │   ├── iap/                   the core IAP plugin's install
 │   └── <plugin>/              a plugin's install (immutable)
@@ -53,6 +56,15 @@ A few nodes worth highlighting:
 - **`state/iapeer/`** — where the daemon lives: its local socket `router.sock` and config `router.json`.
 - **`logs/<name>/`** — an infrastructure peer's logs are placed by peer name at the shared level (not in the peer's folder), because it's the output of a launchd service.
 - **`runtimes/<runtime>/`** — dual ownership: the root belongs to the runtime itself (Telegram keeps bot tokens and poll state here), while the `plugins/<plugin>/` subfolder is the plugins' space, holding their config under this runtime.
+- **`docs/<package>/`** — on-host reference docs, one folder per ecosystem package (see below).
+
+## On-host ecosystem docs
+
+`~/.iapeer/docs/<package>/` holds a copy of each ecosystem package's reference docs, so an agent can read the contract offline at a stable, versioned path. It exists because a compiled binary embeds no docs and the npm tarball's `docs/` is discarded after install — a reference into a transient install or cache directory would go dead on the first update.
+
+The convention is **copy-on-install, per package**: every package copies its own public docs (excluding `internals/`) into its own `~/.iapeer/docs/<package>/` on each of its installs and updates, via an atomic swap, best-effort — a copy failure never fails the install. Because the copy happens in the same install that places the artifact, a package's on-host docs always match its installed version. Each package writes only its own subfolder, the same ownership isolation as everywhere else; the folder name is the short unscoped package name (`iapeer`, `iapeer-memory`, `telegram-runtime`, `notifier-runtime`).
+
+A peer's system prompt points here — `~/.iapeer/docs/`, one folder per package, starting at `iapeer/README.md` — so a "how does iapeer do X" question is answered from the docs rather than guessed.
 
 ## The peer-level layout
 
