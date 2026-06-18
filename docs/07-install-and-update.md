@@ -74,6 +74,8 @@ Runtimes and memory are **best-effort**: a component failure is reported and the
 
 `iapeer update --foundation-only` does just step 1 (the narrow case). A pinned `iapeer update <version>` is **core-only** by design — a version pin is core-specific (downgrade, or pin a proven version, deeper than one rollback step).
 
+> **Upgrading from before the cascade (< 0.4.2).** The cascade is driven by the *installed* binary, so the very first `iapeer update` from a pre-cascade version runs the OLD (foundation-only) logic: it upgrades the core to the cascade-capable binary but does not yet cascade runtimes + memory. Run `iapeer update` once more — now the new binary cascades the rest. This is a one-time bootstrap; from 0.4.2 onward it is a single command. (A fresh install lands on a cascade-capable binary directly, so it never needs the double run.)
+
 ## Rollback
 
 ```bash
