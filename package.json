@@ -27,8 +27,10 @@
   "files": [
     "src",
     "bin",
+    "docs",
     "tsconfig.json",
-    "!src/**/*.test.ts"
+    "!src/**/*.test.ts",
+    "!docs/internals/**"
   ],
   "exports": {
     ".": "./src/index.ts",
