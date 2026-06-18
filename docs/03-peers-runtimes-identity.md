@@ -95,7 +95,7 @@ Identity has two storage places, and it matters which is authoritative.
   "intelligence": "artificial",
   "initial_prompt": "New session. Greet the owner.",
   "interfaces": {
-    "telegram": { "bot": "assistant", "bot_username": "assistant_bot" }
+    "telegram": { "bot": "assistant" }
   }
 }
 ```

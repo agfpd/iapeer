@@ -52,7 +52,7 @@ describe('validateProfileStandard', () => {
     const issues = validateProfileStandard(
       {
         personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial',
-        interfaces: { telegram: { bot: 'k', bot_username: 'x_bot', aliases: { '/alias-new': 'txt' } } },
+        interfaces: { telegram: { bot: 'k', aliases: { '/alias-new': 'txt' } } },
       },
       cwd,
     )
@@ -62,7 +62,7 @@ describe('validateProfileStandard', () => {
     const clean = validateProfileStandard(
       {
         personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial',
-        interfaces: { telegram: { bot: 'k', bot_username: 'x_bot' } },
+        interfaces: { telegram: { bot: 'k' } },
         expansion: { aliases: { '/alias-new': 'txt' } },
       },
       cwd,
