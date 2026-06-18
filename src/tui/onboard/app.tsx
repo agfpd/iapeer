@@ -141,6 +141,7 @@ export function OnboardApp({
       { key: 'market', label: 'Register marketplace (claude, codex)', status: 'pending' },
       { key: 'auth', label: 'Check runtime sign-in', status: 'pending' },
       { key: 'fda', label: 'Check macOS Full Disk Access', status: 'pending' },
+      { key: 'notifier', label: 'Install scheduler (timer · watcher)', status: 'pending' },
     ])
 
     // Backend steps use synchronous spawnSync (launchctl, runtime plugin list) —
@@ -211,9 +212,39 @@ export function OnboardApp({
       const tcc = tccFullDiskAccessNote({ fda, binPath: iapeerBinPath(env) })
       set('fda', { status: tcc ? 'warn' : 'ok', detail: fda === true ? 'granted' : tcc ? 'not granted' : 'n/a' })
       if (tcc) adv.push(tcc)
-      setAdvisories([...adv])
       if (cancelled) return
+      await tick()
 
+      // notifier — the scheduler (timer · watcher) that memory's index upkeep
+      // rides on; a silent default. Its npx install captures stdio (no terminal
+      // contention), so it runs in-wizard like the other steps. Idempotent: a
+      // present package/peers → no-op. A failure must NOT fail onboard (degrade).
+      set('notifier', { status: 'running' })
+      await tick()
+      try {
+        const { onboardRuntime } = await import('../../runtime/deploy.ts')
+        const nr = await onboardRuntime({ runtime: 'notifier', env, warn: () => {} })
+        const deployFailed = nr.deploy?.peers.some(p => p.bootstrap === 'failed') ?? false
+        set('notifier', {
+          status: nr.install.state === 'failed' || deployFailed ? 'warn' : 'ok',
+          detail:
+            nr.install.state === 'skipped'
+              ? 'already present'
+              : nr.deploy
+                ? `${nr.deploy.peers.length} peer(s)`
+                : nr.install.state,
+        })
+      } catch (e) {
+        set('notifier', { status: 'warn', detail: (e instanceof Error ? e.message : 'failed').slice(0, 60) })
+        adv.push(
+          'Note: the scheduler (notifier) did not install — time-based memory upkeep is skipped.\n' +
+            '  Retry later with `iapeer onboard`.',
+        )
+      }
+      if (cancelled) return
+      await tick()
+
+      setAdvisories([...adv])
       setPhase('memory')
     })()
 
