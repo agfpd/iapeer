@@ -34,6 +34,10 @@ interface Step {
   label: string
   status: StepStatus
   detail?: string
+  /** Honest "this can take a moment" note shown while the step is running (the
+   *  spinner can't animate during a blocking spawnSync, so the label carries the
+   *  expectation). */
+  hint?: string
 }
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -155,11 +159,16 @@ export function OnboardApp({
     const set = (k: string, patch: Partial<Step>) =>
       setSteps(prev => prev.map(s => (s.key === k ? { ...s, ...patch } : s)))
     setSteps([
-      { key: 'daemon', label: 'Start router daemon', status: 'pending' },
+      { key: 'daemon', label: 'Start router daemon', status: 'pending', hint: 'a few seconds' },
       { key: 'market', label: 'Register marketplace (claude, codex)', status: 'pending' },
       { key: 'auth', label: 'Check runtime sign-in', status: 'pending' },
       { key: 'fda', label: 'Check macOS Full Disk Access', status: 'pending' },
-      { key: 'notifier', label: 'Install scheduler (timer · watcher)', status: 'pending' },
+      {
+        key: 'notifier',
+        label: 'Install scheduler (timer · watcher)',
+        status: 'pending',
+        hint: 'first run can take up to a minute',
+      },
     ])
 
     // Backend steps use synchronous spawnSync (launchctl, runtime plugin list) —
@@ -293,16 +302,25 @@ export function OnboardApp({
     return <Text color="red">onboard aborted — risk not accepted.</Text>
   }
 
-  // running | memory | finishing
+  // running | telegram | memory | finishing
   return (
     <Box flexDirection="column">
-      <Text bold>Setting up the host…</Text>
-      <Box flexDirection="column" marginTop={1}>
+      <Box marginBottom={1}>
+        <Text bold color="cyan">
+          iapeer
+        </Text>
+        <Text bold> · setting up the host</Text>
+      </Box>
+      <Box flexDirection="column">
         {steps.map(s => (
           <Box key={s.key}>
             <Text color={color(s.status)}>{glyph(s.status, spin)} </Text>
             <Text>{s.label}</Text>
-            {s.detail ? <Text dimColor> — {s.detail}</Text> : null}
+            {s.detail ? (
+              <Text dimColor> — {s.detail}</Text>
+            ) : s.status === 'running' && s.hint ? (
+              <Text dimColor> — {s.hint}…</Text>
+            ) : null}
           </Box>
         ))}
       </Box>
@@ -317,14 +335,18 @@ export function OnboardApp({
       ) : null}
       {phase === 'telegram' ? (
         <Box marginTop={1} flexDirection="column">
-          <Text>Set up Telegram — talk to your agents from your phone?</Text>
-          <Text dimColor>It will ask your name + Telegram user_id next. [Y/n] </Text>
+          <Text bold color="cyan">
+            ? Set up Telegram — talk to your agents from your phone?
+          </Text>
+          <Text dimColor> It will ask your name + Telegram user_id next. (bot token comes later) [Y/n]</Text>
         </Box>
       ) : null}
       {phase === 'memory' ? (
         <Box marginTop={1} flexDirection="column">
-          <Text>Install the shared-memory provider (@agfpd/iapeer-memory)?</Text>
-          <Text dimColor>It gives your agents a shared knowledge vault. [Y/n] </Text>
+          <Text bold color="cyan">
+            ? Install the shared-memory provider (@agfpd/iapeer-memory)?
+          </Text>
+          <Text dimColor> Gives your agents a shared knowledge vault. [Y/n]</Text>
         </Box>
       ) : null}
     </Box>

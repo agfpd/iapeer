@@ -99,6 +99,12 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     process.stdout.write('\n')
     for (const a of result.advisories) process.stdout.write(a + '\n')
   }
-  process.stdout.write('\nNext: create your first agent — `iapeer create <name> --runtime claude`\n')
+  process.stdout.write('\nNext steps:\n')
+  process.stdout.write('  • Create your first agent:  iapeer create <name> --runtime claude\n')
+  if (result.telegramConsent) {
+    // The wizard set up the human peer (name + user_id) but NOT the bot itself —
+    // the bot token is a separate, explicit step (no surprise / don't-make-them-guess).
+    process.stdout.write('  • Activate Telegram:        iapeer connect telegram   (paste a bot token from @BotFather)\n')
+  }
   return result.code
 }
