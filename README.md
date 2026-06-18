@@ -22,19 +22,33 @@ recipient peer  — asleep? the daemon wakes it and delivers on wake
 
 ## Quick start
 
-Requirements: **macOS**, [bun](https://bun.sh) on `PATH`, `~/.local/bin` on `PATH`, and at least one agent runtime installed — Claude Code or Codex CLI (each AI peer is a live session of one).
+Requirements: **macOS** (Linux is on the [Roadmap](#roadmap)) and at least one agent runtime — Claude Code or Codex CLI (each AI peer is a live session of one). The installer handles the rest ([bun](https://bun.sh) and `~/.local/bin` on `PATH`).
+
+**Install — one line.** Installs bun if missing, builds the `iapeer` binary, then hands off to the interactive `onboard`:
 
 ```sh
-# 1. install — the iapeer binary and the ~/.iapeer layout
-npx @agfpd/iapeer
+curl -fsSL https://agfpd.github.io/iapeer/install.sh | sh
+```
 
-# 2. set up the host — starts the router daemon, then adds scheduler peers, Telegram, and shared memory
+**Prefer not to pipe a script into your shell?** Run the same steps by hand (needs [bun](https://bun.sh) on `PATH`):
+
+```sh
+# install — the iapeer binary and the ~/.iapeer layout
+npx @agfpd/iapeer            # or: bunx @agfpd/iapeer
+
+# set up the host — router daemon, scheduler peers, Telegram, shared memory
 iapeer onboard
+```
 
-# 3. create your first agent
+Either path runs `onboard` interactively: it surfaces the security checks (runtime sign-in, macOS Full Disk Access) and asks before installing the memory provider — nothing is auto-approved behind your back. You can read [`install.sh`](./install.sh) before running it, or preview every step with `IAPEER_INSTALL_DRYRUN=1`.
+
+**Then create your first agent and talk to it:**
+
+```sh
+# create your first agent
 iapeer create assistant --runtime claude
 
-# 4. talk to it live in your terminal — detach with Ctrl-] (or just close it; the agent keeps running)
+# talk to it live in your terminal — detach with Ctrl-] (or just close it; the agent keeps running)
 iapeer attach assistant
 ```
 
