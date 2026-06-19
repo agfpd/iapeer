@@ -1114,7 +1114,15 @@ describe('resolvePeerRuntime — predictable omitted-runtime default (new/attach
   // sockDir points at an empty dir so NO runtime reads as live → the no-live branches
   // (precedence 1 + 4) are deterministic. The live branches are liveness-gated and
   // live-verified (success paths are live-verified, per this section's note).
-  const noLiveCfg = () => ({ sockDir: mkdtempSync(join(tmpdir(), 'iapeer-rpr-')) }) as LifecycleConfig
+  const tmpDirs: string[] = []
+  const noLiveCfg = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'iapeer-rpr-'))
+    tmpDirs.push(dir)
+    return { sockDir: dir } as LifecycleConfig
+  }
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
 
   test('sole declared runtime → that runtime', () => {
     const rt = resolvePeerRuntime(peer({ personality: 'solo', runtime: 'claude', runtimes: ['claude'] }), noLiveCfg())
