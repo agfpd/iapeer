@@ -261,6 +261,44 @@ describe('claudeAdapter', () => {
       "This session is 7h 3m old and 314.2k tokens.\n❯ 1. Resume from summary (recommended)\n  2. Resume full session as-is\n  3. Don't ask me again\nEnter to confirm · Esc to cancel"
     expect(claudeAdapter.bootDialogKeys(live170)).toEqual(['Down'])
   })
+
+  test('bootDialogKeys: bypass-permissions ACCEPT is CURSOR-VERIFIED — Down to "2. Yes", Enter ONLY when proven', () => {
+    // Virgin-config gate (verified live, claude 2.1.183 tmux): the FIRST time
+    // --dangerously-skip-permissions runs, claude shows "WARNING: Claude Code running
+    // in Bypass Permissions mode" with the DEFAULT cursor on "1. No, exit" (a bare
+    // Enter EXITS = the peer dies). bootDialogKeys must step to "2. Yes, I accept" and
+    // confirm only on a PROVEN cursor — the same hazard/shape as the resume picker.
+    const cursorOn1 =
+      'WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\nEnter to confirm · Esc to cancel'
+    const cursorOn2 =
+      'WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n❯ 2. Yes, I accept\nEnter to confirm · Esc to cancel'
+    // default cursor on "1. No, exit" → step down, NEVER confirm the exit
+    expect(claudeAdapter.bootDialogKeys(cursorOn1)).toEqual(['Down'])
+    // a swallowed Down self-heals — another Down, still no Enter
+    expect(claudeAdapter.bootDialogKeys(cursorOn1)).toEqual(['Down'])
+    // Enter is impossible while the cursor sits on the peer-killing default
+    expect(claudeAdapter.bootDialogKeys(cursorOn1)).not.toContain('Enter')
+    // cursor PROVEN on "2. Yes, I accept" → now (and only now) confirm
+    expect(claudeAdapter.bootDialogKeys(cursorOn2)).toEqual(['Enter'])
+    // the dialog gates readiness while it is up...
+    expect(claudeAdapter.isInputReady(`${cursorOn1}\n❯ x`)).toBe(false)
+    // ...but the post-accept ready banner ('bypass permissions on', lowercase) is a
+    // DISTINCT string from the dialog marker, so it does NOT trap isInputReady.
+    expect(claudeAdapter.isInputReady('❯ ready\nbypass permissions on (shift+tab to cycle)')).toBe(true)
+  })
+
+  test('bootDialogKeys: project MCP-server approval (pre-checked) → [Enter] backstop, gates readiness', () => {
+    // Shown when cwd carries a .mcp.json the config has not approved (verified live,
+    // claude 2.1.183). Servers are pre-checked [✔]; Enter confirms (Esc rejects all).
+    // enableAllProjectMcpServers normally suppresses it — this Enter is the backstop.
+    const mcpDialog =
+      '2 new MCP servers found in this project\nSelect any you wish to enable.\n❯ [✔] iapeer\n  [✔] iapeer-memory\nSpace to select · Enter to confirm · Esc to reject all'
+    expect(claudeAdapter.bootDialogKeys(mcpDialog)).toEqual(['Enter'])
+    // singular phrasing ("1 new MCP server found") matches the same backstop
+    expect(claudeAdapter.bootDialogKeys('1 new MCP server found in this project\n❯ [✔] iapeer')).toEqual(['Enter'])
+    // and it holds the readiness gate shut until cleared
+    expect(claudeAdapter.isInputReady(`${mcpDialog}\n❯ x\nbypass permissions on`)).toBe(false)
+  })
 })
 
 // ─── exit-cause observability: the pane-died hook builder (pure string) ──────

@@ -50,11 +50,27 @@ const CLAUDE_BOOT_DIALOG_MARKERS = [
   'Resume from summary',
   'Resuming the full session',
   // First-run theme picker ("Let's get started. Choose the text style…") — appears
-  // on a CLEAN host (fresh config dir) BEFORE the input prompt, verified live on
-  // claude 2.1.181 in a pty. NOT removed by --dangerously-skip-permissions; if not
-  // cleared the peer never reaches ready. (There is NO separate "accept dangerous
-  // permissions" screen in 2.1.181 — verified absent.)
+  // on a CLEAN host (fresh config dir) BEFORE the input prompt. NOT removed by
+  // --dangerously-skip-permissions; if not cleared the peer never reaches ready.
   'Choose the text style',
+  // Bypass-permissions ACCEPT gate ("WARNING: Claude Code running in Bypass
+  // Permissions mode"; options "1. No, exit" / "2. Yes, I accept") — shown on a
+  // VIRGIN config the FIRST time --dangerously-skip-permissions runs, BEFORE the
+  // input prompt. (An earlier note here claimed this screen was "absent in 2.1.181";
+  // that was a NON-VIRGIN observation — the host had already accepted it once, so it
+  // was masked. On a truly virgin config it IS shown and BLOCKS the boot — verified
+  // live, claude 2.1.183 via tmux. bootDialogKeys steps the cursor to "2. Yes, I
+  // accept" and confirms; a bare Enter would hit the "1. No, exit" DEFAULT and kill
+  // the peer.) Once accepted, claude records it natively and the ready banner is the
+  // lowercase "bypass permissions on" (a DISTINCT string), so this marker vanishes —
+  // it never falsely traps isInputReady, and a re-launch is dialog-free (verified).
+  'Bypass Permissions mode',
+  // Project MCP-server approval ("N new MCP servers found in this project", servers
+  // pre-checked [✔]) — shown when cwd carries a .mcp.json the config has not yet
+  // approved. Suppressed at the source by enableAllProjectMcpServers in
+  // <cwd>/.claude/settings.json (init writes it); bootDialogKeys Enter-confirms it as
+  // a backstop. Substring matches both "1 new MCP server" and "N new MCP servers".
+  'new MCP server',
 ] as const
 
 function anyBootDialog(pane: string): boolean {
@@ -164,34 +180,43 @@ export const claudeAdapter: RuntimeAdapter = {
   /**
    * Map a visible startup dialog to the keys that clear it correctly:
    *
-   *   - RESUME COMPACT-PICKER ('Resume from summary …') → CURSOR-VERIFIED two-step.
-   *     This menu's cursor DEFAULTS to "1. Resume from summary (recommended)",
-   *     and selecting it COMPACTS the session (claude implements that choice as an
-   *     internal /compact) — but a resume must NOT trigger a compact. The original
-   *     blind ['Down','Enter'] burst (0e67e1f) put BOTH keys into one pty chunk;
-   *     under a heavy resume (a 313k-token session) the TUI dropped the Down and
-   *     the Enter confirmed the DEFAULT →
-   *     silent /compact (proven: pane log shows the picker frame with ❯ on
-   *     option 1 followed by "❯ /compact"; transcript compactMetadata
-   *     trigger=manual). Fix: ONE key per boot-iteration — Down while the cursor
-   *     is NOT yet seen on "2. Resume full session", Enter ONLY after the
-   *     captured pane PROVES it ("❯ 2."). A swallowed Down self-heals on the
-   *     next 2 s iteration; Enter can never hit the compacting default. If the
-   *     picker layout ever changes, the loop Downs until the boot deadline and
-   *     the wake fails LOUD — never a silent compact.
-   *   - OTHER MODALS (folder-trust / external-import / dev-channels) → ['Enter']:
-   *     their default-highlighted option IS the proceed path, so a bare Enter clears
-   *     each (claude-start.sh:341).
+   *   - CURSOR-VERIFIED two-step menus ('Resume from summary …' AND 'Bypass
+   *     Permissions mode') → step Down, confirm ONLY once the captured pane proves
+   *     the cursor sits on "2.". Both menus share one hazard: their DEFAULT cursor is
+   *     the WRONG option, so a blind Enter picks it.
+   *       · Resume: default "1. Resume from summary (recommended)" COMPACTS the
+   *         session (claude runs that choice as an internal /compact) — a resume must
+   *         not compact.
+   *       · Bypass: default "1. No, exit" makes the peer EXIT (die). "2. Yes, I
+   *         accept" is the proceed path. (Virgin-config gate the first time
+   *         --dangerously-skip-permissions runs; once accepted claude persists it.)
+   *     The original blind ['Down','Enter'] burst (0e67e1f) put BOTH keys in one pty
+   *     chunk; under load the TUI dropped the Down and the Enter confirmed the DEFAULT
+   *     (proven for resume: pane frame ❯ on option 1 → "❯ /compact"). Fix: ONE key
+   *     per boot-iteration — Down while the cursor is NOT yet on "2.", Enter ONLY
+   *     after the captured pane PROVES it ("❯ 2."). A swallowed Down self-heals next
+   *     iteration; Enter can never hit the bad default. If the layout ever changes the
+   *     loop Downs until the boot deadline and the wake fails LOUD.
+   *   - SINGLE-CONFIRM modals (folder-trust / external-import / dev-channels / theme /
+   *     project MCP-server approval) → ['Enter']: the default-highlighted option IS
+   *     the proceed path, so a bare Enter clears each. The MCP approval pre-checks the
+   *     servers [✔] (Enter enables them, Esc rejects all) — it is also suppressed at
+   *     the source by enableAllProjectMcpServers (init), so the Enter here is a
+   *     backstop. (claude-start.sh:341.)
    *   - anything else (incl. the post-select "Resuming…" load state) → null (wait).
    */
   bootDialogKeys(pane: string): string[] | null {
-    if (pane.includes('Resume from summary')) {
+    if (pane.includes('Resume from summary') || pane.includes('Bypass Permissions mode')) {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
     }
     if (
       pane.includes('trust this folder') ||
       pane.includes('Allow external CLAUDE.md file imports?') ||
       pane.includes('I am using this for local development') ||
+      // Project MCP-server approval (servers pre-checked [✔]; Enter confirms, Esc
+      // rejects all). enableAllProjectMcpServers normally suppresses it; this is the
+      // backstop. Matches both "1 new MCP server" and "N new MCP servers".
+      pane.includes('new MCP server') ||
       // First-run theme picker (clean host): the default-highlighted row is always a
       // valid theme (any choice is harmless for a headless peer), so a bare Enter
       // accepts it. Without this the picker blocks the boot forever on a fresh host.

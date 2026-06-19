@@ -9,6 +9,7 @@ import {
   CODEX_BEARER_ENV_VAR,
   IAPEER_MCP_SERVER_NAME,
   codexConfigPath,
+  ensureClaudeProjectMcpEnabled,
   ensureCodexUpdateCheckDisabled,
   ensureDoctrineTemplate,
   ensureGlobalDoctrineTemplate,
@@ -77,6 +78,46 @@ describe('writeClaudeMcpConfig', () => {
     const first = readFileSync(p, 'utf8')
     writeClaudeMcpConfig(cwd, 'boris', 'http://127.0.0.1:8765/mcp')
     expect(readFileSync(p, 'utf8')).toBe(first)
+  })
+})
+
+describe('ensureClaudeProjectMcpEnabled (virgin-config MCP-approval suppression — project-local)', () => {
+  const settingsPath = (c: string) => join(c, '.claude', 'settings.json')
+
+  test('creates <cwd>/.claude/settings.json with enableAllProjectMcpServers:true', () => {
+    const p = ensureClaudeProjectMcpEnabled(cwd)
+    expect(p).toBe(settingsPath(cwd))
+    expect(JSON.parse(readFileSync(p!, 'utf8')).enableAllProjectMcpServers).toBe(true)
+  })
+
+  test('NO-CLOBBER merge — preserves foreign keys (plugin/statusline/native-memory blocks)', () => {
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(settingsPath(cwd), JSON.stringify({ autoMemoryEnabled: false, statusLine: { type: 'command' } }))
+    ensureClaudeProjectMcpEnabled(cwd)
+    const obj = JSON.parse(readFileSync(settingsPath(cwd), 'utf8'))
+    expect(obj.enableAllProjectMcpServers).toBe(true)
+    expect(obj.autoMemoryEnabled).toBe(false)
+    expect(obj.statusLine).toEqual({ type: 'command' })
+  })
+
+  test('idempotent — already-true returns the path and does not rewrite', () => {
+    ensureClaudeProjectMcpEnabled(cwd)
+    const first = readFileSync(settingsPath(cwd), 'utf8')
+    expect(ensureClaudeProjectMcpEnabled(cwd)).toBe(settingsPath(cwd))
+    expect(readFileSync(settingsPath(cwd), 'utf8')).toBe(first)
+  })
+
+  test('refuses to clobber a non-object settings.json (returns null, leaves file intact)', () => {
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(settingsPath(cwd), '["not","an","object"]')
+    expect(ensureClaudeProjectMcpEnabled(cwd)).toBeNull()
+    expect(readFileSync(settingsPath(cwd), 'utf8')).toBe('["not","an","object"]')
+  })
+
+  test('is project-LOCAL — writes only under cwd, never the user global ~/.claude', () => {
+    ensureClaudeProjectMcpEnabled(cwd)
+    // the written path is strictly inside the peer's cwd (constraint: no global mutation)
+    expect(settingsPath(cwd).startsWith(cwd)).toBe(true)
   })
 })
 

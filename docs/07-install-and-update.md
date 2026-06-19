@@ -53,9 +53,9 @@ On a fresh macOS host the first install → onboard → peer launch surfaces a h
 
 **Auto-cleared (iapeer answers them on peer boot — you do nothing):**
 
-- **Claude** — the theme picker ("Choose the text style"), folder-trust, external-CLAUDE.md-import, and dev-channels modals. iapeer's launcher accepts the default (a bare Enter) for each.
+- **Claude** — the theme picker ("Choose the text style"), folder-trust, external-CLAUDE.md-import, and dev-channels modals (the launcher accepts the default with Enter); the **bypass-permissions accept** screen ("WARNING: Claude Code running in Bypass Permissions mode") that a *virgin* config shows the first time `--dangerously-skip-permissions` runs — its default cursor is "No, exit", so the launcher **steps the cursor to "Yes, I accept"** and confirms (never a bare Enter, which would exit); and the **project MCP-server approval** ("N new MCP servers found in this project") when the peer's cwd carries a `.mcp.json` — pre-approved at `iapeer init` via a project-local `enableAllProjectMcpServers` flag and Enter-confirmed on boot as a backstop. Claude records each accept natively, so a re-launch on the same config is dialog-free.
 - **Codex** — folder-trust ("Do you trust the contents of this directory") is pre-trusted at peer creation and also auto-accepted on boot; the self-update offer is disabled (`check_for_update_on_startup = false`) and auto-declined; hooks-review is auto-trusted.
-- Per-action permission/approval prompts are suppressed by the runtime flags the launcher passes (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). There is no separate "accept dangerous permissions" screen.
+- **Bypass / no-sandbox is the operating mode, not a one-time prompt.** The launcher runs Claude with `--dangerously-skip-permissions` and Codex with `--dangerously-bypass-approvals-and-sandbox`, so peers execute tools without per-action approval (a headless peer has no human to approve each call). The one-time *acceptance* screen above is the only interactive gate; the mode itself then stays on for every turn. See the security note in the [README](../README.md#bypass-permissions-mode) — this is a deliberate, disclosed trade-off.
 
 **Three things you do (these cannot be automated):**
 
@@ -63,7 +63,7 @@ On a fresh macOS host the first install → onboard → peer launch surfaces a h
 2. **Login keychain password — once, during install.** The install code-signs the binary with a stable local identity so Full Disk Access survives updates; macOS asks for your login keychain password the one time that identity is created. It is expected (the installer announces it). If declined, the binary still works — TCC prompts would just recur on updates.
 3. **Full Disk Access — a manual grant, no prompt.** macOS TCC cannot be set by any flag, env var, or script. Without it, a peer reading or writing a TCC-protected path (an iCloud Obsidian vault, Desktop, Documents, Downloads) silently fails with EPERM — no prompt, no hang. Grant it in **System Settings → Privacy & Security → Full Disk Access** (`~/.iapeer` itself is under `$HOME` and needs nothing); onboard prints the reminder.
 
-Gatekeeper does not gate the locally-built CLI run from a terminal (no quarantine attribute). Verified live: the Claude theme picker and the Codex folder-trust / update auto-clearing on a clean first launch (an owner's clean-machine install + an isolated codex first-boot test).
+Gatekeeper does not gate the locally-built CLI run from a terminal (no quarantine attribute). Verified live on a truly-virgin Claude config (claude 2.1.183): the theme picker, folder-trust, the bypass-permissions accept (cursor stepped to "Yes"), and the project MCP-server approval all auto-clear in sequence, the peer reaches its input prompt, and a second launch on the same config is dialog-free; the Codex folder-trust / update auto-clearing likewise (an owner's clean-machine install + an isolated first-boot test).
 
 ## Updating
 

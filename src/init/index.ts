@@ -6,16 +6,19 @@
 // THE BIG SIMPLIFICATION (install-gate, proven live): a peer gets send_to_peer
 // purely from a project-scope `.mcp.json` pointing at the host-wide HTTP-MCP daemon —
 // NO plugin install, NO /reload-plugins, NO GC version-snapshots (the whole legacy
-// persistent-peer install-gate class is gone). Verified: a cold-start claude session
-// (--dangerously-skip-permissions, as the launch primitive runs it) auto-enables the
-// `.mcp.json` http server and send_to_peer is callable on its FIRST turn, no approve.
+// persistent-peer install-gate class is gone). A cold-start claude session
+// (--dangerously-skip-permissions, as the launch primitive runs it) finds the
+// `.mcp.json` http server and send_to_peer is callable on its FIRST turn. The server's
+// project-approval is pre-granted by ensureClaudeProjectMcpEnabled (the
+// enableAllProjectMcpServers flag below); on a VIRGIN config without it the launch's
+// bootDialogKeys clears the one-time "new MCP servers found" dialog as a backstop.
 //
 // claude side here. codex side (`[mcp_servers.<name>]` in ~/.codex/config.toml +
 // default_tools_approval_mode="approve") lands with its own live codex check.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { CODEX_BEARER_ENV_VAR, CODEX_DUMMY_BEARER, IAPEER_DIR, isInfraRuntime, type Runtime } from '../core/constants.ts'
 import { IapError } from '../core/errors.ts'
 import {
@@ -26,6 +29,7 @@ import {
   type StorageOptions,
 } from '../storage/index.ts'
 import { provisionPeer, type ProvisionResult } from '../provision/index.ts'
+import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { launchctlBootstrap, launchdPlistPath, type BootstrapResult } from '../launch/launchd.ts'
 import { runtimeSelfConfig, type SelfConfigResult } from '../runtime/index.ts'
 import type { Intelligence } from '../core/constants.ts'
@@ -114,6 +118,46 @@ export function writeClaudeMcpConfig(cwd: string, personality: string, daemonUrl
   doc.mcpServers = { ...(doc.mcpServers ?? {}), [IAPEER_MCP_SERVER_NAME]: server }
   writeFileAtomic(path, `${JSON.stringify(doc, null, 2)}\n`, 0o644)
   return path
+}
+
+/**
+ * Idempotently enable project-scope MCP servers for a claude peer by merging
+ * `"enableAllProjectMcpServers": true` into `<cwd>/.claude/settings.json`.
+ *
+ * Why: on a VIRGIN claude config, the FIRST launch in a cwd carrying a `.mcp.json`
+ * (writeClaudeMcpConfig above) shows a BLOCKING "N new MCP servers found in this
+ * project" approval dialog BEFORE the input prompt — a headless peer has no one to
+ * approve it, so the wake stalls. This project-LOCAL flag pre-approves the cwd's MCP
+ * servers so the dialog never appears (verified live, claude 2.1.183). It is
+ * PROJECT-scoped (this peer's cwd only) — it does NOT touch the user's GLOBAL
+ * ~/.claude/settings.json, so it never alters the user's own claude environment (the
+ * same constraint that forbids a global skipDangerousModePermissionPrompt). The launch
+ * adapter's bootDialogKeys also Enter-confirms this dialog as a belt-and-suspenders
+ * backstop, so a peer whose cwd predates this flag still boots.
+ *
+ * NO-CLOBBER merge (the file may carry foreign blocks — plugin enables, statusline
+ * wrappers, the native-memory lever): parse/patch + atomic write; a non-object
+ * settings.json is REFUSED rather than overwritten. Returns the written path, or null
+ * when already set / on a refusal / on any error (best-effort, never throws — the
+ * bootDialogKeys backstop covers the dialog regardless).
+ */
+export function ensureClaudeProjectMcpEnabled(cwd: string): string | null {
+  const path = claudeSettingsPath(cwd)
+  try {
+    let obj: Record<string, unknown> = {}
+    if (existsSync(path)) {
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null // refuse to clobber a non-object
+      obj = raw as Record<string, unknown>
+    }
+    if (obj.enableAllProjectMcpServers === true) return path // already enabled
+    obj.enableAllProjectMcpServers = true
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileAtomic(path, `${JSON.stringify(obj, null, 2)}\n`, 0o644)
+    return path
+  } catch {
+    return null // best-effort; the bootDialogKeys backstop still clears the dialog
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,6 +473,10 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
   // MCP client), so it gets no `.mcp.json`.
   if (provisioned.runtime === 'claude' || hasClaudeMarker(provisioned.cwd)) {
     mcpConfigPaths.push(writeClaudeMcpConfig(provisioned.cwd, provisioned.personality, daemonUrl))
+    // Pre-approve the cwd's project MCP servers so the FIRST virgin-config launch does
+    // not stall on the blocking "N new MCP servers found" dialog (project-local, never
+    // touches the user's global settings; bootDialogKeys is the backstop).
+    ensureClaudeProjectMcpEnabled(provisioned.cwd)
   }
   // codex: write the token-free host-wide config.toml block (dummy bearer flips codex's
   // auth gate; the OPEN daemon authenticates by the identity header). send_to_peer works
