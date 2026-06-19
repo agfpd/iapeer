@@ -480,7 +480,7 @@ export interface NewPeerOutcome {
  * new <peer> [runtime] — the UNCONDITIONAL fresh-restart control command
  * (docs/Control-команды §new).
  *
- * The emergency lever for a HUNG or dead agent session: /alias-new covers only
+ * The emergency lever for a HUNG or dead agent session: /alias_new covers only
  * the COOPERATIVE path (a live peer reads the expanded prompt and runs
  * `iapeer self-fresh`); a stuck/raving/dead peer never reads a prompt — this
  * command restarts it MECHANICALLY, bypassing the peer entirely:

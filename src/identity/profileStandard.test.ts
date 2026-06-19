@@ -52,7 +52,7 @@ describe('validateProfileStandard', () => {
     const issues = validateProfileStandard(
       {
         personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial',
-        interfaces: { telegram: { bot: 'k', aliases: { '/alias-new': 'txt' } } },
+        interfaces: { telegram: { bot: 'k', aliases: { '/alias_new': 'txt' } } },
       },
       cwd,
     )
@@ -63,7 +63,7 @@ describe('validateProfileStandard', () => {
       {
         personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial',
         interfaces: { telegram: { bot: 'k' } },
-        expansion: { aliases: { '/alias-new': 'txt' } },
+        expansion: { aliases: { '/alias_new': 'txt' } },
       },
       cwd,
     )
@@ -172,7 +172,7 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
         personality: 'boris', runtime: 'claude', runtimes: ['claude'], description: 'd', intelligence: 'human',
         initial_prompt: 'boot', wake_policy: 'ephemeral',
         interfaces: { telegram: { bot: 'k' } },
-        expansion: { aliases: { '/alias-new': 'txt' } },
+        expansion: { aliases: { '/alias_new': 'txt' } },
         notifier: { triggers: [] },
       }),
     )
@@ -184,7 +184,7 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     expect(after.initial_prompt).toBe('boot')
     expect(after.wake_policy).toBe('ephemeral')
     expect(after.interfaces).toEqual({ telegram: { bot: 'k' } })
-    expect(after.expansion).toEqual({ aliases: { '/alias-new': 'txt' } })
+    expect(after.expansion).toEqual({ aliases: { '/alias_new': 'txt' } })
     expect(after.notifier).toEqual({ triggers: [] })
     // idempotent: already in shape → untouched
     expect(migrateProfileRuntimeField(borisCwd)).toBe(false)

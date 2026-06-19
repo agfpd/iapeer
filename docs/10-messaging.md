@@ -55,7 +55,7 @@ iapeer compact assistant       # compact the conversation
 
 `interrupt` stops a turn that's gone off-track or hung, without losing context. `compact` compacts the conversation; if the peer is asleep after a clean sleep, the daemon resumes it first, then compacts, and for an empty session it honestly answers that there's nothing to compact.
 
-Separate are **aliases** — shortcuts like `/alias-new`, `/alias-compact`, defined in the peer profile. These aren't control but text templates: the runtime expands an alias into its full text and delivers it to the peer as an ordinary message. So with one short command the operator runs a pre-written scenario (e.g. "save state to memory and restart fresh").
+Separate are **aliases** — shortcuts like `/alias_new`, `/alias_compact`, defined in the peer profile. These aren't control but text templates: the runtime expands an alias into its full text and delivers it to the peer as an ordinary message. So with one short command the operator runs a pre-written scenario (e.g. "save state to memory and restart fresh").
 
 ## Ephemeral workers
 

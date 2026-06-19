@@ -121,13 +121,13 @@ export function validateProfileStandard(raw: unknown, cwd: string): ProfileIssue
     issues.push({ severity: 'error', field: 'interfaces', message: 'must be a JSON object' })
   }
   // Legacy top-level aliases — contract relocates to the `expansion.aliases` plugin-
-  // config section with the /alias-* namespace (clean slash-keys are reserved for the
+  // config section with the /alias_* namespace (clean slash-keys are reserved for the
   // control layer). telegram-runtime owns that migration; flagged, not an error.
   if (obj.aliases !== undefined) {
     issues.push({
       severity: 'warn',
       field: 'aliases',
-      message: 'legacy top-level `aliases` — contract relocates to expansion.aliases (/alias-* namespace); owner migration pending',
+      message: 'legacy top-level `aliases` — contract relocates to expansion.aliases (/alias_* namespace); owner migration pending',
     })
   }
   // aliases misfiled in the PASSPORT (interfaces.telegram) — an interim home.

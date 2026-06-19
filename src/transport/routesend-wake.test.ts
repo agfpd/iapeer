@@ -309,7 +309,7 @@ describe('telegram sender policy — hasTelegramPresence', () => {
     expect(hasTelegramPresence(rec({}))).toBe(false)
     expect(hasTelegramPresence(rec({ bot: '' }))).toBe(false)
     expect(hasTelegramPresence(rec({ bot: '  ' }))).toBe(false)
-    expect(hasTelegramPresence(rec({ aliases: { '/alias-new': 'x' } }))).toBe(false)
+    expect(hasTelegramPresence(rec({ aliases: { '/alias_new': 'x' } }))).toBe(false)
   })
 })
 

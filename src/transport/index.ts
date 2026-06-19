@@ -936,7 +936,7 @@ export interface ControlResult {
  * acts on a running session — a non-live peer has nothing to interrupt) then
  * executeControlOnTarget. Without a runtime, resolves the single live runtime (2+ →
  * "specify runtime"). The clean-slash control namespace (interrupt/compact/…) is the
- * caller's; /alias-* expansions are message, not control (docs/Control §namespace).
+ * caller's; /alias_* expansions are message, not control (docs/Control §namespace).
  */
 export async function routeControl(personality: string, runtime: string | undefined, command: ControlCommand): Promise<Result<ControlResult>> {
   if (!isValidName(personality)) {
