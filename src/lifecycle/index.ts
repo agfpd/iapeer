@@ -1552,9 +1552,11 @@ export async function folderLaunch(opts: FolderLaunchOptions): Promise<WakeResul
 }
 
 /**
- * The runtime with the freshest transcript activity for a peer (contract: attach
- * resolves the runtime by last-active transcript-mtime, NOT the profile default).
- * undefined when no runtime has any activity (a never-run peer).
+ * The runtime with the freshest transcript activity for a peer. undefined when no
+ * runtime has any activity (a never-run peer). NOTE: this is NO LONGER the attach
+ * default — operator runtime resolution moved to `resolvePeerRuntime` (default_runtime
+ * anchored) because last-active-by-mtime is hidden state and unreliable for codex
+ * (rollout flushed only on a real turn). Kept as a diagnostic / `list` helper.
  */
 export function lastActiveRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runtime | undefined {
   let best: Runtime | undefined
@@ -1573,6 +1575,46 @@ export function lastActiveRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runti
   return best
 }
 
+/** Runtimes of `peer` whose session is LIVE right now (lifecycle-local liveness,
+ *  same `sessionAlive` predicate the wake/attach paths use). */
+function liveRuntimesOf(peer: PeerRecord, cfg: LifecycleConfig): Runtime[] {
+  return peer.runtimes.filter(rt =>
+    sessionAlive(buildSocketPath(rt, peer.personality, cfg.sockDir), buildProcessAddress(rt, peer.personality)),
+  )
+}
+
+/**
+ * The SINGLE runtime an operator verb (new / attach / compact) acts on when the
+ * runtime arg is OMITTED, for a peer that may declare several. PREDICTABLE by
+ * construction and IDENTICAL across those verbs — this is the fix for the
+ * multi-runtime footgun where `new` defaulted to `default_runtime` while `attach`
+ * defaulted to last-active-by-mtime, so `iapeer new <peer>` freshed one runtime
+ * while `iapeer attach <peer>` resurrected the other ("new had no effect, attach
+ * came up on the old session").
+ *
+ * Precedence (never refuses — the naive flow must self-resolve, no explicit arg):
+ *   1. sole declared runtime → it.
+ *   2. `default_runtime` is LIVE → `default_runtime` (the configured anchor AND the
+ *      obvious running target).
+ *   3. exactly ONE other runtime is live (default dead) → that live one.
+ *   4. otherwise (nothing live, or 2+ live without the default) → `default_runtime`.
+ *
+ * The peer's runtime is governed by its CONFIGURABLE `default_runtime` (the
+ * documented `iapeer default-runtime` lever), NOT by which transcript was touched
+ * last — last-active-by-mtime is hidden state and unreliable for codex (its rollout
+ * file is flushed only on a real model turn, so a just-spawned fresh codex session
+ * reads as "older" than a stale one). To make `iapeer new/attach <peer>` (no runtime
+ * arg) resolve to codex, set the peer's default to codex once; per-command runtime
+ * args remain the explicit override.
+ */
+export function resolvePeerRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runtime {
+  if (peer.runtimes.length === 1) return peer.runtimes[0]
+  const live = liveRuntimesOf(peer, cfg)
+  if (live.includes(peer.runtime)) return peer.runtime
+  if (live.length === 1) return live[0]
+  return peer.runtime
+}
+
 export interface AttachOptions {
   personality: string
   runtime?: string
@@ -1586,10 +1628,11 @@ export type AttachResult =
 /**
  * `iapeer attach <peer> [runtime]` — ensure the peer is live, then hand back the
  * socket/identity for the caller to `tmux attach`. ALWAYS RESUME (contract: attach
- * never starts fresh). Runtime: explicit arg, else the LAST-ACTIVE runtime by
- * transcript-mtime (not the profile default), else the profile default. A warm-live
- * session is attached directly; a warm-asleep one is woken with --resume first
- * (fail-loud if there is nothing to resume — a never-run peer must be folder-launched).
+ * never starts fresh). Runtime: explicit arg, else `resolvePeerRuntime` (the SAME
+ * resolver `new`/`compact` use — default_runtime anchored with a sole-live
+ * refinement), so attach and new never disagree on which runtime "peer" means. A
+ * warm-live session is attached directly; a warm-asleep one is woken with --resume
+ * first (fail-loud if there is nothing to resume — a never-run peer must be folder-launched).
  */
 export async function attachPeer(opts: AttachOptions): Promise<AttachResult> {
   const env = opts.env ?? process.env
@@ -1598,8 +1641,10 @@ export async function attachPeer(opts: AttachOptions): Promise<AttachResult> {
   if (!peer) return { ok: false, reason: `peer "${opts.personality}" is not registered` }
   const runtimeResult = resolveWakeRuntime(opts.runtime, peer)
   if (opts.runtime && !runtimeResult.ok) return { ok: false, reason: runtimeResult.error.message }
-  // last-active (by mtime) wins over the profile default when no runtime is given.
-  const runtime = opts.runtime ?? lastActiveRuntime(peer, cfg) ?? peer.runtime
+  // Omitted runtime resolves IDENTICALLY to `new`/`compact` (resolvePeerRuntime):
+  // default_runtime anchored, sole-live refinement, never hidden last-active — so
+  // `iapeer attach <peer>` and `iapeer new <peer>` never disagree on the runtime.
+  const runtime = opts.runtime ?? resolvePeerRuntime(peer, cfg)
   const identity = buildProcessAddress(runtime, opts.personality)
   const sock = buildSocketPath(runtime, opts.personality, cfg.sockDir)
   if (sessionAlive(sock, identity)) return { ok: true, identity, socketPath: sock, woke: false, runtime }

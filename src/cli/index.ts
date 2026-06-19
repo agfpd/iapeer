@@ -37,10 +37,10 @@ import {
   isEphemeralPeer,
   isStopped,
   killSession,
-  lastActiveRuntime,
   loadLifecycleConfig,
   purgeIdentityState,
   removeSessionState,
+  resolvePeerRuntime,
   setEphemeralArmed,
   setFreshNext,
   setIdleReaped,
@@ -518,7 +518,10 @@ export async function newPeer(
     }
   }
   if (runtime && !isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
-  const rt: Runtime = (runtime as Runtime | undefined) ?? peer.runtime
+  // Omitted runtime resolves IDENTICALLY to `attach` (resolvePeerRuntime): default_runtime
+  // anchored, sole-live refinement — so `iapeer new <peer>` and `iapeer attach <peer>` never
+  // target different runtimes (the "new had no effect, attach resurrected the other" footgun).
+  const rt: Runtime = (runtime as Runtime | undefined) ?? resolvePeerRuntime(peer, cfg)
   if (!peer.runtimes.includes(rt)) {
     return {
       personality,
@@ -638,7 +641,9 @@ export async function compactPeer(
     return { personality, runtime: r.value.controlled.runtime, action: 'compacted', woke: false }
   }
 
-  const rt: Runtime = (runtime as Runtime | undefined) ?? lastActiveRuntime(peer, cfg) ?? peer.runtime
+  // Asleep branch: omitted runtime resolves like new/attach (resolvePeerRuntime) — consistent
+  // default_runtime anchoring instead of the old hidden last-active-by-mtime.
+  const rt: Runtime = (runtime as Runtime | undefined) ?? resolvePeerRuntime(peer, cfg)
   if (!peer.runtimes.includes(rt)) {
     return {
       personality,

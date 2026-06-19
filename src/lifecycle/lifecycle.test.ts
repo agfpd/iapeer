@@ -18,6 +18,7 @@ import {
   isLaunchdManaged,
   isStopped,
   lastActiveRuntime,
+  resolvePeerRuntime,
   loadLifecycleConfig,
   readDeaths,
   readTopic,
@@ -1106,6 +1107,34 @@ describe('lastActiveRuntime', () => {
     const cfg = { sockDir: '/tmp' } as LifecycleConfig
     const rt = lastActiveRuntime(peer({ personality: 'np', runtimes: ['claude', 'codex'], cwd: '/tmp/does-not-exist-xyz' }), cfg)
     expect(rt).toBeUndefined()
+  })
+})
+
+describe('resolvePeerRuntime — predictable omitted-runtime default (new/attach/compact agree)', () => {
+  // sockDir points at an empty dir so NO runtime reads as live → the no-live branches
+  // (precedence 1 + 4) are deterministic. The live branches are liveness-gated and
+  // live-verified (success paths are live-verified, per this section's note).
+  const noLiveCfg = () => ({ sockDir: mkdtempSync(join(tmpdir(), 'iapeer-rpr-')) }) as LifecycleConfig
+
+  test('sole declared runtime → that runtime', () => {
+    const rt = resolvePeerRuntime(peer({ personality: 'solo', runtime: 'claude', runtimes: ['claude'] }), noLiveCfg())
+    expect(rt).toBe('claude')
+  })
+
+  test('multi-runtime, nothing live → default_runtime (NOT last-active-by-mtime)', () => {
+    const rt = resolvePeerRuntime(peer({ personality: 'mr', runtime: 'claude', runtimes: ['claude', 'codex'] }), noLiveCfg())
+    expect(rt).toBe('claude')
+  })
+
+  test('multi-runtime with default_runtime=codex, nothing live → codex (the config lever drives the naive flow)', () => {
+    const rt = resolvePeerRuntime(peer({ personality: 'mr', runtime: 'codex', runtimes: ['claude', 'codex'] }), noLiveCfg())
+    expect(rt).toBe('codex')
+  })
+
+  test('deterministic — repeated calls agree (new/attach/compact share this resolver)', () => {
+    const p = peer({ personality: 'mr', runtime: 'codex', runtimes: ['claude', 'codex'] })
+    const cfg = noLiveCfg()
+    expect(resolvePeerRuntime(p, cfg)).toBe(resolvePeerRuntime(p, cfg))
   })
 })
 
