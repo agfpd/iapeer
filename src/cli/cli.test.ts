@@ -631,3 +631,39 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     expect(findPeer(readPeersIndex({ env: e }), 'aud2')!.runtime).toBe('claude')
   })
 })
+
+describe('init — FU5 parity with create: declares ALL installed agentic runtimes', () => {
+  // Regression (Arthur clean-machine, 19.06): `iapeer init` on a both-installed host
+  // declared the peer claude-ONLY → `iapeer codex` failed "runtime not declared" because
+  // the launch dispatch reads the registry record, which init had populated with the
+  // primary only. init now mirrors create's secondary-add. Sandbox makes both runtimes
+  // read as installed; CODEX_HOME→temp keeps the codex birth chain (host-wide config.toml)
+  // hermetic.
+  function initEnv(): NodeJS.ProcessEnv {
+    return { ...env(), CODEX_HOME: join(root, 'codex-home') }
+  }
+  test('no marker, both installed → registry runtimes = [claude, codex], default claude (capability add never flips)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'iapeer-init-fu5-'))
+    try {
+      expect(await runCli(['init', cwd, '--no-bootstrap'], initEnv())).toBe(0)
+      const peers = readPeersIndex({ env: env() }).peers
+      expect(peers.length).toBe(1)
+      expect([...peers[0].runtimes].sort()).toEqual(['claude', 'codex'])
+      expect(peers[0].runtime).toBe('claude')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+  test('--runtime codex → default codex, runtimes still [claude, codex] (default is one OF the runtimes)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'iapeer-init-fu5b-'))
+    try {
+      expect(await runCli(['init', cwd, '--runtime', 'codex', '--no-bootstrap'], initEnv())).toBe(0)
+      const peers = readPeersIndex({ env: env() }).peers
+      expect(peers.length).toBe(1)
+      expect([...peers[0].runtimes].sort()).toEqual(['claude', 'codex'])
+      expect(peers[0].runtime).toBe('codex')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})

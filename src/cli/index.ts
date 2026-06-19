@@ -1396,8 +1396,34 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           env,
           warn: m => errOut(`warn: ${m}\n`),
         })
+        // FU5 parity with `create`: a peer's `runtimes` must list EVERY installed agentic
+        // runtime (the default is just one of them), so `iapeer <other-runtime>` works
+        // without a manual add-runtime. initPeer resolves only the PRIMARY (cwd markers /
+        // --runtime); declare the OTHER installed agentic runtime(s) too — otherwise the
+        // registry the launch dispatch reads (folderLaunch → resolveWakeRuntime) lists the
+        // primary only and `iapeer codex` fails "not declared" on a both-installed host.
+        // addRuntime is capability-only (runs the runtime birth chain, reindexes the
+        // registry from locals, NEVER flips the default); skip for an infra primary.
+        const addedRuntimes: Runtime[] = []
+        if (!isInfraRuntime(r.runtime)) {
+          const { isRuntimeInstalled } = await import('../init/index.ts')
+          const { secondaryRuntimes } = await import('../create/index.ts')
+          const installed = (['claude', 'codex'] as Runtime[]).filter(rt => isRuntimeInstalled(rt, env))
+          for (const rt of secondaryRuntimes(r.runtime, installed)) {
+            try {
+              const outcomes = await addRuntime(rt, { peer: r.personality, env })
+              const o = outcomes.find(x => x.personality === r.personality)
+              if (o && (o.action === 'added' || o.action === 'already')) addedRuntimes.push(rt)
+              else errOut(`warn: could not add runtime "${rt}": ${o?.detail ?? o?.action ?? 'failed'}\n`)
+            } catch (e) {
+              errOut(`warn: could not add runtime "${rt}": ${e instanceof Error ? e.message : String(e)}\n`)
+            }
+          }
+        }
+        const allRuntimes = [r.runtime, ...addedRuntimes]
         out(
-          `initialized "${r.personality}" (${r.runtime}); mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
+          `initialized "${r.personality}" (default: ${r.runtime}; runtimes: ${allRuntimes.join(', ')}); ` +
+            `mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
             `${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
         )
         return 0
