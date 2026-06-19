@@ -78,15 +78,15 @@ Agents reach each other with `send_to_peer`; you can also message any peer over 
 
 ## Bypass Permissions mode
 
-⚠️ **iapeer runs your Claude and Codex peers in bypass-permissions / no-sandbox mode — they execute tools (shell, file edits, network) without asking you to approve each action.** This is by design: a peer is a background, headless session with no human watching its terminal, so there is no one to answer a per-tool permission prompt. The launcher therefore starts Claude with `--dangerously-skip-permissions` and Codex with `--dangerously-bypass-approvals-and-sandbox`, and **auto-accepts the one-time "accept bypass mode" screen on your behalf** the first time a peer boots on a fresh machine.
+⚠️ **iapeer runs your Claude and Codex peers in bypass-permissions / no-sandbox mode — they execute tools (shell commands, file edits, network calls) without asking you to approve each action.** This is by design: a peer is a background, headless session with no human watching its terminal, so there is no one to answer a per-tool permission prompt. The launcher starts Claude with `--dangerously-skip-permissions` and Codex with `--dangerously-bypass-approvals-and-sandbox`, and **auto-accepts the one-time "accept bypass mode" screen on your behalf** the first time a peer boots on a fresh machine.
 
 What this means for you, stated plainly:
 
-- A peer can run any command its runtime can run — read and write files across your home dir, install software, make network calls — with **no confirmation step**. There is no sandbox between an agent and your machine.
-- You are trusting the model's judgement (and the doctrine/instructions you give each peer) the same way you would trust a developer with a shell on your account.
-- iapeer does **not** silently weaken your own interactive `claude`/`codex` setup: the bypass acceptance is recorded per peer in the agent's own config, and the project-MCP pre-approval is written **project-locally** (under the peer's folder), never to your global user settings.
+- A peer can run any command its runtime can run — read and write files anywhere in your home directory, install software, make network calls — with **no confirmation step**. There is no sandbox between an agent and your machine.
+- You are trusting the model's judgment, and the doctrine you give each peer, the same way you would trust a developer with a shell on your account.
+- iapeer does **not** silently weaken your own interactive `claude` / `codex` setup. The bypass acceptance is recorded per peer, in that agent's own config; the project-MCP pre-approval is written **project-locally**, under the peer's folder — never to your global user settings.
 
-Run iapeer on a host you control, give peers only the access they need, and treat a peer's instructions as security-relevant. `iapeer onboard` states this at setup; it is repeated here so the trade-off is explicit before you create your first agent. Details on every first-run dialog: [docs/07 — Install & update](docs/07-install-and-update.md#first-run-dialogs-on-a-clean-machine).
+Run iapeer on a host you control, give each peer only the access it needs, and treat a peer's instructions as security-relevant. `iapeer onboard` states this at setup; it's repeated here so the trade-off is explicit before you create your first agent. Details on every first-run dialog: [docs/07 — Install & update](docs/07-install-and-update.md#first-run-dialogs-on-a-clean-machine).
 
 ## What makes it different
 
