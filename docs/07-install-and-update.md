@@ -47,6 +47,24 @@ You'll see the core version, the daemon's health, and the memory-slot state. The
 
 A breakdown of each onboard step is in [02 — Quick start](02-quickstart.md); runtimes and memory in detail — in [09](09-runtimes.md) and [11](11-extensions-and-memory.md).
 
+## First-run dialogs on a clean machine
+
+On a fresh macOS host the first install → onboard → peer launch surfaces a handful of dialogs. iapeer auto-clears the agent runtimes' own first-run modals when it brings a peer up; **three** items are yours to do.
+
+**Auto-cleared (iapeer answers them on peer boot — you do nothing):**
+
+- **Claude** — the theme picker ("Choose the text style"), folder-trust, external-CLAUDE.md-import, and dev-channels modals. iapeer's launcher accepts the default (a bare Enter) for each.
+- **Codex** — folder-trust ("Do you trust the contents of this directory") is pre-trusted at peer creation and also auto-accepted on boot; the self-update offer is disabled (`check_for_update_on_startup = false`) and auto-declined; hooks-review is auto-trusted.
+- Per-action permission/approval prompts are suppressed by the runtime flags the launcher passes (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). There is no separate "accept dangerous permissions" screen.
+
+**Three things you do (these cannot be automated):**
+
+1. **Log in to the runtimes — before onboard.** Sign in to Claude Code and Codex first. Their login screen is a browser OAuth flow that no headless peer can drive, so iapeer deliberately does **not** auto-answer it; a runtime that is installed but not signed in makes a peer fail its first wake loudly. `iapeer onboard` warns when it finds an unauthenticated runtime.
+2. **Login keychain password — once, during install.** The install code-signs the binary with a stable local identity so Full Disk Access survives updates; macOS asks for your login keychain password the one time that identity is created. It is expected (the installer announces it). If declined, the binary still works — TCC prompts would just recur on updates.
+3. **Full Disk Access — a manual grant, no prompt.** macOS TCC cannot be set by any flag, env var, or script. Without it, a peer reading or writing a TCC-protected path (an iCloud Obsidian vault, Desktop, Documents, Downloads) silently fails with EPERM — no prompt, no hang. Grant it in **System Settings → Privacy & Security → Full Disk Access** (`~/.iapeer` itself is under `$HOME` and needs nothing); onboard prints the reminder.
+
+Gatekeeper does not gate the locally-built CLI run from a terminal (no quarantine attribute). Verified live: the Claude theme picker and the Codex folder-trust / update auto-clearing on a clean first launch (an owner's clean-machine install + an isolated codex first-boot test).
+
 ## Updating
 
 ```bash
