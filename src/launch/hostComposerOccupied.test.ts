@@ -69,8 +69,11 @@ describe('paneLogComposerOccupied — guard stays COLD on a free composer', () =
   })
 })
 
-describe('paneLogComposerOccupied — uncertainty is conservative (BUSY)', () => {
-  test('missing pane-log → BUSY (true): never paste into a maybe-occupied composer', async () => {
-    expect(await paneLogComposerOccupied(join(tmpdir(), 'iapeer-occ-nonexistent.log'), COLS, ROWS, 'claude')).toBe(true)
+describe('paneLogComposerOccupied — unreadable pane-log → NOT busy (deliver, never stall)', () => {
+  // Regression: a LIVE hosted session whose pane-log is missing/unreadable must NOT read busy. The hold
+  // exists only to protect VISIBLE human composer text; with no readable model there is none to protect,
+  // and "uncertainty → busy" stalled EVERY delivery to such a peer for the full 120 s force-timeout.
+  test('missing pane-log → NOT busy (false): no observed composer text to protect', async () => {
+    expect(await paneLogComposerOccupied(join(tmpdir(), 'iapeer-occ-nonexistent.log'), COLS, ROWS, 'claude')).toBe(false)
   })
 })

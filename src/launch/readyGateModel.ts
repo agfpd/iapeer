@@ -134,9 +134,15 @@ export async function paneLogViewport(log: string, cols: number, rows: number, s
  * validated `composerOccupancyFromModel` (REUSED, not reimplemented). The hosted equivalent of
  * `targetComposerBlocksDelivery`'s capture-pane occupancy. @xterm loads dynamically here (flag-on
  * hosted only; the leaf `composerOccupancyFromModel` import is type-only at runtime, so the warm path
- * stays @xterm-free with the flip off). UNCERTAINTY → BUSY (true): a model-build failure mirrors the
- * tmux predicate's capture-fail-is-busy stance — prefer a false-busy hold over a false-free paste into
- * a human composer.
+ * stays @xterm-free with the flip off). UNREADABLE PANE-LOG → NOT busy (false): the hold exists ONLY to
+ * avoid clobbering VISIBLE human composer text; if the model can't be built there is NO observed text to
+ * protect. This deliberately does NOT mirror the tmux predicate's capture-fail-is-busy stance: tmux
+ * `capture-pane` fails ~only when the session is GONE (then the queue's session-token/alive check fails
+ * the job loudly), but a hosted pane-log can be absent/unreadable while the session is ALIVE (e.g. a
+ * long-lived session whose lifecycle pane-log was rotated/removed) — so "uncertainty → busy" would stall
+ * EVERY delivery to such a peer until the 120 s force-timeout, starving the core addressed-delivery
+ * feature. The narrow cost (no composer protection while the log is unreadable) is acceptable: a session
+ * actively being typed into is precisely one whose pane-log IS being written.
  *
  * NB (sequence): this is the DETECTION primitive. The end-to-end gate (attached-supervisor-
  * client + enqueue + host-aware drain) lands with the attach client in Ф0b-3 — until a human can
@@ -145,7 +151,7 @@ export async function paneLogViewport(log: string, cols: number, rows: number, s
  */
 export async function paneLogComposerOccupied(log: string, cols: number, rows: number, runtime: string): Promise<boolean> {
   const term = await loadPaneLogModel(log, cols, rows)
-  if (!term) return true // uncertainty → busy: never paste into a maybe-occupied composer
+  if (!term) return false // unreadable pane-log → no observed human composer text → deliver, never stall (see JSDoc)
   const { composerOccupancyFromModel } = await import('../shadow/render.ts')
   return composerOccupancyFromModel(term, cols, rows, runtime)
 }
