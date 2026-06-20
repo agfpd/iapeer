@@ -158,9 +158,11 @@ function normalizePeer(raw: unknown): PeerRecord {
       )}"`,
     )
   }
-  // default_runtime is the contract field; `runtime` is legacy. Dual-read accepts
-  // both during the staged migration; when both are present default_runtime WINS
-  // (the write emits default_runtime + the legacy mirror since Phase 2).
+  // default_runtime is the contract field. Phase-3 (registry): foundation no longer WRITES the legacy
+  // `runtime` mirror (see writePeersIndexAtomic), but the read-fallback is KEPT as a dormant defensive
+  // net — it tolerates a legacy-shaped entry (restored backup / hand-edit) at a 1-token cost. All real
+  // readers switched (telegram → default_runtime, notifier → cwd-only); registry is single-writer so
+  // new entries are default_runtime-only. Full fallback removal is a future final cleanup.
   const defaultRuntime = obj.default_runtime ?? obj.runtime
   if (!isRuntime(defaultRuntime)) {
     throw new IapError(
@@ -315,15 +317,15 @@ function writePeersIndexAtomic(paths: PeersPaths, index: PeersIndex): void {
   // Persist the RAW intelligence verbatim (legacy-safe round-trip) and DROP the
   // intelligenceRaw shadow field from the on-disk shape — the file carries the
   // legacy vocab the live IAP reads, never the foundation's in-memory normalization.
-  // Phase-2 write-flip (staged default_runtime migration): the disk shape carries the
-  // contract field `default_runtime` PLUS the legacy `runtime` as an in-sync mirror,
-  // so not-yet-dual-read readers keep working. Phase 3 removes the mirror.
+  // Phase-3 (registry): the disk shape carries ONLY the contract field `default_runtime` — the legacy
+  // `runtime` mirror is removed (all registry readers switched: telegram → default_runtime, notifier →
+  // cwd-only, foundation → default_runtime). Local per-peer profiles keep their mirror until the paired
+  // telegram writePeerProfile follow-up.
   const peersForDisk = [...index.peers]
     .sort((a, b) => a.personality.localeCompare(b.personality))
     .map(peer => ({
       personality: peer.personality,
       default_runtime: peer.runtime,
-      runtime: peer.runtime,
       runtimes: peer.runtimes,
       description: peer.description,
       intelligence: peer.intelligenceRaw ?? peer.intelligence,

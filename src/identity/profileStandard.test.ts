@@ -156,11 +156,11 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     expect(reconcileIndex({ env: process.env }).find(e => e.personality === 'boris')?.drift).toEqual([])
   })
 
-  test('reindex writes the Phase-2 disk shape: default_runtime + in-sync legacy mirror', async () => {
+  test('reindex writes the Phase-3 registry disk shape: default_runtime ONLY (legacy mirror dropped)', async () => {
     await reindexFromLocals({ env: process.env })
     const disk = JSON.parse(readFileSync(join(root, 'peers-profiles.json'), 'utf8'))
     expect(disk.peers[0].default_runtime).toBe('claude')
-    expect(disk.peers[0].runtime).toBe('claude') // legacy mirror until Phase 3
+    expect(disk.peers[0].runtime).toBeUndefined() // Phase-3: registry no longer writes the legacy mirror
   })
 
   test('migrateProfileRuntimeField: legacy-only profile → rewritten with default_runtime + mirror, owner fields preserved, idempotent', () => {
