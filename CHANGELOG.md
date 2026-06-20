@@ -10,14 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-06-21
+
+### Fixed
+
+- **Completed the bot_username cutover.** The telegram sender-guard (`hasTelegramPresence`)
+  now keys on `interfaces.telegram.bot_username` (the cutover's binding key) instead of the
+  legacy `bot`; the host registry was regenerated from the per-cwd source of truth, dropping
+  the stale `interfaces.telegram.bot` field across the fleet. telegram-runtime already
+  resolved on `bot_username`, so the foundation guard was the last consumer of `bot`.
+- `recordDrift` (verify / reconcile) now compares the `interfaces` passport with an
+  order-insensitive canonical compare, so a source↔derived divergence is detected and healed
+  by `verify --fix` — the class that had let the derived registry silently keep a field
+  removed from the source of truth.
+
 ### Changed
 
 - Fact-actualized the repo docs against the current code: pty-only (tmux references removed),
   no canary/forensics in postmortem diagnostics, and the legacy `runtime`-mirror drop.
+- Unified the README to the fleet documentation style.
 
 ### Added
 
-- This changelog.
+- This changelog (Keep a Changelog), shipped in the npm package.
+- HD hero GIF in the README (1440×726 — sharper terminal text).
 
 ## [0.4.13] - 2026-06-20
 
@@ -206,7 +222,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.13...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.14...HEAD
+[0.4.14]: https://github.com/agfpd/iapeer/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/agfpd/iapeer/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/agfpd/iapeer/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/agfpd/iapeer/compare/v0.4.10...v0.4.11
