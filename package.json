@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/iapeer",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Foundation core for the iapeer multi-agent ecosystem: identity, registry, storage, codec.",
   "license": "Apache-2.0",
   "author": "agfpd",
