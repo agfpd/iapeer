@@ -71,8 +71,6 @@ The daemon's supervisory tick is fixed — once a minute, not configurable.
 A few more variables the system reads but that aren't set in normal operation:
 
 - `NOTIFIER_FALLBACK_TARGET` — a fallback recipient for notifier signals; the core resolves it into the peer's plist at onboarding (no hardcode), the operator doesn't set it by hand.
-- `IAP_TMUX_PASTE_SETTLE_MS`, `IAP_TMUX_SUBMIT_TIMEOUT_MS` — delivery timings in the internal tmux dev branch; production uses the pty supervisor ([13 — Architecture and contract](13-architecture-and-contract.md)), so they aren't needed outside development.
-- `IAPEER_SHADOW_PATH` — the `PATH` for a shadow-fidelity run (an internal development tool).
 
 ## Logs and diagnostics
 
@@ -84,8 +82,8 @@ The daemon keeps three durable logs in `~/.iapeer/logs/iapeer/`:
 
 ### Postmortem diagnostics
 
-The cause of a session's death (exit code / signal) the supervisor records at the moment of death — what an ordinary "is the process alive" check misses. A separate canary holds a connection to the supervisor and, on a session's death, writes the circumstances to `exits.log`: memory, swap, top processes by consumption, system diagnostic reports. It's the material for answering "why did the agent die".
+The cause of a session's death (exit code / signal) the supervisor records at the moment of death to `exits.log` — what an ordinary "is the process alive" check misses. It's the material for answering "why did the agent die".
 
 ### Full Disk Access
 
-To read system diagnostic reports, the `iapeer` binary needs Full Disk Access (FDA) — a macOS permission. `iapeer status` shows whether FDA is granted and hints at what to do if not. Without FDA, peers will hit TCC prompts when accessing protected folders and third-party app containers.
+The `iapeer` binary needs Full Disk Access (FDA) — a macOS permission. `iapeer status` shows whether FDA is granted and hints at what to do if not. Without FDA, peers will hit TCC prompts when accessing protected folders and third-party app containers.

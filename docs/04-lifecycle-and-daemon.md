@@ -81,7 +81,7 @@ An agent with no activity for longer than an hour is slept on the next superviso
 
 **Wake serialization.** Several messages may hit a sleeping agent at once; one attempt should bring it up, or two competing sessions would be born. The daemon takes a lock on waking a given peer — the rest wait for the first to be ready.
 
-**Postmortem diagnostics.** At the moment a session dies the supervisor records its cause (exit code / signal) — what an ordinary "is the process alive" check misses. For this a separate canary holds a blocking connection to the supervisor and, on a session's death, writes the circumstances — memory, swap, process list, diagnostic reports — to a log.
+**Postmortem diagnostics.** At the moment a session dies the supervisor records its cause (exit code / signal) to a log — what an ordinary "is the process alive" check misses.
 
 ## The boundary: claude/codex vs infrastructure
 

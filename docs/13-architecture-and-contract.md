@@ -29,7 +29,7 @@ The adapter's key properties:
 
 Routers skip all the TUI phases: they have no boot dialogs, no readiness markers, no delivery confirmation, no control commands. Their liveness is held by launchd, not a wake by the daemon.
 
-The production mechanism for hosting TUI sessions is the **pty supervisor**: a supervisor daemon owns the session's pty and its pane log, and delivery onto input goes through its socket. tmux remains only an internal dev branch (the shadow branch) and doesn't figure at the user level.
+The production mechanism for hosting TUI sessions is the **pty supervisor**: a supervisor daemon owns the session's pty and its pane log, and delivery onto input goes through its socket.
 
 ## The runtime-package contract
 

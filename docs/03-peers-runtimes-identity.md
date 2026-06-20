@@ -102,7 +102,7 @@ Identity has two storage places, and it matters which is authoritative.
 
 The profile fields split into three classes by who owns them:
 
-- **Identity core** — `personality`, `default_runtime`, `runtimes`, `description`, `intelligence`, `initial_prompt`. Owned by the core and the lifecycle. The `initial_prompt` field is the seed for a fresh session's first turn. The `runtime` field beside `default_runtime` is a synchronized copy for compatibility with old readers; both are written consistently.
+- **Identity core** — `personality`, `default_runtime`, `runtimes`, `description`, `intelligence`, `initial_prompt`. Owned by the core and the lifecycle. The `initial_prompt` field is the seed for a fresh session's first turn. The legacy `runtime` field beside `default_runtime` is no longer written — a read-fallback still understands older profiles that carry only `runtime`.
 - **Private plugin config** — sections like `expansion` (shortcut aliases), `notifier` (the scheduler peer's settings), and others, one per plugin. Read only from the local profile, never projected into the registry.
 - **Public passport** — the `interfaces` section (e.g. `interfaces.telegram.bot`). These are routing attributes, and they're projected into the registry.
 
