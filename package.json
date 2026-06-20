@@ -28,6 +28,7 @@
     "src",
     "bin",
     "docs",
+    "CHANGELOG.md",
     "tsconfig.json",
     "!src/**/*.test.ts",
     "!docs/internals/**"
