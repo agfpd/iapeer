@@ -217,6 +217,23 @@ export function projectProfileToRecord(cwd: string): PeerRecord | null {
   }
 }
 
+/** Order-insensitive structural serialization for comparing the projected OWNER
+ *  passport (`interfaces`) — a nested object whose key ORDER is not semantically
+ *  meaningful. A plain JSON.stringify would flag an order-only difference as drift
+ *  (a legacy upsertPeer write may have stored keys in a different order); canonicalize
+ *  first so only real content divergence is reported — a key added, removed, or changed,
+ *  e.g. a field dropped from the source of truth after a cutover that the derived index
+ *  never re-projected. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const obj = value as Record<string, unknown>
+  return `{${Object.keys(obj)
+    .sort()
+    .map(k => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+    .join(',')}}`
+}
+
 /** The index↔local drift for one peer: the fields where the live registry record
  *  disagrees with the projection from the local profile (the self-heal source). Empty
  *  array = in sync. cwd is the registry pointer, never compared. */
@@ -227,6 +244,12 @@ export function recordDrift(indexRecord: PeerRecord, projected: PeerRecord): str
   if (indexRecord.runtimes.join(',') !== projected.runtimes.join(',')) drift.push('runtimes')
   if (indexRecord.description !== projected.description) drift.push('description')
   if (indexRecord.intelligence !== projected.intelligence) drift.push('intelligence')
+  // The OWNER passport (`interfaces`) is projected into the registry, so a divergence
+  // here is real drift — the class that hid the bot_username cutover (source dropped
+  // `interfaces.telegram.bot`, the derived index kept it because nothing compared it).
+  // projectProfileToRecord already replaces interfaces wholesale; comparing it here makes
+  // the desync VISIBLE to verify/reconcile so it can never silently persist again.
+  if (canonicalJson(indexRecord.interfaces) !== canonicalJson(projected.interfaces)) drift.push('interfaces')
   return drift
 }
 

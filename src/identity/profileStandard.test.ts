@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { isConformant, migrateProfileRuntimeField, reconcileIndex, reindexFromLocals, validateProfileStandard } from './profileStandard.ts'
+import { isConformant, migrateProfileRuntimeField, recordDrift, reconcileIndex, reindexFromLocals, validateProfileStandard } from './profileStandard.ts'
 import { readFileSync } from 'fs'
 import { readPeersIndex } from '../registry/index.ts'
 
@@ -200,5 +200,48 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     const after = JSON.parse(readFileSync(profilePath, 'utf8'))
     expect(after.default_runtime).toBe('codex') // contract side governs
     expect(after.runtime).toBeUndefined() // Phase-3: diverged legacy mirror stripped (default_runtime wins)
+  })
+
+  test('reconcile DETECTS interfaces drift (bot_username cutover class) + reindex drops the stale field', async () => {
+    // source of truth (local): post-cutover clean telegram passport — NO `bot`
+    writeFileSync(
+      join(borisCwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({
+        personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: 'd', intelligence: 'artificial',
+        interfaces: { telegram: { activity: true, bot_username: 'boris_claudecode_bot' } },
+      }),
+    )
+    // derived index: STALE — still carries the removed `bot` field (the desync class)
+    writeFileSync(
+      join(root, 'peers-profiles.json'),
+      JSON.stringify({
+        version: 2,
+        peers: [{
+          personality: 'boris', default_runtime: 'claude', runtimes: ['claude'], description: 'd', intelligence: 'artificial', cwd: borisCwd,
+          interfaces: { telegram: { bot: 'boris', activity: true, bot_username: 'boris_claudecode_bot' } },
+        }],
+      }),
+    )
+    // reconcile now SEES the interfaces drift (the bug: recordDrift never compared interfaces)
+    expect(reconcileIndex({ env: process.env }).find(e => e.personality === 'boris')?.drift).toContain('interfaces')
+    // reindex heals: the derived index drops the stale `bot`, matching the source of truth
+    await reindexFromLocals({ env: process.env })
+    expect(readPeersIndex({ env: process.env }).peers[0].interfaces).toEqual({
+      telegram: { activity: true, bot_username: 'boris_claudecode_bot' },
+    })
+    // afterwards reconcile is clean
+    expect(reconcileIndex({ env: process.env }).find(e => e.personality === 'boris')?.drift).toEqual([])
+  })
+
+  test('recordDrift: key-order-only difference in interfaces is NOT drift (canonical compare)', () => {
+    const a = {
+      personality: 'boris', runtime: 'claude', runtimes: ['claude'], description: 'd', intelligence: 'artificial', cwd: '/x',
+      interfaces: { telegram: { activity: true, bot_username: 'b' } },
+    } as never
+    const b = {
+      personality: 'boris', runtime: 'claude', runtimes: ['claude'], description: 'd', intelligence: 'artificial', cwd: '/y',
+      interfaces: { telegram: { bot_username: 'b', activity: true } }, // same content, different key order
+    } as never
+    expect(recordDrift(a, b)).toEqual([])
   })
 })

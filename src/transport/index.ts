@@ -966,19 +966,21 @@ function validateAttachments(value: readonly string[] = []): Result<string[]> {
 
 // ─── Telegram-domain sender policy ─
 
-/** A SENDER face in the telegram domain: a non-empty interfaces.telegram.bot (the
- *  bot machine-key) in the peer's registry passport. Deliberately bot-ONLY, not
- *  bot|user_id — the bridge picks the SENDING bot from the sender's bot key:
- *  a user_id grants a receive/operator
- *  identity but no ability to send, so a user_id-only sender passing the guard
- *  would still die at the bridge — a late asynchronous failure where the guard
- *  exists to give a synchronous one. The guard passes exactly what the bridge can
- *  deliver. */
+/** A SENDER face in the telegram domain: a non-empty interfaces.telegram.bot_username
+ *  (the bot binding key SINCE the bot_username-cutover) in the peer's registry passport.
+ *  Deliberately bot_username-ONLY, not bot_username|user_id — the bridge picks the SENDING
+ *  bot from the sender's bot_username key: a user_id grants a receive/operator identity but
+ *  no ability to send, so a user_id-only sender passing the guard would still die at the
+ *  bridge — a late asynchronous failure where the guard exists to give a synchronous one.
+ *  The guard passes exactly what the bridge can deliver. (Legacy `bot` was the pre-cutover
+ *  key; it is NO LONGER read here — the source of truth dropped it and telegram-runtime
+ *  resolves the sending bot on bot_username. This guard is the foundation's only consumer
+ *  of the telegram passport, so it moves with the cutover.) */
 export function hasTelegramPresence(record: PeerRecord): boolean {
   const tg = record.interfaces?.telegram
   if (!tg || typeof tg !== 'object' || Array.isArray(tg)) return false
   const t = tg as Record<string, unknown>
-  return typeof t.bot === 'string' && t.bot.trim() !== ''
+  return typeof t.bot_username === 'string' && t.bot_username.trim() !== ''
 }
 
 /** Sender policy for the telegram domain: a peer with NO declared telegram presence
@@ -1000,7 +1002,7 @@ function telegramSenderGuard(
   if (targetRuntime !== 'telegram') return ok(undefined)
   if (hasTelegramPresence(caller.record)) return ok(undefined)
   return err(
-    `telegram policy: sender "${caller.personality}" has no telegram face (no interfaces.telegram.bot in its passport) — message to "${targetPersonality}" NOT delivered; route via a peer that has a telegram bot in its passport, or provision a bot for this sender`,
+    `telegram policy: sender "${caller.personality}" has no telegram face (no interfaces.telegram.bot_username in its passport) — message to "${targetPersonality}" NOT delivered; route via a peer that has a telegram bot in its passport, or provision a bot for this sender`,
   )
 }
 

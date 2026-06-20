@@ -52,9 +52,10 @@ const callerRecord = {
   intelligence: 'artificial',
   cwd: '/tmp/boris',
   // Telegram sender policy: the target of these suites is a telegram peer, so the
-  // caller must declare a telegram presence (the bot machine-key) — these suites
-  // double as the "bot-faced sender delivers as before" half of the policy criterion.
-  interfaces: { telegram: { bot: 'boris' } },
+  // caller must declare a telegram presence (the bot_username binding key since the
+  // cutover) — these suites double as the "faced sender delivers as before" half of
+  // the policy criterion.
+  interfaces: { telegram: { bot_username: 'boris_claudecode_bot' } },
 } as unknown as PeerRecord
 const caller: ResolvedCaller = {
   personality: 'boris',
@@ -146,18 +147,22 @@ const facelessCaller: ResolvedCaller = {
 describe('telegram sender policy — hasTelegramPresence', () => {
   const rec = (tg: unknown): PeerRecord =>
     ({ personality: 'x', runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial', cwd: '/tmp/x', ...(tg !== undefined ? { interfaces: { telegram: tg } } : {}) }) as unknown as PeerRecord
-  test('bot machine-key (agent peers) → sender face present', () => {
-    expect(hasTelegramPresence(rec({ bot: 'boris' }))).toBe(true)
+  test('bot_username binding key (agent peers, post-cutover) → sender face present', () => {
+    expect(hasTelegramPresence(rec({ bot_username: 'boris_claudecode_bot' }))).toBe(true)
+    expect(hasTelegramPresence(rec({ activity: true, bot_username: 'boris_claudecode_bot' }))).toBe(true)
   })
-  test('user_id alone (natural peers — nova) → NO sender face: the bridge sends FROM the bot key; user_id is a receive/operator identity (owner fact, bot-only predicate)', () => {
+  test('legacy `bot` alone (no bot_username) → NO sender face: the cutover moved the binding key to bot_username; `bot` is no longer read', () => {
+    expect(hasTelegramPresence(rec({ bot: 'boris' }))).toBe(false)
+  })
+  test('user_id alone (natural peers — nova) → NO sender face: the bridge sends FROM the bot_username key; user_id is a receive/operator identity (owner fact, bot_username-only predicate)', () => {
     expect(hasTelegramPresence(rec({ user_id: '100000001' }))).toBe(false)
     expect(hasTelegramPresence(rec({ user_id: 100000001 }))).toBe(false)
   })
-  test('no interfaces / no telegram / empty bot → absent', () => {
+  test('no interfaces / no telegram / empty bot_username → absent', () => {
     expect(hasTelegramPresence(rec(undefined))).toBe(false)
     expect(hasTelegramPresence(rec({}))).toBe(false)
-    expect(hasTelegramPresence(rec({ bot: '' }))).toBe(false)
-    expect(hasTelegramPresence(rec({ bot: '  ' }))).toBe(false)
+    expect(hasTelegramPresence(rec({ bot_username: '' }))).toBe(false)
+    expect(hasTelegramPresence(rec({ bot_username: '  ' }))).toBe(false)
     expect(hasTelegramPresence(rec({ aliases: { '/alias_new': 'x' } }))).toBe(false)
   })
 })
