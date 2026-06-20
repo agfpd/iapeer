@@ -1,85 +1,14 @@
-// Ф1 READY-GATE viewport-source FLIP (cutover Block 3) — DARK / flag-gated, canary-first.
-//
-// The cold-wake ready-gate (launch index.ts step 6) decides "is the input surface ready?" by
-// running adapter.isInputReady on a VIEWPORT. Today that viewport is a `tmux capture-pane` scrape.
-// This is the FIRST migration mutation: swap the viewport SOURCE to the pty-MODEL (an @xterm/headless
-// emulation of the daemon's pane-log — the SAME raw child bytes tmux renders), keeping the SAME
-// production predicate (adapter.isInputReady) and an UNCONDITIONAL capture-pane fallback.
-//
-// Why this is low-radius: it is a viewport-SOURCE swap, NOT a predicate change.
-// The model verdict was validated 0-divergence vs capture-pane on the readiness predicate by the
-// burn-in gate (incl. the codex resume-with-history splash-off-screen center cell) before any peer
-// is flipped. It touches ONLY the isInputReady INPUT — dialog detection upstream and the delivery +
-// delivery-confirm downstream (submitIntoTui's submit-landed + deliverViaTmux's transcript-mtime
-// advance, the "real model advancement" final-arbiter) are untouched, so the canonical
-// harmless-false-glyph property is preserved by construction.
-//
-// FLAG: a per-peer marker `<logDir>/<identity>.pty-readygate`. Absent → capture-pane (byte-identical
-// to today). Present → the model viewport. Per-peer so the first flip is a single canary with the
-// whole fleet still on tmux; dynamic (touch/rm, no daemon restart). @xterm is dynamic-imported ONLY
-// when the flag is set, so the launch hot path stays @xterm-free with the flip off.
+// Pane-log MODEL leaf — render a supervisor pane-log (raw child pty bytes) through @xterm/headless to
+// the readiness viewport + composer-occupancy verdict. The pty-hosted ready-gate (ptyHost.waitHostReady)
+// and the warm-deliver busy-composer guard (transport) both read the session state from this model —
+// a hosted session has no capture-pane, so the pane-log model is the ONLY readiness/occupancy source.
+// @xterm is dynamic-imported (loaded only when a model is actually built), so callers that never build
+// one stay @xterm-free.
 
-import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs'
 import type { Terminal } from '@xterm/headless' // TYPE-ONLY (erased) — the runtime @xterm load is the dynamic import below
 
 const SEED_BYTES = 4 * 1024 * 1024
-
-/**
- * SERVING-path cross-check log (the post-flip soak gate). When a peer is flipped, the MODEL verdict
- * is AUTHORITATIVE in the cold-wake ready-gate; this records, per evaluation, what capture-pane WOULD
- * have said — so a soak can prove 0 model-vs-capture divergence IN THE SERVING PATH (the read-only
- * burn-in measures continuously but never drove the actual ready decision). Append-only jsonl under
- * the event-log dir. Best-effort: a log hiccup never affects the ready decision. No-op without a dir.
- */
-export function logReadyGateCrossCheck(
-  eventLogDir: string | undefined,
-  rec: { identity: string; modelReady: boolean; captureReady: boolean; geom: string; nowISO: string },
-): void {
-  if (!eventLogDir) return
-  try {
-    appendFileSync(
-      join(eventLogDir, 'readygate-flip.jsonl'),
-      JSON.stringify({
-        ts: rec.nowISO,
-        identity: rec.identity,
-        modelReady: rec.modelReady,
-        captureReady: rec.captureReady,
-        diverged: rec.modelReady !== rec.captureReady,
-        geom: rec.geom,
-      }) + '\n',
-    )
-  } catch {
-    /* observability only — never block the ready-gate */
-  }
-}
-
-/** Per-peer ready-gate flip flag: the marker `<logDir>/<identity>.pty-readygate`. */
-export function readyGatePtyFlipEnabled(logDir: string, identity: string): boolean {
-  return existsSync(`${logDir}/${identity}.pty-readygate`)
-}
-
-export interface ReadyGateViewportOpts {
-  logDir: string
-  identity: string
-  /** The capture-pane scrape — returned verbatim when the flag is off OR any model build fails. */
-  fallback: string
-  cols: number
-  rows: number
-}
-
-/**
- * Resolve the ready-gate viewport. Flag OFF → `fallback` (capture-pane) verbatim — zero work, the
- * caller never even reaches here unless it pre-checked the flag, but this stays safe regardless.
- * Flag ON → the pty-model viewport as plain text. ANY failure (unreadable/short log, @xterm hiccup)
- * → `fallback`: the flip can never make readiness WORSE than capture-pane today (tmux is the floor).
- */
-export async function readyGateViewport(opts: ReadyGateViewportOpts): Promise<string> {
-  if (!readyGatePtyFlipEnabled(opts.logDir, opts.identity)) return opts.fallback
-  if (!(opts.cols > 0 && opts.rows > 0)) return opts.fallback
-  const view = await paneLogViewport(`${opts.logDir}/${opts.identity}.log`, opts.cols, opts.rows)
-  return view ?? opts.fallback // tmux-fallback is unconditional — never worse than today
-}
 
 /**
  * Read a pane-log's tail into a headless @xterm and render the viewport as plain text — the SAME

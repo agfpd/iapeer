@@ -4,31 +4,12 @@ import { getAdapter } from '../launch/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 import {
-  composerCaptureHasHumanInput,
   createComposerDeliveryQueue,
   type ComposerQueueTryEnqueueArgs,
   type DeliveryTarget,
 } from './index.ts'
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
-describe('composerCaptureHasHumanInput (SGR color gate)', () => {
-  test('codex: default-fg text after › is human input; faint/grey ghost text is not', () => {
-    const markers = getAdapter('codex').deliveryMarkers
-    expect(composerCaptureHasHumanInput('\x1b[32m›\x1b[0m hello', markers)).toBe(true)
-    expect(composerCaptureHasHumanInput('\x1b[32m›\x1b[0m \x1b[2mghost suggestion\x1b[0m', markers)).toBe(false)
-    expect(composerCaptureHasHumanInput('\x1b[32m›\x1b[0m \x1b[38;5;246mplaceholder\x1b[0m', markers)).toBe(false)
-    // A suggestion accepted into the composer is no longer grey/faint; it must be held.
-    expect(composerCaptureHasHumanInput('\x1b[32m›\x1b[0m accepted suggestion', markers)).toBe(true)
-  })
-
-  test('claude: same color rule is runtime-owned behind the ❯ prompt glyph', () => {
-    const markers = getAdapter('claude').deliveryMarkers
-    expect(composerCaptureHasHumanInput('\x1b[35m❯\x1b[0m human', markers)).toBe(true)
-    expect(composerCaptureHasHumanInput('\x1b[35m❯\x1b[0m \x1b[2mghost\x1b[0m', markers)).toBe(false)
-    expect(composerCaptureHasHumanInput('\x1b[35m❯\x1b[0m \x1b[38;5;246mplaceholder\x1b[0m', markers)).toBe(false)
-  })
-})
 
 const callerRecord = {
   personality: 'sender',

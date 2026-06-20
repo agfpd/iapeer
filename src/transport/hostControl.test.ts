@@ -23,7 +23,6 @@ interface Captured {
 
 function capturingSeam(captured: Captured[]): ControlHostSeam {
   return {
-    hostAlive: () => true,
     sendControl: async (_runDir, session, chunks, opts) => {
       captured.push({ session, chunks, stepDelayMs: opts.stepDelayMs })
       return { ok: true }
@@ -50,24 +49,8 @@ describe('executeControlOnTarget — hosted control over the socket (slice 3)', 
     expect(cap[0].stepDelayMs).toBe(300)
   })
 
-  test('flag-off (hostAlive=false) → the socket control-send is NEVER touched (tmux path)', async () => {
-    let sendCalls = 0
-    const seam: ControlHostSeam = {
-      hostAlive: () => false,
-      sendControl: async () => {
-        sendCalls++
-        return { ok: true }
-      },
-    }
-    // tmux send-keys will fail against the bogus socket — incidental; the contract is that flag-off
-    // never reaches the host branch.
-    await executeControlOnTarget(hostedCodex, { name: 'interrupt' }, seam)
-    expect(sendCalls).toBe(0)
-  })
-
   test('socket control-send fails → loud error, no false ok', async () => {
     const seam: ControlHostSeam = {
-      hostAlive: () => true,
       sendControl: async () => ({ ok: false, error: 'socket dead during control send' }),
     }
     const r = await executeControlOnTarget(hostedCodex, { name: 'interrupt' }, seam)

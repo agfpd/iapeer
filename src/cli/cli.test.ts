@@ -70,25 +70,17 @@ describe('remove with a v1.2 provision slot', () => {
     expect(code).toBe(2) // usage exit — the verb no longer exists
   })
 
-  test('remove: unprovision runs with occasion=remove BEFORE the purge, outcome reported; cmdlog dir dies with the record', async () => {
+  test('remove: unprovision runs with occasion=remove BEFORE the purge, outcome reported', async () => {
     const journal = declareV12Slot()
     await register('beta')
-    // identity-keyed tmux command-log dir (0.2.40) — must die with the registry
-    // record (the leak class noted at the 0.2.40 acceptance)
-    const { mkdirSync: mkd } = await import('fs')
-    const cmdDir = join(root, 'logs', 'iapeer', 'tmux-cmdlog', 'claude-beta')
-    mkd(cmdDir, { recursive: true })
-    writeFileSync(join(cmdDir, 'tmux-server-1.log'), 'x')
     const o = await removePeerCli('beta', { env: env() })
     expect(o.action).toBe('removed')
     expect(o.unprovision).toEqual(['claude:ok'])
-    const { readFileSync, existsSync: ex } = await import('fs')
+    const { readFileSync } = await import('fs')
     const j = readFileSync(journal, 'utf8')
     expect(j).toContain('unprovision-peer')
     expect(j).toContain('--cwd\n/tmp/beta')
     expect(j).toContain('remove')
-    expect(ex(cmdDir)).toBe(false)
-    expect(o.purgedState).toContain('tmux-cmdlog/claude-beta')
   })
 })
 

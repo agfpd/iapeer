@@ -10,16 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
-import {
-  CMDLOG_KEEP_BYTES,
-  PANELOG_CAP_BYTES,
-  PANELOG_KEEP_BYTES,
-  capCmdLogs,
-  capPaneLogs,
-  cmdLogDirFor,
-  hardenCmdLogDir,
-  prepareCmdLogDir,
-} from './cmdlog.ts'
+import { PANELOG_CAP_BYTES, PANELOG_KEEP_BYTES, capPaneLogs } from './cmdlog.ts'
 
 const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
 
@@ -29,47 +20,6 @@ beforeAll(() => {
 })
 afterAll(() => {
   rmSync(root, { recursive: true, force: true })
-})
-
-describe('prepareCmdLogDir / hardenCmdLogDir / capCmdLogs (hermetic)', () => {
-  test('prepare WIPES the previous generation and recreates 0700', () => {
-    const dir = prepareCmdLogDir(root, 'claude-x')
-    expect(dir).toBe(cmdLogDirFor(root, 'claude-x'))
-    writeFileSync(join(dir!, 'tmux-server-1.log'), 'old generation')
-    const again = prepareCmdLogDir(root, 'claude-x')
-    expect(readdirSync(again!)).toEqual([]) // old log gone — one generation per dir
-    expect(statSync(again!).mode & 0o777).toBe(0o700)
-  })
-
-  test('harden clamps every file to 0600', () => {
-    const dir = prepareCmdLogDir(root, 'claude-h')!
-    writeFileSync(join(dir, 'tmux-server-2.log'), 'x', { mode: 0o644 })
-    hardenCmdLogDir(dir)
-    expect(statSync(join(dir, 'tmux-server-2.log')).mode & 0o777).toBe(0o600)
-  })
-
-  test('cap tail-keeps an oversized log (KEEP bytes of TAIL survive), leaves small logs alone', () => {
-    const dir = prepareCmdLogDir(root, 'claude-c')!
-    const big = join(dir, 'tmux-server-3.log')
-    const small = join(dir, 'tmux-server-4.log')
-    // 2 MB of filler ending in a recognizable tail — cap to 1 KB keep for the test
-    writeFileSync(big, Buffer.concat([Buffer.alloc(2 * 1024 * 1024, 0x61), Buffer.from('THE-DEATH-TAIL')]))
-    writeFileSync(small, 'tiny')
-    const capped = capCmdLogs(root, 1024 * 1024, 1024)
-    expect(capped).toEqual([big])
-    const after = readFileSync(big)
-    expect(after.length).toBe(1024)
-    expect(after.toString()).toEndWith('THE-DEATH-TAIL') // the tail is what survives
-    expect(readFileSync(small, 'utf8')).toBe('tiny')
-  })
-
-  test('cap on a missing tree is a silent no-op', () => {
-    expect(capCmdLogs(join(root, 'absent'))).toEqual([])
-  })
-
-  test('default keep constant stays under the cap', () => {
-    expect(CMDLOG_KEEP_BYTES).toBeLessThan(8 * 1024 * 1024)
-  })
 })
 
 describe('capPaneLogs (pane-log tail-keep, hermetic)', () => {
@@ -109,29 +59,5 @@ describe('capPaneLogs (pane-log tail-keep, hermetic)', () => {
     // (readyGateModel SEED_BYTES = 4 MiB) so capping never starves occupancy detection.
     expect(PANELOG_KEEP_BYTES).toBeGreaterThanOrEqual(4 * 1024 * 1024)
     expect(PANELOG_KEEP_BYTES).toBeLessThan(PANELOG_CAP_BYTES)
-  })
-})
-
-describe.if(tmuxAvailable)('live -v server log (acceptance criterion)', () => {
-  test('external client kill-session lands in the server log with client attribution; harden → 0600', () => {
-    const dir = prepareCmdLogDir(root, 'claude-live')!
-    const sock = join(root, 'live.sock')
-    // Start the server FROM the cmdlog dir with -v — exactly the launch wiring.
-    const start = spawnSync('tmux', ['-S', sock, '-v', 'new-session', '-d', '-x', '80', '-y', '24', '-s', 'claude-live', 'sleep 60'], {
-      cwd: dir,
-      encoding: 'utf8',
-    })
-    expect(start.status).toBe(0)
-    hardenCmdLogDir(dir)
-    // An EXTERNAL client (separate tmux invocation = separate client pid) kills it.
-    const kill = spawnSync('tmux', ['-S', sock, 'kill-session', '-t', 'claude-live'], { encoding: 'utf8' })
-    expect(kill.status).toBe(0)
-    const serverLog = readdirSync(dir).find(f => f.startsWith('tmux-server-'))
-    expect(serverLog).toBeDefined()
-    expect(statSync(join(dir, serverLog!)).mode & 0o777).toBe(0o600)
-    const text = readFileSync(join(dir, serverLog!), 'utf8')
-    // Attribution line: message: client-<pid> command: kill-session -t claude-live
-    expect(text).toMatch(/message: client-\d+ command: kill-session -t claude-live/)
-    spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
   })
 })

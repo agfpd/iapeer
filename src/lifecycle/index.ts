@@ -26,7 +26,7 @@ import {
 } from '../core/constants.ts'
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { err, ok, type Result } from '../core/errors.ts'
-import { capCmdLogs, capPaneLogs, cmdLogDirFor } from '../launch/cmdlog.ts'
+import { capPaneLogs } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { readPeerProfile, resolveIdentity } from '../identity/index.ts'
 import {
@@ -47,8 +47,7 @@ import {
   type LaunchSpec,
 } from '../launch/index.ts'
 import { composeSystemPrompt, gatherPromptInput } from '../launch/composeSystemPrompt.ts'
-import { dismissCanary, ensureServerCanary, signalCanaryClean } from '../launch/canary.ts'
-import { hostSessionAlive, killPtyHost, ptyHostEnabled } from '../launch/ptyHost.ts'
+import { hostSessionAlive, killPtyHost } from '../launch/ptyHost.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -494,18 +493,6 @@ export function purgeIdentityState(cfg: LifecycleConfig, identity: string): stri
       /* best-effort — a locked/vanished entry must not fail the remove */
     }
   }
-  // tmux command-log dir (0.2.40 observability) — identity-keyed like the state
-  // markers above, so it must die with the registry record too (the leak class
-  // noted at the 0.2.40 acceptance: a removed peer left its cmdlog dir forever).
-  try {
-    const cmdDir = cmdLogDirFor(cfg.eventLogDir, identity)
-    if (existsSync(cmdDir)) {
-      rmSync(cmdDir, { recursive: true, force: true })
-      removed.push(`tmux-cmdlog/${identity}`)
-    }
-  } catch {
-    /* best-effort */
-  }
   return removed
 }
 
@@ -724,52 +711,23 @@ export async function withWakeLock<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// tmux helpers
+// liveness
 // ─────────────────────────────────────────────────────────────────────────────
 
-function tmux(sock: string, ...args: string[]): { ok: boolean; out: string; err: string } {
-  const r = spawnSync('tmux', ['-S', sock, ...args], { encoding: 'utf8' })
-  return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' }
-}
-function sessionAlive(sock: string, identity: string): boolean {
-  // RUNTIME-STATE host detection (spawn-flip Ф0b), NOT the `.pty-host` marker: a peer with a LIVE
-  // supervisor session is hosted-and-alive; otherwise fall to tmux has-session. Routing liveness on
-  // the live supervisor session (not the spawn-intent marker) makes a marker rollback safe on a
-  // still-running hosted session — rm-marker only changes the NEXT spawn, never the running routing.
-  // Non-hosted peers: hostSessionAlive is a cheap pid-file miss → identical result to today (tmux).
-  return hostSessionAlive(identity) || tmux(sock, 'has-session', '-t', identity).ok
+function sessionAlive(_sock: string, identity: string): boolean {
+  // pty-only: a peer is alive iff its supervisor session is live (a cheap pid-file check). Routing
+  // liveness on the live session (not the `.pty-host` spawn-intent marker) keeps a marker rollback safe
+  // on a still-running session. (`_sock` retained for call-site compatibility; no tmux sockets exist.)
+  return hostSessionAlive(identity)
 }
 
-/** Death-class tag for a gone session (live case: the WHOLE tmux server died by
- *  SIGKILL-class and exits.log stayed empty, because the pane-died hook needs a
- *  living tmux event loop). Two distinguishable classes:
- *  - `session-gone` — the server on the socket still ANSWERS but the session is not
- *    there: a pane died inside a living server → the pane-died hook had its chance,
- *    exits.log should carry the cause.
- *  - `server-dead` — the server itself is gone: the socket file is missing, or it
- *    exists but nothing serves it (stale socket — the SIGKILL/OOM class). pane-died
- *    could never fire; the server-death canary (launch/canary.ts) is the recorder
- *    for this class (`ev=server-exit` + forensics), this line is the backstop.
- *  `hosted=true` (pty-supervisor peer) reframes ONLY the absent-socket reason: a hosted peer
- *  has NO tmux socket, so that branch would otherwise misattribute its death to a tmux server
- *  that never existed. Its real cause lives in the supervisor exits.log. A socket that EXISTS
- *  is a genuine tmux server, so `hosted` never overrides the session-gone / stale-socket arm. */
-export function classifyGoneSession(sock: string, hosted = false): { death: 'server-dead' | 'session-gone'; reason: string } {
-  if (!existsSync(sock)) {
-    // No socket file. For a pty-supervisor-hosted peer this is EXPECTED — it never had a tmux
-    // socket; its death is the supervisor session ending (cause in the supervisor exits.log
-    // death-EVENT), NOT a tmux server vanishing. For a tmux peer it IS a dead tmux server.
-    // The check is gated on the absent socket on purpose: a socket that EXISTS (below) means a
-    // real tmux server, so `hosted` (pty-enabled-by-default) must not override genuine tmux.
-    return hosted
-      ? { death: 'server-dead', reason: 'pty host session ended (supervisor) — cause in exits.log (death-EVENT)' }
-      : { death: 'server-dead', reason: 'tmux server gone (socket file missing)' }
-  }
-  // Ask the SERVER, not the session: any server-level command answering (exit 0)
-  // proves the server is alive and merely lost this session.
-  return tmux(sock, 'list-sessions').ok
-    ? { death: 'session-gone', reason: 'session gone, tmux server alive (exit cause should be in exits.log)' }
-    : { death: 'server-dead', reason: 'tmux server dead — stale socket (SIGKILL class — OOM only if a matching JetsamEvent report exists; check exits.log ev=server-exit canary record)' }
+/** Death-class tag for a gone session (pty-only). A gone peer is a supervisor session that ended; its
+ *  real cause lives in the supervisor exits.log (death-EVENT). There is no tmux server to distinguish
+ *  `session-gone` (pane died, server alive) from `server-dead` (server gone). This tag is
+ *  observability-only (lifecycle.log trace) and drives no decision. The `death`/`hosted` shape is kept
+ *  for the trace schema + call-site compatibility. */
+export function classifyGoneSession(_sock: string, _hosted = false): { death: 'server-dead' | 'session-gone'; reason: string } {
+  return { death: 'server-dead', reason: 'pty host session ended (supervisor) — cause in exits.log (death-EVENT)' }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1149,26 +1107,11 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
 // Reap — kill a session (used by idle-reap / supervise; H4-guarded by callers)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function killSession(sock: string, identity: string): void {
-  // Hosted peer (spawn-flip Ф0b): SIGTERM the supervisor daemon — its shutdown SIGKILLs the child and
-  // removes the sock/pid/serve-spec. The tmux teardown below is then a harmless no-op (no tmux session
-  // on this sock); for a non-hosted peer it is the real reap, byte-identical to today.
-  if (hostSessionAlive(identity)) killPtyHost(identity)
-  tmux(sock, 'kill-session', '-t', identity)
-  const sessions = tmux(sock, 'list-sessions', '-F', '#{session_name}').out
-  if (!sessions.trim()) {
-    // Deliberate server teardown → silence the canary EXPLICITLY first: signal
-    // the channel (client exits 0) AND dismiss the sh recorder (canary v2 no
-    // longer reads a signaled client alone as deliberate — see canary.ts).
-    signalCanaryClean(sock, identity)
-    dismissCanary(identity)
-    tmux(sock, 'kill-server')
-    try {
-      rmSync(sock, { force: true })
-    } catch {
-      /* best-effort */
-    }
-  }
+export function killSession(_sock: string, identity: string): void {
+  // pty-only: SIGTERM the supervisor daemon — its shutdown SIGKILLs the child and removes the
+  // sock/pid/serve-spec/markers. Idempotent if the session is already gone. (`_sock` retained for
+  // call-site compatibility; no tmux sockets exist.)
+  killPtyHost(identity)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1212,11 +1155,6 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const activityMtime = deps.newestActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).newestActivityMtime(c))
   const isAlive = deps.sessionAlive ?? sessionAlive
   const verbose = superviseLogVerbose(env)
-  // tmux command-log volume cap (killer-hunt socket-command layer, launch/cmdlog.ts):
-  // a -v server log under a busy TUI grows ~7 KB/s, so each tick tail-keeps any log
-  // over the cap. Best-effort by construction; the killer's command is the LAST
-  // line of a dying log, so capping a LIVE peer's log never costs the death tail.
-  capCmdLogs(cfg.eventLogDir)
   // Pane-log volume cap (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
   // append for a session's whole life — it had NO bound and grew to hundreds of MB
@@ -1283,7 +1221,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
       // distinguishable in lifecycle.log: `session-gone` (pane died, server alive →
       // exits.log should have the cause) vs `server-dead` (whole tmux server died →
       // exits.log structurally empty; this line is the only durable trace).
-      const gone = classifyGoneSession(sock, ptyHostEnabled(cfg.logDir, s.identity))
+      const gone = classifyGoneSession(sock)
       out.push({ identity: s.identity, action: 'reaped-gone', reason: gone.reason })
       trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
       continue
@@ -1366,22 +1304,8 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
       // every ALIVE daemon-owned server — covers a fleet launched by older code
       // within one tick of a deploy, no session restarts. Idempotent (pgrep on
       // the per-identity wait-for channel), best-effort, pure observability.
-      // A non-'already' state IS a decision-grade event (not verbose-gated):
-      // post-0.2.22 every launch arms a canary, so a retrofit 'spawned' on an
-      // alive server means the previous canary VANISHED mid-watch (the death-#4
-      // blind spot was exactly this churn being invisible); 'failed' means the
-      // server is currently UNWATCHED. At most one line per loss, not per tick.
-      // SPAWN-FLIP Ф0b-3: the tmux server-death canary is meaningless for a supervisor-HOSTED session
-      // (no tmux server — the retrofit arms a watcher that immediately fires a spurious
-      // `server-vanished`). A hosted death is recorded by the supervisor's exits.log (host=supervisor,
-      // resilience-b), so skip the canary retrofit for hosted peers (mirror of the observer .pty-host
-      // skip — tmux-assuming infra must not run against a hosted session).
-      if (!hostSessionAlive(s.identity)) {
-        const canaryState = ensureServerCanary({ identity: s.identity, sock, exitLogDir: cfg.eventLogDir, env })
-        if (canaryState !== 'already') {
-          trace({ identity: s.identity, action: 'canary', state: canaryState, origin: 'retrofit' })
-        }
-      }
+      // pty-only: no tmux server-death canary — a hosted death is recorded by the supervisor's
+      // exits.log (host=supervisor, resilience-b), classified by classifyGoneSession on the next sweep.
       out.push({ identity: s.identity, action: 'alive' })
       if (verbose) trace({ identity: s.identity, action: 'alive', age: `${ageSecs}s` })
     }

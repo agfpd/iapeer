@@ -22,29 +22,10 @@ afterEach(() => {
   else process.env.IAP_HOST_LIVENESS_GRACE_MS = savedGrace
 })
 
-describe('deliverWarm — flag-off (no live supervisor session) keeps the tmux path', () => {
-  test('hostAlive=false → the host-deliver seam is NEVER touched (routes to deliverViaTmux)', async () => {
-    let hostedCalls = 0
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => false,
-      deliverHosted: async () => {
-        hostedCalls++
-        return { ok: true }
-      },
-    }
-    // The tmux path will fail against a bogus socket — but that is incidental; the contract under
-    // test is that flag-off NEVER reaches the host branch. We assert the host seam stayed cold.
-    await deliverWarm(hostedTarget, 'hi', '/tmp', seam)
-    expect(hostedCalls).toBe(0)
-  })
-})
-
 describe('deliverWarm — hosted target delivers over the socket + confirms by transcript advance', () => {
   test('socket deliver ok AND transcript advances → ok', async () => {
     let mtime = 100
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => {
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => {
         mtime = 200 // the session took our message and started a model turn → transcript moved
         return { ok: true }
       },
@@ -57,9 +38,7 @@ describe('deliverWarm — hosted target delivers over the socket + confirms by t
   test('socket-ack is NOT landed: deliver ok but NO transcript advance → loud fail (live but unresponsive)', async () => {
     process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // expire the HOST grace immediately — deterministic fail
     let hostedCalls = 0
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => {
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => {
         hostedCalls++
         return { ok: true } // CR flushed to the socket — but the session never advanced
       },
@@ -72,9 +51,7 @@ describe('deliverWarm — hosted target delivers over the socket + confirms by t
   })
 
   test('socket deliver fails (socket dead/stalled) → loud fail, no false ok', async () => {
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => ({ ok: false, error: 'socket dead during submit' }),
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => ({ ok: false, error: 'socket dead during submit' }),
       newestActivityMtime: () => 100,
     }
     const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
@@ -87,9 +64,7 @@ describe('deliverWarm — hosted target delivers over the socket + confirms by t
 
   test('no cwd (direct caller, no activity proxy) → confirmed-only (socket-ack), no mtime probe', async () => {
     let mtimeProbes = 0
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => ({ ok: true }),
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => ({ ok: true }),
       newestActivityMtime: () => {
         mtimeProbes++
         return 100
@@ -116,9 +91,7 @@ const routerTarget: DeliveryTarget = {
 describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript proxy)', () => {
   test('router deliver ok → ok EVEN THOUGH mtime never advances (the exact scenario a TUI fails on)', async () => {
     process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // a mtime-gated path would fail at once here
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => ({ ok: true }),
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => ({ ok: true }),
       newestActivityMtime: () => 100, // constant — a router writes no transcript; a TUI here → loud fail
     }
     const r = await deliverWarm(routerTarget, '<iap>x</iap>', '/peer/cwd', seam)
@@ -126,9 +99,7 @@ describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript pr
   })
 
   test('router socket deliver fails (dead/stalled) → loud fail, no false ok', async () => {
-    const seam: WarmDeliverSeam = {
-      hostAlive: () => true,
-      deliverHosted: async () => ({ ok: false, error: 'socket dead during paste' }),
+    const seam: WarmDeliverSeam = {      deliverHosted: async () => ({ ok: false, error: 'socket dead during paste' }),
     }
     const r = await deliverWarm(routerTarget, '<iap>x</iap>', '/peer/cwd', seam)
     expect(r.ok).toBe(false)

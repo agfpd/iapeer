@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
 import {
   attachPeer,
   classifyGoneSession,
@@ -294,24 +295,23 @@ describe('wakeOrSpawn H4 refusal', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('wakeOrSpawn live-session fast path', () => {
-  // Live tmux required (spawns a real session). Skipped where tmux is absent — a
-  // clean CI runner has none; the foundation's preversion gate runs it locally
-  // (this machine has tmux), so the release path keeps the coverage.
-  const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
-  test.if(tmuxAvailable)('READY with taskDelivered:false — the winning wake delivered only ITS envelope', async () => {
+  test('READY with taskDelivered:false — the winning wake delivered only ITS envelope', async () => {
     const root = mkdtempSync(join(tmpdir(), 'iapeer-fpl-root-'))
     const laDir = mkdtempSync(join(tmpdir(), 'iapeer-fpl-la-')) // empty → not launchd-managed
-    const sockDir = join(root, 'socks')
-    const sock = join(sockDir, 'tmux-iap-claude-fpl.sock')
+    const prevRoot = process.env.IAPEER_ROOT
+    const child = Bun.spawn(['sleep', '300']) // a live pid for the faked hosted session
     try {
-      mkdirSync(sockDir, { recursive: true })
+      // pty-only: a live session = a live supervisor pid. hostSessionAlive reads the run dir from
+      // process.env, so set IAPEER_ROOT for this test and drop a live pid there.
+      process.env.IAPEER_ROOT = root
       await upsertPeer(
         { personality: 'fpl', runtime: 'claude', cwd: root, intelligence: 'artificial' },
         { rootDir: root },
       )
-      // a live session already up — what a WINNING concurrent wake leaves behind
-      const up = spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', 'claude-fpl', 'cat'], { encoding: 'utf8' })
-      expect(up.status).toBe(0)
+      // a live hosted session already up — what a WINNING concurrent wake leaves behind
+      const runDir = defaultRunDir(process.env)
+      mkdirSync(runDir, { recursive: true })
+      writeFileSync(pidPath(runDir, 'claude-fpl'), String(child.pid))
       const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir }
       const r = await wakeOrSpawn({ personality: 'fpl', runtime: 'claude', task: 'second sender envelope' }, { env })
       expect(r.status).toBe('READY')
@@ -319,7 +319,9 @@ describe('wakeOrSpawn live-session fast path', () => {
       // the contract under test: the fast path NEVER delivers the caller's task
       expect(r.taskDelivered).toBe(false)
     } finally {
-      spawnSync('tmux', ['-S', sock, 'kill-server'], { encoding: 'utf8' })
+      child.kill()
+      if (prevRoot === undefined) delete process.env.IAPEER_ROOT
+      else process.env.IAPEER_ROOT = prevRoot
       rmSync(root, { recursive: true, force: true })
       rmSync(laDir, { recursive: true, force: true })
     }
@@ -761,83 +763,15 @@ describe('ephemeral-armed marker + config', () => {
 // (SIGKILL class), exits.log stayed empty; lifecycle.log must carry the class.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('classifyGoneSession (death-class tag)', () => {
-  const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
-
-  test('missing socket file → server-dead', () => {
+describe('classifyGoneSession (death-class tag, pty-only)', () => {
+  // pty-only: a gone peer is a supervisor session that ended — its cause lives in the supervisor
+  // exits.log (death-EVENT). The tag is observability-only (lifecycle.log trace), always server-dead;
+  // there is no tmux server to distinguish session-gone from server-dead.
+  test('a gone peer → server-dead, pty-host framed (not tmux)', () => {
     const r = classifyGoneSession(join(tmpdir(), 'iapeer-no-such-sock-ever.sock'))
-    expect(r.death).toBe('server-dead')
-    expect(r.reason).toContain('socket file missing')
-  })
-
-  test('hosted peer → host-framed reason, not tmux', () => {
-    // A pty-supervisor-hosted peer never had a tmux socket; the tmux-framed "socket file
-    // missing" would misattribute its death. hosted=true short-circuits to the supervisor framing.
-    const r = classifyGoneSession(join(tmpdir(), 'iapeer-no-such-sock-ever.sock'), true)
     expect(r.death).toBe('server-dead')
     expect(r.reason).toContain('pty host')
     expect(r.reason).not.toContain('tmux server')
-  })
-
-  test('stale socket (file exists, nothing serves it) → server-dead', () => {
-    // The SIGKILL/OOM class: the killed server never unlinks its socket file.
-    const dir = mkdtempSync(join(tmpdir(), 'iapeer-stale-sock-'))
-    const sock = join(dir, 'tmux-iap-claude-stale.sock')
-    try {
-      writeFileSync(sock, '') // a plain file — tmux cannot connect to it
-      const r = classifyGoneSession(sock)
-      expect(r.death).toBe('server-dead')
-      expect(r.reason).toContain('stale socket')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  test.if(tmuxAvailable)('server alive but the session is not there → session-gone', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'iapeer-sg-sock-'))
-    const sock = join(dir, 'tmux-iap-claude-sg.sock')
-    try {
-      // a LIVING server on the socket holding some OTHER session
-      spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', 'other-session', 'sleep', '60'])
-      const r = classifyGoneSession(sock)
-      expect(r.death).toBe('session-gone')
-      expect(r.reason).toContain('server alive')
-    } finally {
-      spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  test.if(tmuxAvailable)('superviseTick logs death=session-gone when the pane died inside a living server', () => {
-    const root = mkdtempSync(join(tmpdir(), 'iapeer-sg-root-'))
-    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-sg-la-')) // empty → not launchd-managed
-    const env = {
-      ...process.env,
-      IAPEER_ROOT: root,
-      IAPEER_LAUNCHAGENTS_DIR: laDir,
-      IAPEER_SOCK_DIR: join(root, 'socks'),
-    }
-    const cfg = loadLifecycleConfig(env)
-    const identity = 'claude-sg'
-    const sock = join(root, 'socks', 'tmux-iap-claude-sg.sock')
-    try {
-      mkdirSync(join(root, 'socks'), { recursive: true })
-      mkdirSync(cfg.stateDir, { recursive: true })
-      // the server LIVES (another session holds it) but claude-sg's session is gone
-      spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', 'placeholder', 'sleep', '60'])
-      writeFileSync(
-        join(cfg.stateDir, `${identity}.session`),
-        JSON.stringify({ identity, runtime: 'claude', personality: 'sg', cwd: '/tmp/none', wokeAt: 0 }),
-      )
-      const out = superviseTick(cfg, { env })
-      expect(out.find(x => x.identity === identity)?.action).toBe('reaped-gone')
-      const logged = readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')
-      expect(logged).toContain(`identity=${identity} action=reaped-gone death=session-gone`)
-    } finally {
-      spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
-      rmSync(root, { recursive: true, force: true })
-      rmSync(laDir, { recursive: true, force: true })
-    }
   })
 })
 
@@ -888,139 +822,107 @@ describe('superviseTick idle-age floor (freshly-woken session)', () => {
   })
 })
 
-describe('superviseTick quiet-reap (M2 die-after-reply, real tmux)', () => {
-  const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
+describe('superviseTick quiet-reap (M2 die-after-reply, hermetic via sessionAlive seam)', () => {
+  test('ARMED + quiet → reaped-ephemeral (marks cleared, NO death/idle-reaped); unarmed/not-quiet → alive', () => {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-eq-root-'))
+    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-eq-la-')) // empty → not launchd-managed
+    const cwd = profileCwd(false, true) // ephemeral worker profile
+    const env = {
+      ...process.env,
+      IAPEER_ROOT: root,
+      IAPEER_LAUNCHAGENTS_DIR: laDir,
+      IAPEER_SOCK_DIR: join(root, 'socks'),
+    }
+    const cfg = loadLifecycleConfig(env) // ephemeralQuietSecs 20 ≪ idleSecs 3600
+    const identity = 'claude-eq'
+    const deps = { env, sessionAlive: () => true } // pty-only: liveness seamed (no tmux/supervisor spawn)
+    const writeState = (wokeAt: number) => {
+      mkdirSync(cfg.stateDir, { recursive: true })
+      writeFileSync(
+        join(cfg.stateDir, `${identity}.session`),
+        JSON.stringify({ identity, runtime: 'claude', personality: 'eq', cwd, wokeAt }),
+      )
+    }
+    try {
+      // no transcript in the temp cwd → activity proxy = wokeAt fallback (quiet age set via .session).
+      // 1) NOT armed + quiet-aged → alive (silent long tool-run protection; only the idle bound applies).
+      writeState(Date.now() - 60_000) // age ~60s > quiet 20s, ≪ idle 3600s
+      expect(superviseTick(cfg, deps).find(x => x.identity === identity)?.action).toBe('alive')
 
-  test.if(tmuxAvailable)(
-    'ARMED + quiet → reaped-ephemeral (killed, marks cleared, NO death/idle-reaped); unarmed/not-quiet → alive',
-    () => {
-      const root = mkdtempSync(join(tmpdir(), 'iapeer-eq-root-'))
-      const laDir = mkdtempSync(join(tmpdir(), 'iapeer-eq-la-')) // empty → not launchd-managed
-      const cwd = profileCwd(false, true) // ephemeral worker profile
-      const env = {
-        ...process.env,
-        IAPEER_ROOT: root,
-        IAPEER_LAUNCHAGENTS_DIR: laDir,
-        IAPEER_SOCK_DIR: join(root, 'socks'),
-      }
-      const cfg = loadLifecycleConfig(env) // ephemeralQuietSecs 20 ≪ idleSecs 3600
-      const identity = 'claude-eq'
-      const sock = join(root, 'socks', 'tmux-iap-claude-eq.sock')
-      const writeState = (wokeAt: number) => {
-        mkdirSync(cfg.stateDir, { recursive: true })
-        writeFileSync(
-          join(cfg.stateDir, `${identity}.session`),
-          JSON.stringify({ identity, runtime: 'claude', personality: 'eq', cwd, wokeAt }),
-        )
-      }
-      const alive = () => spawnSync('tmux', ['-S', sock, 'has-session', '-t', identity]).status === 0
+      // 2) ARMED but NOT quiet → alive (post-reply housekeeping keeps it alive).
+      setEphemeralArmed(cfg, identity)
+      writeState(Date.now()) // age ~0 < quiet
+      expect(superviseTick(cfg, deps).find(x => x.identity === identity)?.action).toBe('alive')
+
+      // 3) ARMED + quiet → reaped-ephemeral, with the M3 drain fields + marker cleanup.
+      writeState(Date.now() - 60_000)
+      const o = superviseTick(cfg, deps).find(x => x.identity === identity)
+      expect(o?.action).toBe('reaped-ephemeral')
+      expect(o?.personality).toBe('eq')
+      expect(o?.runtime).toBe('claude')
+      expect(hasEphemeralArmed(cfg, identity)).toBe(false) // mark consumed
+      expect(existsSync(join(cfg.stateDir, `${identity}.session`))).toBe(false) // state cleared by the reap
+      // deliberate policy death: never resume-eligible, never a crash-loop count
+      expect(hasIdleReaped(cfg, identity)).toBe(false)
+      expect(readDeaths(cfg, identity).length).toBe(0)
+      // durable decision trace
+      const logged = readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')
+      expect(logged).toContain(`action=reaped-ephemeral`)
+      expect(logged).toContain('outcome=ephemeral-done')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('UNARMED ephemeral past the unarmed idle bound → reaped-ephemeral (silent-finish backstop; live case scriber 10.06)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-eu-root-'))
+    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-eu-la-'))
+    const cwd = profileCwd(false, true) // ephemeral worker profile
+    const env = {
+      ...process.env,
+      IAPEER_ROOT: root,
+      IAPEER_LAUNCHAGENTS_DIR: laDir,
+      IAPEER_SOCK_DIR: join(root, 'socks'),
+      IAPEER_EPHEMERAL_UNARMED_IDLE_SECS: '30', // ≪ the 60s age below, ≫ quiet 20s
+    }
+    const cfg = loadLifecycleConfig(env)
+    const identity = 'claude-eu'
+    const deps = { env, sessionAlive: () => true } // pty-only: liveness seamed
+    try {
+      mkdirSync(cfg.stateDir, { recursive: true })
+      writeFileSync(
+        join(cfg.stateDir, `${identity}.session`),
+        JSON.stringify({ identity, runtime: 'claude', personality: 'eu', cwd, wokeAt: Date.now() - 60_000 }),
+      )
+      // NOT armed (the worker ended silently) — past the unarmed bound → policy reap
+      const o = superviseTick(cfg, deps).find(x => x.identity === identity)
+      expect(o?.action).toBe('reaped-ephemeral')
+      expect(o?.reason).toContain('unarmed idle')
+      expect(o?.personality).toBe('eu') // M3 drain fields present → queue feeds next
+      // policy death: no resume-eligibility, no crash-loop count
+      expect(hasIdleReaped(cfg, identity)).toBe(false)
+      expect(readDeaths(cfg, identity).length).toBe(0)
+      const logged = readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')
+      expect(logged).toContain('outcome=ephemeral-unarmed-bound')
+      // a NON-ephemeral peer with the same age is untouched by this bound
+      const plainCwd = profileCwd(false, false)
       try {
-        mkdirSync(join(root, 'socks'), { recursive: true })
-        spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', identity, 'sleep', '300'])
-        expect(alive()).toBe(true)
-        // no transcript in the temp cwd → activity proxy = wokeAt fallback:
-        // quiet age is fully controlled by the .session wokeAt below.
-
-        // 1) NOT armed + quiet-aged → alive (a silent long tool-run is NOT reaped:
-        //    sleep-180 protection; only the ordinary idle bound applies).
-        writeState(Date.now() - 60_000) // age ~60s > quiet 20s, ≪ idle 3600s
-        expect(superviseTick(cfg, { env }).find(x => x.identity === identity)?.action).toBe('alive')
-        expect(alive()).toBe(true)
-
-        // 2) ARMED but NOT quiet → alive (post-reply housekeeping keeps it alive).
-        setEphemeralArmed(cfg, identity)
-        writeState(Date.now()) // age ~0 < quiet
-        expect(superviseTick(cfg, { env }).find(x => x.identity === identity)?.action).toBe('alive')
-        expect(alive()).toBe(true)
-
-        // 3) ARMED + quiet → reaped-ephemeral, with the M3 drain fields.
-        writeState(Date.now() - 60_000)
-        const o = superviseTick(cfg, { env }).find(x => x.identity === identity)
-        expect(o?.action).toBe('reaped-ephemeral')
-        expect(o?.personality).toBe('eq')
-        expect(o?.runtime).toBe('claude')
-        expect(alive()).toBe(false) // session killed
-        expect(hasEphemeralArmed(cfg, identity)).toBe(false) // mark consumed
-        expect(existsSync(join(cfg.stateDir, `${identity}.session`))).toBe(false)
-        // deliberate policy death: never resume-eligible, never a crash-loop count
-        expect(hasIdleReaped(cfg, identity)).toBe(false)
-        expect(readDeaths(cfg, identity).length).toBe(0)
-        // durable decision trace
-        const logged = readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')
-        expect(logged).toContain(`action=reaped-ephemeral`)
-        expect(logged).toContain('outcome=ephemeral-done')
-      } finally {
-        spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
-        rmSync(root, { recursive: true, force: true })
-        rmSync(laDir, { recursive: true, force: true })
-        rmSync(cwd, { recursive: true, force: true })
-      }
-    },
-    30000,
-  )
-
-  test.if(tmuxAvailable)(
-    'UNARMED ephemeral past the unarmed idle bound → reaped-ephemeral (silent-finish backstop; live case scriber 10.06)',
-    () => {
-      const root = mkdtempSync(join(tmpdir(), 'iapeer-eu-root-'))
-      const laDir = mkdtempSync(join(tmpdir(), 'iapeer-eu-la-'))
-      const cwd = profileCwd(false, true) // ephemeral worker profile
-      const env = {
-        ...process.env,
-        IAPEER_ROOT: root,
-        IAPEER_LAUNCHAGENTS_DIR: laDir,
-        IAPEER_SOCK_DIR: join(root, 'socks'),
-        IAPEER_EPHEMERAL_UNARMED_IDLE_SECS: '30', // ≪ the 60s age below, ≫ quiet 20s
-      }
-      const cfg = loadLifecycleConfig(env)
-      const identity = 'claude-eu'
-      const sock = join(root, 'socks', 'tmux-iap-claude-eu.sock')
-      const alive = () => spawnSync('tmux', ['-S', sock, 'has-session', '-t', identity]).status === 0
-      try {
-        mkdirSync(join(root, 'socks'), { recursive: true })
-        spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', identity, 'sleep', '300'])
-        expect(alive()).toBe(true)
-        mkdirSync(cfg.stateDir, { recursive: true })
         writeFileSync(
-          join(cfg.stateDir, `${identity}.session`),
-          JSON.stringify({ identity, runtime: 'claude', personality: 'eu', cwd, wokeAt: Date.now() - 60_000 }),
+          join(cfg.stateDir, `claude-eup.session`),
+          JSON.stringify({ identity: 'claude-eup', runtime: 'claude', personality: 'eup', cwd: plainCwd, wokeAt: Date.now() - 60_000 }),
         )
-        // NOT armed (the worker ended silently) — past the unarmed bound → policy reap
-        const o = superviseTick(cfg, { env }).find(x => x.identity === identity)
-        expect(o?.action).toBe('reaped-ephemeral')
-        expect(o?.reason).toContain('unarmed idle')
-        expect(o?.personality).toBe('eu') // M3 drain fields present → queue feeds next
-        expect(alive()).toBe(false)
-        // policy death: no resume-eligibility, no crash-loop count
-        expect(hasIdleReaped(cfg, identity)).toBe(false)
-        expect(readDeaths(cfg, identity).length).toBe(0)
-        const logged = readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')
-        expect(logged).toContain('outcome=ephemeral-unarmed-bound')
-        // a NON-ephemeral peer with the same age is untouched by this bound
-        // (its session lives on ITS OWN identity-derived socket — the tick keys
-        // sockets on runtime-personality, not on the test's prior sock)
-        const plainCwd = profileCwd(false, false)
-        const eupSock = join(root, 'socks', 'tmux-iap-claude-eup.sock')
-        try {
-          writeFileSync(
-            join(cfg.stateDir, `claude-eup.session`),
-            JSON.stringify({ identity: 'claude-eup', runtime: 'claude', personality: 'eup', cwd: plainCwd, wokeAt: Date.now() - 60_000 }),
-          )
-          spawnSync('tmux', ['-S', eupSock, 'new-session', '-d', '-s', 'claude-eup', 'sleep', '300'])
-          expect(superviseTick(cfg, { env }).find(x => x.identity === 'claude-eup')?.action).toBe('alive')
-        } finally {
-          spawnSync('tmux', ['-S', eupSock, 'kill-server'], { stdio: 'ignore' })
-          rmSync(plainCwd, { recursive: true, force: true })
-        }
+        expect(superviseTick(cfg, deps).find(x => x.identity === 'claude-eup')?.action).toBe('alive')
       } finally {
-        spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
-        rmSync(root, { recursive: true, force: true })
-        rmSync(laDir, { recursive: true, force: true })
-        rmSync(cwd, { recursive: true, force: true })
+        rmSync(plainCwd, { recursive: true, force: true })
       }
-    },
-    30000,
-  )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

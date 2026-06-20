@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
+import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
 import {
   drainAllEphemeralQueues,
   drainEphemeralQueue,
@@ -151,20 +152,26 @@ describe('drainEphemeralQueue (peek → wake → rm-on-READY)', () => {
     expect(ephemeralQueueDepth(cfg, 'claude-w')).toBe(0)
   })
 
-  const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
-  test.if(tmuxAvailable)('a LIVE session blocks the drain (one task per session invariant)', async () => {
+  test('a LIVE session blocks the drain (one task per session invariant)', async () => {
     const cfg = mkCfg()
-    mkdirSync(cfg.sockDir, { recursive: true })
-    const sock = join(cfg.sockDir, 'tmux-iap-claude-w.sock')
     enqueueEphemeralTask(cfg, 'claude-w', { task: 'queued-while-busy' })
     const calls: WakeArgs[] = []
+    const prevRoot = process.env.IAPEER_ROOT
+    const child = Bun.spawn(['sleep', '60'])
     try {
-      spawnSync('tmux', ['-S', sock, 'new-session', '-d', '-s', 'claude-w', 'sleep', '60'])
+      // pty-only liveness: a live supervisor pid file makes hostSessionAlive('claude-w') true (the
+      // run dir resolves from process.env, so point it at a fresh temp root for this test).
+      process.env.IAPEER_ROOT = mkTmp()
+      const runDir = defaultRunDir(process.env)
+      mkdirSync(runDir, { recursive: true })
+      writeFileSync(pidPath(runDir, 'claude-w'), String(child.pid))
       expect(await drainEphemeralQueue(cfg, 'w', 'claude', { wakeFn: fakeWake(['READY'], calls) })).toBeNull()
       expect(calls).toEqual([]) // no wake while the session lives
       expect(ephemeralQueueDepth(cfg, 'claude-w')).toBe(1) // task waits for the reap
     } finally {
-      spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
+      child.kill()
+      if (prevRoot === undefined) delete process.env.IAPEER_ROOT
+      else process.env.IAPEER_ROOT = prevRoot
     }
   })
 

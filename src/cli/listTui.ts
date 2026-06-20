@@ -7,9 +7,8 @@
 // raw-mode terminal I/O, and on ENTER it hands off to attachPeer + tmux attach — the
 // same ensure-live+resume path the `attach` verb uses (so a live session is never torn).
 
-import { spawnSync } from 'child_process'
 import { attachPeer } from '../lifecycle/index.ts'
-import { hostRunDir, hostSessionAlive } from '../launch/ptyHost.ts' // spawn-flip Ф0b-3: host-aware attach
+import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
 import { runSupervisorClient } from '../supervisor/client.ts'
 import { listPeers, type PeerListing } from './index.ts'
 
@@ -140,18 +139,9 @@ export async function runListTui(env: NodeJS.ProcessEnv = process.env): Promise<
           return 1
         }
         stdout.write(`${r.woke ? 'woke + ' : ''}attaching ${r.identity}…\n`)
-        // SPAWN-FLIP Ф0b-3: a supervisor-HOSTED session attaches via the supervisor client (no tmux).
-        if (hostSessionAlive(r.identity)) {
-          await runSupervisorClient(hostRunDir(), r.identity)
-          return 0 // unreachable — runSupervisorClient exits on detach / session end
-        }
-        const attachEnv = { ...env }
-        delete attachEnv.TMUX
-        const a = spawnSync('tmux', ['-S', r.socketPath, 'attach', '-t', r.identity], {
-          stdio: 'inherit',
-          env: attachEnv as Record<string, string>,
-        })
-        return a.status ?? 0
+        // pty-only: attach via the supervisor client (no tmux).
+        await runSupervisorClient(hostRunDir(), r.identity)
+        return 0 // unreachable — runSupervisorClient exits on detach / session end
       }
     }
   } finally {

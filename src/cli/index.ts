@@ -50,7 +50,7 @@ import {
   type WakeResult,
 } from '../lifecycle/index.ts'
 import { getAdapter } from '../launch/index.ts'
-import { hostRunDir, hostSessionAlive } from '../launch/ptyHost.ts' // spawn-flip Ф0b-3: host-aware attach
+import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
 import { cycleDaemon, isFoundationOwnedPlist, launchctlBootstrap, launchdLabel, launchdPlistPath } from '../launch/launchd.ts'
 import { readPeerProfile, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
@@ -2207,38 +2207,25 @@ function defaultFromIdentity(env: NodeJS.ProcessEnv): string {
 }
 
 /** Drop the operator into a live peer session — the interactive open shared by `attach` (resume)
- *  and a TTY `iapeer <runtime>` (fresh launch). A supervisor-HOSTED session has no tmux to attach,
- *  so the operator is handed to the supervisor client (raw passthrough + repaint-on-attach + Ctrl-]
- *  detach); otherwise `tmux attach`. The operator window is bracketed in lifecycle.log
- *  (ev=attach … ev=attach-end) so a death timestamp inside the window reads directly off the log.
- *  Returns the client exit code. */
+ *  and a TTY `iapeer <runtime>` (fresh launch). pty-only: the operator is handed to the supervisor
+ *  client (raw passthrough + repaint-on-attach + Ctrl-] detach). The operator window is bracketed in
+ *  lifecycle.log (ev=attach … ev=attach-end) so a death timestamp inside the window reads directly off
+ *  the log. Returns the client exit code. (`_socketPath` retained for call-site compatibility.) */
 async function attachIntoSession(
   identity: string,
-  socketPath: string,
+  _socketPath: string,
   env: NodeJS.ProcessEnv,
   eventLogDir: string,
   woke: boolean,
 ): Promise<number> {
   appendLifecycleEvent(eventLogDir, { ev: 'attach', identity, woke: String(woke) }, { env })
-  if (hostSessionAlive(identity)) {
-    // runSupervisorClient calls process.exit on every terminal path → bracket attach-end via an
-    // exit hook (appendFileSync is signal/exit-safe).
-    process.on('exit', () =>
-      appendLifecycleEvent(eventLogDir, { ev: 'attach-end', identity, rc: process.exitCode ?? 0 }, { env }),
-    )
-    await runSupervisorClient(hostRunDir(), identity)
-    return 0 // unreachable — runSupervisorClient exits on detach / session end
-  }
-  // `env -u TMUX` so a nested attach from inside tmux does not error ("sessions should be nested
-  // with care").
-  const attachEnv = { ...env }
-  delete attachEnv.TMUX
-  const a = spawnSync('tmux', ['-S', socketPath, 'attach', '-t', identity], {
-    stdio: 'inherit',
-    env: attachEnv as Record<string, string>,
-  })
-  appendLifecycleEvent(eventLogDir, { ev: 'attach-end', identity, rc: a.status ?? -1 }, { env })
-  return a.status ?? 0
+  // runSupervisorClient calls process.exit on every terminal path → bracket attach-end via an exit
+  // hook (appendFileSync is signal/exit-safe).
+  process.on('exit', () =>
+    appendLifecycleEvent(eventLogDir, { ev: 'attach-end', identity, rc: process.exitCode ?? 0 }, { env }),
+  )
+  await runSupervisorClient(hostRunDir(), identity)
+  return 0 // unreachable — runSupervisorClient exits on detach / session end
 }
 
 if (import.meta.main) {

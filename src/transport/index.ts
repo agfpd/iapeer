@@ -16,7 +16,6 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { spawnSync } from 'child_process'
 import {
   MAX_ATTACHMENTS,
   MAX_MESSAGE_LEN,
@@ -31,8 +30,6 @@ import { err, ok, type Result } from '../core/errors.ts'
 import {
   buildProcessAddress,
   buildSocketPath,
-  parseSessionName,
-  parseSocketPath,
   type ProcessAddress,
 } from '../core/socket.ts'
 import { buildEnvelope } from '../codec/index.ts'
@@ -42,7 +39,7 @@ import type { ResolvedCaller } from '../identity/index.ts'
 // reads them from getAdapter(target.runtime) for the tui submit path. One-way
 // dependency: launch does NOT import transport, so no cycle.
 import { getAdapter } from '../launch/index.ts'
-import type { ControlCommand, DeliveryMarkers } from '../launch/types.ts'
+import type { ControlCommand } from '../launch/types.ts'
 // Spawn-flip Ф0b-2: warm-deliver is HOST-AWARE. hostSessionAlive (runtime-state host detect, an
 // @xterm-free pid-file check) + deliverHosted (the pure-protocol socket leaf, Ф0a) come from
 // launch/ptyHost — already in transport's module graph via getAdapter above and @xterm-free by
@@ -70,32 +67,6 @@ export interface DeliveryTarget extends ProcessAddress {
   socketPath: string
 }
 
-export interface TmuxResult {
-  ok: boolean
-  out: string
-  err: string
-}
-
-export function tmux(sock: string, ...args: string[]): TmuxResult {
-  const r = spawnSync('tmux', ['-S', sock, ...args], { encoding: 'utf8' })
-  return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' }
-}
-
-// Settle delay between bracketed paste and the submit Enter — non-TUI path only.
-const PASTE_SETTLE_MS = (() => {
-  const raw = process.env.IAP_TMUX_PASTE_SETTLE_MS
-  const n = raw === undefined ? NaN : Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : 250
-})()
-
-const SUBMIT_POLL_MS = 40
-const SUBMIT_LANDED_TIMEOUT_MS = 1500
-const SUBMIT_CONFIRM_WINDOW_MS = 500
-function submitTotalTimeoutMs(): number {
-  const raw = process.env.IAP_TMUX_SUBMIT_TIMEOUT_MS
-  const n = raw === undefined ? NaN : Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : 4000
-}
 
 function sleepSync(ms: number): void {
   if (ms <= 0) return
@@ -106,174 +77,10 @@ function monotonicMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n)
 }
 
-function listSessions(sock: string): string[] {
-  const r = tmux(sock, 'list-sessions', '-F', '#{session_name}')
-  if (!r.ok) return []
-  return r.out.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-}
-
-function sessionAlive(sock: string, address: string): boolean {
-  // SPAWN-FLIP Ф0b-3: a supervisor-HOSTED session has no tmux entry — its liveness is the supervisor
-  // daemon (runtime-state), checked FIRST (a cheap pid-file). Non-hosted → the tmux session list, as
-  // before (byte-identical). Without this, resolveDeliveryTarget/isPeerLive see a live hosted peer as
-  // OFFLINE → routeSend mis-routes a warm hit to a wake and the post-wake verify-before-act false-fails
-  // (the canary symptom: "woke but not live" though delivery actually landed). `address` IS the identity.
-  return hostSessionAlive(address) || listSessions(sock).includes(address)
-}
-
-// ─── Busy-composer detection (human input vs runtime ghost text) ─────────────
-
-interface SgrState {
-  faint: boolean
-  fg256: number | null
-  fgBasic: number | null
-}
-
-interface GhostSgrConfig {
-  faint: boolean
-  fg256: Set<number>
-  fgBasic: Set<number>
-}
-
-interface PaneToken {
-  ch: string
-  ghost: boolean
-}
-
-function parseSgrCodeList(raw: string): number[] | null {
-  if (raw.trim() === '') return [0]
-  const out = raw.split(';').map(part => (part === '' ? 0 : Number(part)))
-  return out.every(Number.isFinite) ? out : null
-}
-
-function ghostSgrConfig(markers: DeliveryMarkers): GhostSgrConfig {
-  const cfg: GhostSgrConfig = { faint: false, fg256: new Set(), fgBasic: new Set() }
-  for (const raw of markers.ghostTextSgr ?? []) {
-    const codes = parseSgrCodeList(raw)
-    if (!codes) continue
-    if (codes.length === 1 && codes[0] === 2) {
-      cfg.faint = true
-      continue
-    }
-    if (codes.length === 1 && ((codes[0] >= 30 && codes[0] <= 37) || (codes[0] >= 90 && codes[0] <= 97))) {
-      cfg.fgBasic.add(codes[0])
-      continue
-    }
-    if (codes.length === 3 && codes[0] === 38 && codes[1] === 5) cfg.fg256.add(codes[2])
-  }
-  return cfg
-}
-
-function applySgr(state: SgrState, codes: number[]): void {
-  let i = 0
-  while (i < codes.length) {
-    const code = codes[i]
-    if (code === 0) {
-      state.faint = false
-      state.fg256 = null
-      state.fgBasic = null
-    } else if (code === 2) {
-      state.faint = true
-    } else if (code === 22) {
-      state.faint = false
-    } else if (code === 39) {
-      state.fg256 = null
-      state.fgBasic = null
-    } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
-      state.fgBasic = code
-      state.fg256 = null
-    } else if (code === 38 && codes[i + 1] === 5 && Number.isFinite(codes[i + 2])) {
-      state.fg256 = codes[i + 2]
-      state.fgBasic = null
-      i += 2
-    } else if (code === 38 && codes[i + 1] === 2) {
-      // Truecolor foreground: not one of the calibrated grey-256 markers. Track
-      // it as "not ghost" by clearing the 256/basic foreground slots.
-      state.fg256 = null
-      state.fgBasic = null
-      i += 4
-    }
-    i += 1
-  }
-}
-
-function stateIsGhost(state: SgrState, cfg: GhostSgrConfig): boolean {
-  if (cfg.faint && state.faint) return true
-  if (state.fg256 !== null && cfg.fg256.has(state.fg256)) return true
-  if (state.fgBasic !== null && cfg.fgBasic.has(state.fgBasic)) return true
-  return false
-}
-
-function parseAnsiLine(line: string, cfg: GhostSgrConfig): PaneToken[] {
-  const tokens: PaneToken[] = []
-  const state: SgrState = { faint: false, fg256: null, fgBasic: null }
-  let i = 0
-  while (i < line.length) {
-    if (line.charCodeAt(i) === 0x1b && line[i + 1] === '[') {
-      let end = i + 2
-      while (end < line.length && !/[A-Za-z]/.test(line[end])) end += 1
-      if (end < line.length) {
-        if (line[end] === 'm') {
-          const codes = parseSgrCodeList(line.slice(i + 2, end))
-          if (codes) applySgr(state, codes)
-        }
-        i = end + 1
-        continue
-      }
-    }
-    const ch = Array.from(line.slice(i))[0] ?? ''
-    if (!ch) break
-    tokens.push({ ch, ghost: stateIsGhost(state, cfg) })
-    i += ch.length
-  }
-  return tokens
-}
-
-/** True iff a captured TUI pane shows non-dim human text in the composer row.
- *  Grey/faint ghost suggestions and placeholders are intentionally NOT human
- *  input: holding IAP delivery behind them would be a false busy state. */
-export function composerCaptureHasHumanInput(pane: string, markers: DeliveryMarkers): boolean {
-  if (markers.promptGlyphs.length === 0) return false
-  const cfg = ghostSgrConfig(markers)
-  let promptTokens: PaneToken[] | null = null
-  let promptIndex = -1
-
-  for (const line of pane.split(/\r?\n/)) {
-    const tokens = parseAnsiLine(line, cfg)
-    const firstVisible = tokens.findIndex(tok => tok.ch.trim() !== '')
-    if (firstVisible < 0) continue
-    if (!markers.promptGlyphs.includes(tokens[firstVisible].ch)) continue
-    promptTokens = tokens
-    promptIndex = firstVisible
-  }
-
-  if (!promptTokens || promptIndex < 0) return false
-  for (const tok of promptTokens.slice(promptIndex + 1)) {
-    if (tok.ch.trim() === '') continue
-    if (!tok.ghost) return true
-  }
-  return false
-}
-
-export function hasAttachedTmuxClient(target: DeliveryTarget): boolean {
-  const r = tmux(target.socketPath, 'list-clients', '-F', '#{client_session}')
-  if (!r.ok) return false
-  return r.out.split(/\r?\n/).map(line => line.trim()).includes(target.address)
-}
-
-function targetComposerBlocksDelivery(target: DeliveryTarget): boolean {
-  if (!isSupportedLocalRuntime(target.runtime)) return false
-  const cap = tmux(target.socketPath, 'capture-pane', '-e', '-p', '-t', target.address)
-  // With a live resolved target, a capture failure is an uncertainty in the
-  // dangerous direction: prefer a bounded false-busy queue/force over a false-free
-  // paste into a human composer. If the session is actually gone, the queue's
-  // session-token/identity check fails loudly.
-  if (!cap.ok) return true
-  return composerCaptureHasHumanInput(cap.out, getAdapter(target.runtime).deliveryMarkers)
-}
-
-export function shouldQueueForHumanComposer(target: DeliveryTarget): boolean {
-  return isSupportedLocalRuntime(target.runtime) && hasAttachedTmuxClient(target) && targetComposerBlocksDelivery(target)
+function sessionAlive(_sock: string, address: string): boolean {
+  // pty-only: a peer's liveness is its supervisor daemon (a cheap pid-file check). `address` IS the
+  // identity. (`_sock` is retained for call-site compatibility; tmux sockets no longer exist.)
+  return hostSessionAlive(address)
 }
 
 /** Is the (runtime,personality) endpoint live right now? Public liveness predicate. */
@@ -282,35 +89,14 @@ export function isPeerLive(runtime: string, personality: string, sockDir = resol
   return sessionAlive(socketPath, buildProcessAddress(runtime, personality))
 }
 
-export function listOnlinePeers(sockDir = resolveSockDir()): OnlinePeer[] {
+export function listOnlinePeers(_sockDir = resolveSockDir()): OnlinePeer[] {
+  // pty-only: every live peer is a supervisor-hosted session (no tmux sockets to scan).
   const out = new Map<string, OnlinePeer>()
-  let entries: string[] = []
-  try {
-    entries = readdirSync(sockDir)
-  } catch {
-    /* no tmux sock dir → only supervisor-hosted peers, merged below (never early-return past them) */
-  }
-  for (const entry of entries) {
-    const parsedSocket = parseSocketPath(join(sockDir, entry))
-    if (!parsedSocket) continue
-    for (const sessionName of listSessions(join(sockDir, entry))) {
-      const parsedSession = parseSessionName(sessionName)
-      if (!parsedSession) continue
-      if (parsedSession.address !== parsedSocket.address) continue
-      out.set(parsedSession.address, {
-        personality: parsedSession.personality,
-        runtime: parsedSession.runtime,
-      })
-    }
-  }
-  // SPAWN-FLIP Ф0b-3: supervisor-HOSTED peers have no tmux socket, so the scan above misses them —
-  // merge in the live hosted sessions so the online scan + the no-runtime resolve see them too.
   for (const h of listHostedPeers()) {
     out.set(buildProcessAddress(h.runtime, h.personality), { personality: h.personality, runtime: h.runtime })
   }
   return Array.from(out.values()).sort(
-    (a, b) =>
-      a.personality.localeCompare(b.personality) || a.runtime.localeCompare(b.runtime),
+    (a, b) => a.personality.localeCompare(b.personality) || a.runtime.localeCompare(b.runtime),
   )
 }
 
@@ -365,56 +151,6 @@ export function resolvePeerDeliveryTarget(
   return resolveDeliveryTarget({ personality })
 }
 
-// ─── TUI submit (ported byte-for-byte from transport.ts) ────────────────────
-
-function inputHoldsPaste(
-  sock: string,
-  address: string,
-  tailMarker: string,
-  markers: DeliveryMarkers,
-): boolean {
-  const cap = tmux(sock, 'capture-pane', '-p', '-t', address)
-  if (!cap.ok) return true
-  const lines = cap.out.split('\n')
-  let promptRow = -1
-  for (let i = 0; i < lines.length; i++) {
-    const ch = lines[i]?.[0] ?? ''
-    if (markers.promptGlyphs.includes(ch)) promptRow = i
-  }
-  if (promptRow < 0) return true
-  const band = lines.slice(promptRow).join('\n')
-  if (band.includes(tailMarker)) return true
-  return markers.pastePatterns?.some(re => re.test(band)) ?? false
-}
-
-// Returns TRUE iff the input cleared after Enter within the budget — i.e. an
-// (idle, responsive) TUI accepted the submit. FALSE on timeout (the input never
-// cleared): either a DEAD/hung session, OR a BUSY session mid-turn whose input row
-// is not even rendered (then liveness is confirmed by the transcript-mtime advance
-// in deliverViaTmux, not here). The poll/re-press TIMING is the byte-for-byte 0.7.6
-// port; only the return value is new (Ф-B: feed the delivery-liveness decision).
-function submitIntoTui(sock: string, address: string, envelope: string, markers: DeliveryMarkers): boolean {
-  const tailMarker =
-    envelope.split('\n').map(line => line.trim()).filter(Boolean).pop() ?? envelope.trim()
-  const start = monotonicMs()
-  while (monotonicMs() - start < SUBMIT_LANDED_TIMEOUT_MS) {
-    if (inputHoldsPaste(sock, address, tailMarker, markers)) break
-    sleepSync(SUBMIT_POLL_MS)
-  }
-  while (monotonicMs() - start < submitTotalTimeoutMs()) {
-    tmux(sock, 'send-keys', '-t', address, 'Enter')
-    const windowStart = monotonicMs()
-    while (
-      monotonicMs() - windowStart < SUBMIT_CONFIRM_WINDOW_MS &&
-      monotonicMs() - start < submitTotalTimeoutMs()
-    ) {
-      sleepSync(SUBMIT_POLL_MS)
-      if (!inputHoldsPaste(sock, address, tailMarker, markers)) return true
-    }
-  }
-  return false
-}
-
 // Ф-B liveness: how long to keep polling the activity proxy for a transcript
 // advance when the submit did NOT clear the input (a busy session whose input row
 // is not rendered). Env-tunable for LIVE calibration (busy/idle/cold). Conservative
@@ -439,78 +175,12 @@ function hostLivenessGraceMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : livenessGraceMs()
 }
 
-/**
- * Deliver `envelope` into the target's tmux session and CONFIRM it landed in a LIVE
- * session (Ф-B delivery guarantee, contract Демон §Гарантия доставки). `cwd` (the
- * target peer's working dir) enables the transcript-mtime liveness probe; omit it and
- * the tui path falls back to submit-confirmation only (existing direct callers/tests).
- *
- * tui liveness — ok ⟺ message landed in a live session, by EITHER strong signal:
- *   (a) submit confirmed — the input cleared after Enter (an idle session accepted it);
- *   (b) transcript-mtime advanced past the pre-submit baseline (a BUSY session is
- *       mid-turn — our message is queued and surfaces on its next tool call).
- * Neither within the grace budget → the session is listed live but UNRESPONSIVE
- * (dead/hung) → fail LOUDLY. Silent loss is forbidden; when in doubt prefer a false-
- * FAIL (sender retries) over a false-OK. router (telegram/notifier) is always-on by
- * launchd → its liveness is structural, the C-j path keeps its prior semantics.
- */
-export function deliverViaTmux(target: DeliveryTarget, envelope: string, cwd?: string): Result<void> {
-  const bufferName = `iap-${process.pid}-${Date.now()}`
-  const load = spawnSync(
-    'tmux',
-    ['-S', target.socketPath, 'load-buffer', '-b', bufferName, '-'],
-    { input: envelope, encoding: 'utf8' },
-  )
-  if (load.status !== 0) {
-    return err(`tmux load-buffer failed: ${(load.stderr ?? '').trim() || `exit ${load.status}`}`)
-  }
-  const isTui = isSupportedLocalRuntime(target.runtime)
-  const pasteArgs = isTui
-    ? ['paste-buffer', '-p', '-b', bufferName, '-t', target.address]
-    : ['paste-buffer', '-p', '-r', '-b', bufferName, '-t', target.address]
-  const paste = tmux(target.socketPath, ...pasteArgs)
-  if (!paste.ok) {
-    tmux(target.socketPath, 'delete-buffer', '-b', bufferName)
-    return err(`tmux paste-buffer failed: ${paste.err.trim() || 'unknown error'}`)
-  }
-  if (isTui) {
-    const adapter = getAdapter(target.runtime)
-    // Baseline the activity proxy BEFORE the submit (a paste does not move the
-    // transcript — only a model turn does), so an advance afterwards proves a busy
-    // session is alive. null proxy / no cwd → 0 (the advance check is skipped below).
-    const baselineMtime = cwd ? adapter.newestActivityMtime(cwd) ?? 0 : 0
-    // Submit markers come from the target runtime's adapter.
-    const confirmed = submitIntoTui(target.socketPath, target.address, envelope, adapter.deliveryMarkers)
-    tmux(target.socketPath, 'delete-buffer', '-b', bufferName)
-    if (confirmed) return ok(undefined) // idle session accepted the submit
-    if (!cwd) return ok(undefined) // no activity proxy available → confirmed-only (legacy callers)
-    // Busy session: the input never cleared, so confirm liveness by a transcript
-    // advance. Grace-poll the proxy (the model may take a beat to write its turn).
-    const graceDeadline = monotonicMs() + livenessGraceMs()
-    do {
-      if ((adapter.newestActivityMtime(cwd) ?? 0) > baselineMtime) return ok(undefined)
-      sleepSync(LIVENESS_POLL_MS)
-    } while (monotonicMs() < graceDeadline)
-    return err(
-      `peer "${target.personality}" (${target.runtime}) is listed live but did not accept the message ` +
-        `(no input-clear, no transcript advance within ${livenessGraceMs()}ms) — live but unresponsive to this delivery (not dead); message NOT delivered`,
-    )
-  }
-  sleepSync(PASTE_SETTLE_MS)
-  const enter = tmux(target.socketPath, 'send-keys', '-t', target.address, 'C-j')
-  tmux(target.socketPath, 'delete-buffer', '-b', bufferName)
-  if (!enter.ok) return err(`tmux send-keys failed: ${enter.err.trim() || 'unknown error'}`)
-  return ok(undefined)
-}
-
-// ─── Host-aware warm delivery (spawn-flip cutover Block 2, Ф0b-2) ────────────────────────────────
+// ─── Warm delivery (pty-only — supervisor socket) ────────────────────────────────────────────────
 
 /** Test seam for `deliverWarm`. Production defaults route on the real supervisor; tests inject a
- *  fake host-detect + host-deliver + a temp transcript proxy, so the host branch is covered with no
- *  live daemon. Omitting all fields = pure production behaviour. */
+ *  fake host-deliver + a temp transcript proxy, so the deliver path is covered with no live daemon.
+ *  Omitting all fields = pure production behaviour. */
 export interface WarmDeliverSeam {
-  /** Runtime-state host detector (NOT the `.pty-host` marker). Default: the real `hostSessionAlive`. */
-  hostAlive?: (identity: string) => boolean
   /** Deliver to the hosted session over its socket. Default: the real `deliverHosted` (Ф0a leaf). */
   deliverHosted?: (identity: string, envelope: string) => Promise<DeliverResult>
   /** Activity proxy for the landed-confirm. Default: the target runtime adapter's transcript mtime. */
@@ -518,13 +188,11 @@ export interface WarmDeliverSeam {
 }
 
 /**
- * Warm-deliver `envelope` to a LIVE local target, HOST-AWARE. A supervisor-HOSTED target (spawn-flip
- * Ф0b: detected by live runtime state, NOT the `.pty-host` marker) is delivered over its socket; any
- * other target takes the unchanged `deliverViaTmux` path. The host branch CONFIRMS landing by the
- * SAME final arbiter as the tmux busy path — a transcript-mtime advance past the pre-deliver baseline,
- * NOT the socket-ack (a flushed CR proves the bytes left us, NOT that the session accepted them;
- * trusting the ack would re-open the silent-loss class the contract forbids). Flag-off (no live
- * supervisor session) → `hostAlive` is a cheap false → `deliverViaTmux` verbatim (byte-identical).
+ * Warm-deliver `envelope` to a LIVE local target over its supervisor socket (pty-only). Landing is
+ * CONFIRMED by a transcript-mtime advance past the pre-deliver baseline, NOT the socket-ack (a flushed
+ * CR proves the bytes left us, NOT that the session accepted them; trusting the ack would re-open the
+ * silent-loss class the contract forbids). A router (telegram/notifier) has no transcript proxy → it is
+ * confirmed by the socket-ack (its liveness is structural via launchd KeepAlive). See `deliverViaHost`.
  */
 export async function deliverWarm(
   target: DeliveryTarget,
@@ -532,8 +200,6 @@ export async function deliverWarm(
   cwd?: string,
   seam: WarmDeliverSeam = {},
 ): Promise<Result<void>> {
-  const hostAlive = seam.hostAlive ?? hostSessionAlive
-  if (!hostAlive(target.address)) return deliverViaTmux(target, envelope, cwd)
   return deliverViaHost(target, envelope, cwd, seam)
 }
 
@@ -819,12 +485,10 @@ export function waitForCompactDone(
   const pollMs = opts.pollMs ?? compactDonePollMs(env)
   const graceMs = opts.graceMs ?? compactReadyGraceMs(env)
   const aliveFn = opts.seam?.sessionAlive ?? ((t: DeliveryTarget) => sessionAlive(t.socketPath, t.address))
-  const captureFn =
-    opts.seam?.capturePane ??
-    ((t: DeliveryTarget) => {
-      const cap = tmux(t.socketPath, 'capture-pane', '-p', '-t', t.address)
-      return cap.ok ? cap.out : null
-    })
+  // pty-only: the AUTHORITATIVE compact-done signal is the transcript marker (compactTranscriptHasDone).
+  // The pane capture was a tmux fast-path (idle-composer detect) + error context; with tmux gone the
+  // default is no-capture (the transcript marker remains the contract). Tests inject seam.capturePane.
+  const captureFn = opts.seam?.capturePane ?? ((_t: DeliveryTarget): string | null => null)
   const adapter = getAdapter(target.runtime)
   const started = monotonicMs()
   const deadline = started + timeoutMs
@@ -880,16 +544,14 @@ export function waitForCompactDone(
 
 /**
  * Perform an in-session control command on a LIVE target (Ф-E, docs/Control-команды).
- * The target's adapter maps the abstract command to a tmux send-keys sequence
- * (ControlPlan); each step is sent IN ORDER, UNCONDITIONALLY — NO ready-gate, NO
- * submit-confirm (the point of `interrupt` is to break a stuck/raving turn exactly
- * when normal delivery would not land). An unsupported command (router runtimes,
- * unknown name) → explicit refusal, not a silent no-op.
+ * The target's adapter maps the abstract command to a control sequence (ControlPlan); each step is
+ * sent IN ORDER, UNCONDITIONALLY — NO ready-gate, NO submit-confirm (the point of `interrupt` is to
+ * break a stuck/raving turn exactly when normal delivery would not land). An unsupported command
+ * (router runtimes, unknown name) → explicit refusal, not a silent no-op.
  */
-/** Test seam for the hosted control branch (spawn-flip Ф0b-2 slice 3): inject host-detect + the
- *  socket control-send so the host path is covered without a live supervisor. Omitting all = prod. */
+/** Test seam for the control path: inject the socket control-send so it is covered without a live
+ *  supervisor. Omitting all = prod. */
 export interface ControlHostSeam {
-  hostAlive?: (identity: string) => boolean
   sendControl?: (runDir: string, session: string, chunks: Buffer[], opts: { stepDelayMs?: number }) => Promise<DeliverResult>
 }
 
@@ -902,24 +564,14 @@ export async function executeControlOnTarget(
   if (!plan) {
     return err(`runtime "${target.runtime}" does not support control command "${command.name}"`)
   }
-  // SPAWN-FLIP Ф0b-2 slice 3: a supervisor-HOSTED target has no tmux send-keys — translate each plan
-  // step to pty bytes with keysToBytes (REUSED from the boot-driver, NOT reimplemented) and send them
-  // over the supervisor socket. Same UNCONDITIONAL semantics (no ready-gate, no submit-confirm) — the
-  // point of interrupt is to break a stuck turn. Flag-off (no live host) → the unchanged tmux path.
-  const hostAlive = seam.hostAlive ?? hostSessionAlive
-  if (hostAlive(target.address)) {
-    const chunks = plan.sequence.map(keys => keysToBytes(keys))
-    const send = seam.sendControl ?? sendControlToHost
-    const sent = await send(hostRunDir(), target.address, chunks, { stepDelayMs: plan.stepDelayMs })
-    if (!sent.ok) {
-      return err(`hosted control "${command.name}" failed for "${target.personality}" (${target.runtime}): ${sent.error ?? 'unknown error'}`)
-    }
-    return ok(undefined)
-  }
-  for (const keys of plan.sequence) {
-    const r = tmux(target.socketPath, 'send-keys', '-t', target.address, ...keys)
-    if (!r.ok) return err(`tmux send-keys failed for control "${command.name}": ${r.err.trim() || 'unknown error'}`)
-    if (plan.stepDelayMs) sleepSync(plan.stepDelayMs)
+  // pty-only: translate each plan step to pty bytes with keysToBytes (REUSED from the boot-driver) and
+  // send them over the supervisor socket. UNCONDITIONAL semantics (no ready-gate, no submit-confirm) —
+  // the point of interrupt is to break a stuck turn.
+  const chunks = plan.sequence.map(keys => keysToBytes(keys))
+  const send = seam.sendControl ?? sendControlToHost
+  const sent = await send(hostRunDir(), target.address, chunks, { stepDelayMs: plan.stepDelayMs })
+  if (!sent.ok) {
+    return err(`hosted control "${command.name}" failed for "${target.personality}" (${target.runtime}): ${sent.error ?? 'unknown error'}`)
   }
   return ok(undefined)
 }
@@ -1139,38 +791,27 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function targetSessionToken(target: DeliveryTarget): string | null {
-  const r = tmux(target.socketPath, 'display-message', '-p', '-t', target.address, '#{session_id}:#{pane_id}')
-  if (!r.ok) return null
-  return r.out.trim() || null
-}
+// ── Composer-queue predicates (pty-only) ─────────────────────────────────────────────────────────
 
-// ── Host-aware composer-queue predicates (spawn-flip Ф0b-3 slice 3c) ─────────────────────────────────
-// Each dispatches on hostSessionAlive(address): a HOSTED target uses the supervisor signals, any other
-// target falls through to the UNCHANGED tmux predicate (so the tmux fleet's observable queue behavior
-// is byte-identical — only the call becomes awaitable).
-
-/** Enqueue gate. HOSTED: hold ONLY when a HUMAN is attached (supervisor client) AND the composer model
- *  is occupied — the slice-2 anti-bug: with no operator attached the composer text is the AI's own
- *  output, never held. tmux: the unchanged shouldQueueForHumanComposer. */
+/** Enqueue gate. Hold ONLY when a HUMAN is attached (supervisor client) AND the composer model is
+ *  occupied — the anti-bug: with no operator attached the composer text is the AI's own output, never
+ *  held. No pane-log dir / unreadable model → don't hold (deliver, never stall). */
 async function shouldQueueForComposer(target: DeliveryTarget, logDir: string | undefined): Promise<boolean> {
-  if (!hostSessionAlive(target.address)) return shouldQueueForHumanComposer(target)
   if (!isSupportedLocalRuntime(target.runtime) || !hasAttachedSupervisorClient(target.address)) return false
   if (!logDir) return false // no pane-log dir → cannot read occupancy → don't hold (deliver, never stall)
   return paneLogComposerOccupied(`${logDir}/${target.address}.log`, hostGeometry(target.address).cols, hostGeometry(target.address).rows, target.runtime)
 }
 
 /** Drain re-check (no attached-client prereq — once queued, abandoned input waits until cleared/ceiling).
- *  HOSTED: pane-log model occupancy. tmux: the unchanged targetComposerBlocksDelivery. */
+ *  Pane-log model occupancy. */
 async function composerStillBusy(target: DeliveryTarget, logDir: string | undefined): Promise<boolean> {
-  if (!hostSessionAlive(target.address)) return targetComposerBlocksDelivery(target)
   if (!logDir) return false
   return paneLogComposerOccupied(`${logDir}/${target.address}.log`, hostGeometry(target.address).cols, hostGeometry(target.address).rows, target.runtime)
 }
 
-/** Session-replacement token. HOSTED: supervisor daemon pid; tmux: session_id:pane_id. */
+/** Session-replacement token: the supervisor daemon pid. */
 function composerSessionToken(target: DeliveryTarget): string | null {
-  return hostSessionAlive(target.address) ? hostSessionToken(target.address) : targetSessionToken(target)
+  return hostSessionToken(target.address)
 }
 
 function queuedTargetStillSameSession(job: ComposerQueuedDelivery): boolean {

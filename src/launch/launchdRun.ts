@@ -16,7 +16,6 @@
 // with WorkingDirectory=<peer cwd> and EnvironmentVariables PEER_* set by launchd,
 // so process.cwd() IS the peer cwd.
 
-import { spawnSync } from 'child_process'
 import { join } from 'path'
 import { INFRA_RUNTIME_BIN_ENV, isInfraRuntime, resolveSockDir } from '../core/constants.ts'
 import { buildProcessAddress, buildSocketPath } from '../core/socket.ts'
@@ -24,7 +23,6 @@ import { peerLogsDir, pluginLogsDir } from '../storage/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
 import { getAdapter, launch } from './index.ts'
 import { hostSessionAlive, killPtyHost } from './ptyHost.ts'
-import { dismissCanary, signalCanaryClean } from './canary.ts'
 import type { LaunchConfig, LaunchSpec } from './types.ts'
 
 /** Block-watch poll cadence — seconds, deliberately NOT a tight loop (the session
@@ -36,36 +34,6 @@ const WATCH_INTERVAL_MS = 5000
  *  long and recheck: a missing/broken runtime bin lets the pane die instantly, and
  *  this turns that into a NON-zero diagnostic exit instead of a clean-looking run. */
 const BOOT_RECHECK_MS = 2000
-
-function sessionAlive(sock: string, identity: string): boolean {
-  return spawnSync('tmux', ['-S', sock, 'has-session', '-t', identity], { stdio: 'ignore' }).status === 0
-}
-
-/**
- * Tear down the always-on session WITH its tmux server (when this session was the
- * last one) — the signal-exit counterpart of lifecycle.killSession, local to avoid
- * a launch ⇆ lifecycle import. Canary-signaled first: this is a DELIBERATE stop.
- *
- * Fixes the defect where bootout did not kill the poller: `launchctl bootout`
- * TERMs THIS watcher process, but the detached tmux server — and the runtime
- * poller inside it — survived holding STALE in-memory state (e.g. a notifier
- * trigger's old target after a same-id replace), so a plain bootout+bootstrap was
- * NOT a real restart. With the teardown, the session
- * dies with its watcher: bootout = full stop, bootstrap = fresh bring-up that
- * re-reads durable state. `iapeer stop` (bootout + killSession) is unchanged —
- * both paths now converge on the same end state.
- */
-export function teardownAlwaysOnSession(sock: string, identity: string): void {
-  // Explicit canary silence (v2): channel signal (client exits 0) + dismiss the
-  // sh recorder — a signaled client alone is no longer read as deliberate.
-  signalCanaryClean(sock, identity)
-  dismissCanary(identity)
-  spawnSync('tmux', ['-S', sock, 'kill-session', '-t', identity], { stdio: 'ignore' })
-  const ls = spawnSync('tmux', ['-S', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' })
-  if (!(ls.stdout ?? '').trim()) {
-    spawnSync('tmux', ['-S', sock, 'kill-server'], { stdio: 'ignore' })
-  }
-}
 
 /**
  * Build the always-on LaunchSpec for an infra peer, reading intelligence from the
@@ -116,13 +84,10 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
   const sock = buildSocketPath(runtime, personality, sockDir)
   const adapter = getAdapter(runtime)
 
-  // Host-aware liveness (cutover infra-track): a flag-on router is supervisor-HOSTED (no tmux session);
-  // a flag-off one is tmux. Probe BOTH backings by RUNTIME STATE (not the `.pty-host` marker), so this
-  // is robust to a spawn-FALLBACK — if startPtyHost failed and launch fell back to tmux, the marker is
-  // present yet the live session is tmux. The router is "up" iff EITHER backing is alive; on child
-  // death BOTH go false → block-watch exits → run-infra exits → launchd KeepAlive respawns (the SOLE
-  // respawn owner; the supervisor never self-respawns — H4 held).
-  const isAlive = (): boolean => hostSessionAlive(identity) || sessionAlive(sock, identity)
+  // pty-only liveness: a router is supervisor-HOSTED. Probe by RUNTIME STATE (not the `.pty-host`
+  // marker). On child death it goes false → block-watch exits → run-infra exits → launchd KeepAlive
+  // respawns (the SOLE respawn owner; the supervisor never self-respawns — H4 held).
+  const isAlive = (): boolean => hostSessionAlive(identity)
 
   const cfg: LaunchConfig = {
     claudeBin: env.CLAUDE_BIN ?? 'claude',
@@ -194,19 +159,11 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
     })
     interrupt = null
   }
-  // Signal-initiated exit (bootout / shutdown / kickstart -k) tears the session
-  // down WITH this watcher — without it the detached tmux poller outlived bootout
-  // holding stale in-memory state (see teardownAlwaysOnSession). A natural session
-  // death (stop=false) skips this: there is nothing to tear down, exit 0 →
-  // KeepAlive respawns a fresh bring-up.
-  // Signal-initiated stop (bootout / shutdown / kickstart -k) tears the session down WITH this watcher.
-  // A hosted router → kill the supervisor daemon (killPtyHost: SIGTERM → it SIGKILLs the child + cleans
-  // up); a tmux router → the tmux teardown. Pick by the live backing. A NATURAL death (stop=false) skips
-  // this: nothing to tear down, exit 0 → KeepAlive respawns a fresh bring-up.
-  if (stop) {
-    if (hostSessionAlive(identity)) killPtyHost(identity)
-    else teardownAlwaysOnSession(sock, identity)
-  }
+  // Signal-initiated stop (bootout / shutdown / kickstart -k) tears the session down WITH this watcher —
+  // kill the supervisor daemon (killPtyHost: SIGTERM → it SIGKILLs the child + cleans up sock/pid/serve)
+  // so the detached child does not outlive bootout holding stale in-memory state. A NATURAL death
+  // (stop=false) skips this: nothing to tear down, exit 0 → KeepAlive respawns a fresh bring-up.
+  if (stop) killPtyHost(identity)
   return 0
 }
 

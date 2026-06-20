@@ -26,18 +26,6 @@ import type { RuntimeAdapter } from './types.ts'
 export const HOST_COLS = 220
 export const HOST_ROWS = 50
 
-/** Per-peer pty-hosting decision. pty-supervisor hosting is the DEFAULT — a fresh peer is hosted under
- *  the supervisor (not `tmux new-session`) WITHOUT any marker (pty out of the box). A peer opts OUT
- *  to the legacy tmux path with a `<logDir>/<identity>.no-pty-host` marker (the dev/debug escape, valid
- *  only while tmux still exists). Read in TWO places, both of which want "is this peer pty-hosted": the
- *  spawn-gate (launch — host vs tmux) and the shadow observer (skip pty-hosted peers, they have no tmux
- *  to compare; an opt-OUT peer is tmux → compared). Legacy `.pty-host` opt-in markers are now REDUNDANT
- *  (pty is the default) and harmless — ignored here, so the 29 migrated peers keep hosting unchanged.
- *  The golden spawn-fallback (startPtyHost fail → tmux, in launch) is SEPARATE and unaffected: a
- *  pty-default peer whose host bring-up fails still falls through to tmux — never worse on spawn. */
-export function ptyHostEnabled(logDir: string, identity: string): boolean {
-  return !existsSync(`${logDir}/${identity}.no-pty-host`)
-}
 
 /** The supervisor's run dir (session sockets/pids/serve-specs). Env-isolatable via IAPEER_ROOT. */
 export function hostRunDir(): string {

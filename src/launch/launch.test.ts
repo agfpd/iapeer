@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { exitCauseHook, exitLogPath, getAdapter, launch, paneTail } from './index.ts'
+import { exitLogPath, getAdapter, launch } from './index.ts'
 import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
@@ -116,20 +116,6 @@ describe('codexAdapter.isInputReady', () => {
   })
 })
 
-describe('paneTail (never-became-ready observability)', () => {
-  test('last two non-empty lines, joined, quotes flattened', () => {
-    const pane = 'first\n\n  middle  line \n⚠ MCP "failed"\n› composer\n\n'
-    expect(paneTail(pane)).toBe("⚠ MCP 'failed' ⏎ › composer")
-  })
-  test('single line and empty captures', () => {
-    expect(paneTail('only')).toBe('only')
-    expect(paneTail('')).toBe('')
-    expect(paneTail('\n  \n')).toBe('')
-  })
-  test('clips to 160 chars', () => {
-    expect(paneTail('x'.repeat(300)).length).toBe(160)
-  })
-})
 
 describe('telegramAdapter (router — no TUI surface)', () => {
   test('router predicates are trivial', () => {
@@ -302,43 +288,9 @@ describe('claudeAdapter', () => {
 })
 
 // ─── exit-cause observability: the pane-died hook builder (pure string) ──────
-describe('exitCauseHook (exit-cause observability)', () => {
-  const hook = exitCauseHook('claude-iapeer', '/r/logs/iapeer/exits.log')
-
+describe('exitLogPath', () => {
   test('exitLogPath → exits.log sibling to lifecycle.log', () => {
     expect(exitLogPath('/r/logs/iapeer')).toBe('/r/logs/iapeer/exits.log')
-  })
-  test('reads pane_dead_status AND pane_dead_signal (both death classes)', () => {
-    // graceful exit populates #{pane_dead_status}; a signal populates #{pane_dead_signal}.
-    expect(hook).toContain('dead_status=#{pane_dead_status}')
-    expect(hook).toContain('dead_signal=#{pane_dead_signal}')
-  })
-  test('one logfmt line: ts + ev=session-exit + identity, appended to the exit log', () => {
-    expect(hook).toContain('ev=session-exit')
-    expect(hook).toContain('identity=claude-iapeer')
-    expect(hook).toContain('ts=%s')
-    expect(hook).toContain('>> "/r/logs/iapeer/exits.log"')
-    expect(hook).toContain('\\n') // literal backslash-n for sh printf, not a real newline
-  })
-  test('logs BEFORE it reaps: run-shell (sync, no -b) then tmux-native kill-session', () => {
-    // run-shell must NOT be backgrounded (-b) — the printf has to finish before the
-    // kill tears the server down, else the line is lost to the race (verified live).
-    expect(hook).not.toContain('run-shell -b')
-    expect(hook.indexOf('run-shell')).toBeLessThan(hook.indexOf('kill-session'))
-    // tmux-NATIVE kill-session (no shell `tmux`) → needs no PATH (launchd minimal env).
-    expect(hook).toContain('kill-session -t "claude-iapeer"')
-  })
-  test('silences the server-death canary (native wait-for -S) BEFORE kill-session — no double record', () => {
-    // kill-session on a single-session server → exit-empty takes the server down;
-    // without the signal the canary would add a second `ev=server-exit` record for
-    // a death this hook just captured (session-exit carries the code/signal).
-    expect(hook).toContain('wait-for -S "iap-canary-claude-iapeer"')
-    expect(hook.indexOf('wait-for -S')).toBeLessThan(hook.indexOf('kill-session'))
-    expect(hook.indexOf('run-shell')).toBeLessThan(hook.indexOf('wait-for -S')) // log first
-  })
-  test('quoting: single-quoted run-shell arg (tmux layer) wrapping double-quoted sh', () => {
-    expect(hook).toMatch(/run-shell '.*'/)
-    expect(hook).not.toContain("''") // no empty/again-collapsed single-quote pair
   })
 })
 
