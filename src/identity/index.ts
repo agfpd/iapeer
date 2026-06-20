@@ -213,8 +213,11 @@ export function readPeerProfile(cwd: string = process.cwd()): PeerProfile | null
   // the `iapeer init --personality` override (a deliberately-named peer in a folder
   // whose basename differs), so the heal stays a flagged drift, not a silent rewrite.
   const personality = validatePersonality(obj.personality, 'peer-profile personality')
-  // default_runtime is the contract field name (the routing/wake/first-launch default);
-  // `runtime` is the legacy field. Dual-read accepts both during the staged migration.
+  // default_runtime is the contract field name (the routing/wake/first-launch default). Phase-3:
+  // foundation no longer WRITES the legacy `runtime` mirror (see writePeerProfileAtomic), but the
+  // read-fallback is KEPT as a dormant defensive net — it tolerates a legacy-shaped profile (restored
+  // backup / hand-edit) at a 1-token cost. All real writers emit default_runtime (foundation +
+  // telegram-runtime 0.19.4). Consistent with the registry read-fallback (§3 defensive keep).
   const runtime = validateRuntime(obj.default_runtime ?? obj.runtime, 'peer-profile default_runtime')
   const interfaces = normalizeInterfaces(obj.interfaces, `${IAPEER_DIR}/${PEER_PROFILE_FILE}`)
   const intelligence = normalizeIntelligence(obj.intelligence, runtime)
@@ -292,18 +295,20 @@ export function writePeerProfileAtomic(cwd: string, profile: PeerProfileWrite): 
   const merged: Record<string, unknown> = {
     ...existing,
     personality: profile.personality,
-    // Phase-2 write-flip (contract Идентичность, staged default_runtime migration):
-    // emit the contract field `default_runtime` AND keep the legacy `runtime` as an
-    // IN-SYNC MIRROR — readers that still read `runtime` only (IAP peers.ts,
-    // Spawned-Peer, external scripts) stay alive with zero blast radius. Phase 3
-    // (gated on every reader shipping dual-read) removes the mirror.
+    // Phase-3 (default_runtime migration complete): emit ONLY the contract field `default_runtime` —
+    // the legacy `runtime` mirror is removed. All readers switched: telegram-runtime 0.19.4 reads
+    // default_runtime and no longer re-seeds the mirror on mutation; foundation reads default_runtime.
     default_runtime: profile.runtime,
-    runtime: profile.runtime,
     runtimes: profile.runtimes,
     description,
     intelligence,
     ...(profile.interfaces ? { interfaces: profile.interfaces } : {}),
   }
+  // Phase-3: actively STRIP the legacy `runtime` mirror — it is a CONTRACT field superseded by
+  // default_runtime (not an owner field to preserve via `...existing`). This removes a lingering mirror
+  // on the next write of any already-migrated profile AND heals a diverged `runtime` (default_runtime
+  // governs). Owner sections (initial_prompt, wake_policy, expansion, notifier, …) stay preserved.
+  delete merged.runtime
   // C2 — initial_prompt: an explicit value in the write wins; otherwise the existing
   // on-disk value is preserved verbatim by `...existing` (a caller that doesn't own
   // it never wipes it). Only a non-empty string sets it.

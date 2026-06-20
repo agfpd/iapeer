@@ -179,7 +179,7 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     expect(migrateProfileRuntimeField(borisCwd)).toBe(true)
     const after = JSON.parse(readFileSync(profilePath, 'utf8'))
     expect(after.default_runtime).toBe('claude')
-    expect(after.runtime).toBe('claude') // in-sync legacy mirror
+    expect(after.runtime).toBeUndefined() // Phase-3: legacy `runtime` mirror stripped on write
     expect(after.intelligence).toBe('human') // legacy vocab preserved VERBATIM (no silent migration)
     expect(after.initial_prompt).toBe('boot')
     expect(after.wake_policy).toBe('ephemeral')
@@ -198,7 +198,7 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     )
     expect(migrateProfileRuntimeField(borisCwd)).toBe(true)
     const after = JSON.parse(readFileSync(profilePath, 'utf8'))
-    expect(after.default_runtime).toBe('codex')
-    expect(after.runtime).toBe('codex') // mirror re-synced to the governing field
+    expect(after.default_runtime).toBe('codex') // contract side governs
+    expect(after.runtime).toBeUndefined() // Phase-3: diverged legacy mirror stripped (default_runtime wins)
   })
 })
