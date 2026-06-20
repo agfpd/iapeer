@@ -1545,10 +1545,13 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           } else if (warns.length > 0 && flags.json !== true) {
             lines.push(`⚠ ${peer.personality}: ${warns.map(i => i.field).join(', ')}`)
           }
-          // Migration candidate: conformant, but the default_runtime warn fired
-          // (legacy-only field or diverged mirror). Errored profiles are NEVER
+          // Migration candidate (Phase-3): conformant AND still carrying the legacy `runtime` field —
+          // a warn-fired legacy-only/diverged shape OR an in-sync mirror. In Phase-3 ANY `runtime`
+          // field is stripped, so the candidate set is "has a runtime field", not just "warn fired"
+          // (an in-sync mirror does not warn, but must still be cleaned). Errored profiles are NEVER
           // rewritten — migration heals shape, it does not guess at broken data.
-          if (errs.length === 0 && warns.some(i => i.field === 'default_runtime')) {
+          const hasLegacyRuntime = !!raw && typeof raw === 'object' && (raw as Record<string, unknown>).runtime !== undefined
+          if (errs.length === 0 && (warns.some(i => i.field === 'default_runtime') || hasLegacyRuntime)) {
             legacyRuntimeProfiles.push({ personality: peer.personality, cwd: peer.cwd })
           }
         }
@@ -1568,16 +1571,15 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           out(`\n${index.peers.length} peers · ${errors} error(s) · ${driftCount} index↔local drift(s)\n`)
         }
         if (flags.fix === true) {
-          // Phase-2 data migration (staged default_runtime story): rewrite conformant
-          // local profiles still on the legacy field shape — the writer now emits
-          // `default_runtime` + the in-sync legacy `runtime` mirror. Runs BEFORE the
-          // reindex so the healed index is projected from migrated locals.
+          // Phase-3 data migration (default_runtime story complete): rewrite conformant local profiles
+          // still carrying the legacy `runtime` field — the writer now emits ONLY `default_runtime` and
+          // STRIPS the mirror. Runs BEFORE the reindex so the healed index is projected from clean locals.
           const migrated: string[] = []
           for (const p of legacyRuntimeProfiles) {
             if (migrateProfileRuntimeField(p.cwd)) migrated.push(p.personality)
           }
           if (migrated.length > 0) {
-            out(`migrated runtime→default_runtime (legacy mirror kept): ${migrated.join(', ')}\n`)
+            out(`stripped legacy \`runtime\` mirror (default_runtime only): ${migrated.join(', ')}\n`)
           }
           if (driftCount > 0 || errors === 0) {
             const { healed, missing } = await reindexFromLocals({ env })
