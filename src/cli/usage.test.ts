@@ -28,7 +28,7 @@ describe('renderUsage', () => {
   test('starts with the header and lists every important verb', () => {
     const out = renderUsage(100)
     expect(out.startsWith('usage: iapeer <verb> [args]')).toBe(true)
-    for (const v of ['install', 'onboard', 'uninstall', 'verify', 'shadow', 'default-runtime', 'send'])
+    for (const v of ['install', 'onboard', 'uninstall', 'verify', 'supervisor', 'default-runtime', 'send'])
       expect(out).toContain(v)
   })
 

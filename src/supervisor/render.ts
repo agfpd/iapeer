@@ -1,7 +1,8 @@
-// Leaf render helper: @xterm model → plain text. Extracted from shadow/index.ts so consumers
-// (the shadow observer, the Ф1 ready-gate flip, and the Block-2 supervisor boot-driver) share ONE
-// definition without importing the observer's transport/launch graph. Type-only @xterm import →
-// no runtime dependency beyond the Terminal instance the caller already holds; hermetically testable.
+// Leaf render helper: @xterm model → plain text + composer-occupancy verdict. A shared LIVE leaf used
+// by the Ф1 ready-gate flip (launch/readyGateModel) and the supervisor pane model. Type-only @xterm
+// import → no runtime dependency beyond the Terminal instance the caller already holds; hermetically
+// testable. (Formerly src/shadow/render.ts — kept after the tmux→pty cutover retired the shadow
+// burn-in observer; only the observer modules were removed, this leaf survives.)
 import type { Terminal } from '@xterm/headless'
 
 /**
@@ -10,7 +11,7 @@ import type { Terminal } from '@xterm/headless'
  * whitespace per line is trimmed (capture-pane does the same), cells coalesced left-to-right.
  *
  * 0-divergence-validated vs capture-pane on READY screens by the ready-gate burn-in; the supervisor
- * boot-driver additionally validates it on BOOT-DIALOG screens (a different screen state the
+ * boot-driver additionally validated it on BOOT-DIALOG screens (a different screen state the
  * ready-gate observation never saw).
  */
 export function modelToPlainText(term: Terminal, cols: number, rows: number): string {
@@ -40,11 +41,10 @@ const promptGlyph = (rt: string): string => (rt === 'claude' ? '❯' : '›')
 /**
  * PTY composer-occupancy verdict: getCell on the model's viewport composer row (the row whose first
  * visible cell is the prompt glyph); human input = a non-ghost (non-dim, non-grey246) visible cell
- * after it. Mirrors composerCaptureHasHumanInput — validated 0-divergence vs it by the burn-in. Lives
- * in this leaf (type-only @xterm) so the spawn-flip hosted occupancy guard can reuse it WITHOUT
- * pulling the @xterm-loading observer graph into the warm-deliver path; the Terminal instance is
- * built by the caller (paneLogComposerOccupied dynamic-imports @xterm). Re-exported from
- * shadow/index.ts so the observer's existing importers keep resolving.
+ * after it. Mirrors the prior tmux capture-pane occupancy check (validated 0-divergence vs it by the
+ * burn-in). Lives in this leaf (type-only @xterm) so the warm-deliver hosted occupancy guard can reuse
+ * it WITHOUT pulling an @xterm-loading graph into the warm-deliver path; the Terminal instance is built
+ * by the caller (paneLogComposerOccupied dynamic-imports @xterm).
  */
 export function composerOccupancyFromModel(term: Terminal, cols: number, rows: number, runtime: string): boolean {
   const b = term.buffer.active, top = b.baseY, bot = b.baseY + rows, g = promptGlyph(runtime)

@@ -26,7 +26,7 @@ import {
 } from './protocol.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry } from './paths.ts'
 import { nextBootAction, type BootPredicates } from './boot.ts'
-import { modelToPlainText } from '../shadow/render.ts'
+import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
 

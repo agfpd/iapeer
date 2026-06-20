@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Terminal } from '@xterm/headless'
-import { modelToPlainText } from '../shadow/render.ts'
+import { modelToPlainText } from './render.ts'
 import { killSession, startSupervisorDaemon } from './index.ts'
 
 // Slice c — the supervisor pane-log must be a drop-in for tmux pipe-pane: the SAME raw child bytes to

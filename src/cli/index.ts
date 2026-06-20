@@ -1026,12 +1026,6 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'native-memory <off|on> (--peer <p> | --all)', desc: "gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)" },
   { sig: 'trust-hooks <hooks.json> [--check]', desc: 'pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report' },
   {
-    sig: 'shadow [--once | --minutes <m>] [--interval <ms>]',
-    desc: 'READ-ONLY tmux→pty fidelity observer (migration burn-in): compares pty-model verdicts vs live tmux on the warm fleet → ~/.iapeer/logs/iapeer/shadow-fidelity.json. Never delivers/mutates.',
-  },
-  { sig: 'shadow-install', desc: 'install + load the always-on shadow burn-in launchd job (com.iapeer.shadow-fidelity); idempotent, re-cycled by update/rollback' },
-  { sig: 'shadow-uninstall', desc: 'bootout + remove the shadow burn-in launchd job (the correct way to stop it; STOP file is respawned past by KeepAlive)' },
-  {
     sig: 'supervisor up|start|attach|list|kill <sess> [runtime]',
     desc: 'DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)',
   },
@@ -2121,54 +2115,6 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         out(`${r.woke ? 'woke + ' : ''}attaching ${r.identity}…\n`)
         const attachCfg = loadLifecycleConfig(env)
         return await attachIntoSession(r.identity, r.socketPath, env, attachCfg.eventLogDir, r.woke)
-      }
-      case 'shadow': {
-        // Read-only fidelity OBSERVER for the tmux→pty migration burn-in (track «b»). Compares
-        // the pty-model verdicts (occupancy/ready-gate/liveness) vs live tmux verdicts on the
-        // warm fleet, logs to <eventLogDir>/shadow-fidelity.{jsonl,json}. STRICTLY read-only —
-        // nothing in delivery/lifecycle imports the shadow module; the dynamic import keeps
-        // @xterm OUT of the hot path (the daemon never loads it). --once | --minutes <m> |
-        // --interval <ms>; stop a long run with `touch <eventLogDir>/shadow-fidelity.STOP`.
-        const cfg = loadLifecycleConfig(env)
-        const { runShadowFidelity } = await import('../shadow/index.ts')
-        await runShadowFidelity({
-          logDir: cfg.logDir,
-          eventLogDir: cfg.eventLogDir,
-          sockDir: cfg.sockDir,
-          intervalMs: flags.interval ? Number(flags.interval) : 5000,
-          maxMinutes: flags.minutes ? Number(flags.minutes) : 0,
-          once: flags.once === true,
-          log: errOut,
-        })
-        out(`shadow-fidelity → ${cfg.eventLogDir}/shadow-fidelity.json\n`)
-        return 0
-      }
-      case 'shadow-install': {
-        // Code-managed install of the always-on shadow burn-in launchd job
-        // (com.iapeer.shadow-fidelity) — reproducible, ownership-sentinel-guarded, and
-        // re-cycled automatically by `iapeer update` / `rollback`. Replaces a hand-written
-        // plist. Idempotent (no-op on an unchanged, loaded job). install.ts carries NO @xterm
-        // — dynamic-imported anyway to keep the CLI's common path light.
-        const { installShadowJob } = await import('../shadow/install.ts')
-        const r = installShadowJob(env)
-        if (r.action === 'failed' || r.action === 'refused-foreign') {
-          errOut(`shadow-install: ${r.action}${r.detail ? ` — ${r.detail}` : ''}\n  plist: ${r.path}\n`)
-          return 1
-        }
-        out(`shadow burn-in job ${r.action} (plist ${r.changed ? 'written' : 'unchanged'}): ${r.path}\n`)
-        return 0
-      }
-      case 'shadow-uninstall': {
-        // Stop + remove the burn-in job (bootout + rm) — the CORRECT halt (KeepAlive would
-        // respawn past the STOP sentinel). Refuses a non-foundation plist (ownership guard).
-        const { uninstallShadowJob } = await import('../shadow/install.ts')
-        const r = uninstallShadowJob(env)
-        if (r.action === 'failed' || r.action === 'refused-foreign') {
-          errOut(`shadow-uninstall: ${r.action}${r.detail ? ` — ${r.detail}` : ''}\n  plist: ${r.path}\n`)
-          return 1
-        }
-        out(`shadow burn-in job ${r.action}: ${r.path}\n`)
-        return 0
       }
       case 'supervisor': {
         // DARK (cutover Block 2): the detach-persistent pty-supervisor (PoC pts.mjs port). NOT

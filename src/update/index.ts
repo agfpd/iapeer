@@ -46,7 +46,6 @@ import {
   type DaemonRestartResult,
   type LaunchdJobCycleResult,
 } from '../launch/launchd.ts'
-import { cycleShadowJob, SHADOW_PERSONALITY, SHADOW_PLIST_LABEL } from '../shadow/install.ts'
 import { defaultDaemonSocketPath } from '../daemon/index.ts'
 // Type-only (erased at runtime → no import cycle): the cascade tail renders these
 // shapes but receives the component-updaters as injected deps.
@@ -251,14 +250,6 @@ export function recycleFoundationOwnedInfraJobs(env: NodeJS.ProcessEnv = process
     const label = launchdLabel(peer.personality)
     const r = cycleLaunchdJob(label, plist, env)
     out.push({ personality: peer.personality, runtime, label, state: r.state, detail: r.detail })
-  }
-  // The tmux→pty fidelity BURN-IN job (com.iapeer.shadow-fidelity) is foundation-owned and
-  // runs the just-replaced `iapeer shadow` off the same binary, so it carries the same LWCR
-  // constraint — but it is NOT a registry peer, so the scan above cannot reach it. Cycle it
-  // by label too (no-op when absent / not-loaded / foreign).
-  const shadow = cycleShadowJob(env)
-  if (shadow) {
-    out.push({ personality: SHADOW_PERSONALITY, runtime: 'foundation', label: SHADOW_PLIST_LABEL, state: shadow.state, detail: shadow.detail })
   }
   return out
 }

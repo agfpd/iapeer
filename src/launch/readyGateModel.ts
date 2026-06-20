@@ -124,7 +124,7 @@ async function loadPaneLogModel(log: string, cols: number, rows: number, startBy
 export async function paneLogViewport(log: string, cols: number, rows: number, startByte = 0): Promise<string | null> {
   const term = await loadPaneLogModel(log, cols, rows, startByte)
   if (!term) return null
-  const { modelToPlainText } = await import('../shadow/render.ts')
+  const { modelToPlainText } = await import('../supervisor/render.ts')
   return modelToPlainText(term, cols, rows)
 }
 
@@ -152,6 +152,6 @@ export async function paneLogViewport(log: string, cols: number, rows: number, s
 export async function paneLogComposerOccupied(log: string, cols: number, rows: number, runtime: string): Promise<boolean> {
   const term = await loadPaneLogModel(log, cols, rows)
   if (!term) return false // unreadable pane-log → no observed human composer text → deliver, never stall (see JSDoc)
-  const { composerOccupancyFromModel } = await import('../shadow/render.ts')
+  const { composerOccupancyFromModel } = await import('../supervisor/render.ts')
   return composerOccupancyFromModel(term, cols, rows, runtime)
 }
