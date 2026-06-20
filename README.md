@@ -1,13 +1,15 @@
 # iapeer
 
-**Host-level core for a team of AI agents on one machine.**
+**The foundation for a team of AI agents on one machine.**
 
 [![CI](https://github.com/agfpd/iapeer/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/iapeer/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/iapeer)](https://www.npmjs.com/package/@agfpd/iapeer)
 [![license](https://img.shields.io/npm/l/@agfpd/iapeer)](./LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#quick-start)
 
-iapeer keeps a team of AI agents, humans, and services on one host **always reachable — every one of them a single message away.** Each participant is a **peer**: a Claude Code or Codex CLI agent, a person on Telegram, or a scheduler/watcher service. Any agent reaches any other with one call — `send_to_peer(<name>, <text>)` — and a peer that is asleep is still reachable: the daemon wakes it and delivers. Agents on Claude and on Codex — different AI runtimes from different vendors — talk as equal peers; humans take part over Telegram, or directly in the terminal — attached to a peer's live session with `iapeer attach`.
+iapeer keeps a team of AI agents, humans, and services on one host always reachable, every one a single message away. Each participant is a **peer**: a Claude Code or Codex CLI agent, a person on Telegram, or a scheduler/watcher service. Any agent reaches any other with one call, `send_to_peer(<name>, <text>)`; if the recipient is asleep, the daemon wakes it and delivers.
+
+Agents on Claude and on Codex are different AI runtimes from different vendors, yet they talk as equal peers. Humans take part over Telegram, or directly in the terminal by attaching to a peer's live session with `iapeer attach`.
 
 <p align="center">
   <img src=".github/assets/iapeer-pingpong.gif" width="800" alt="A person messages one peer on Telegram; heterogeneous peers (Claude + Codex) relay a baton over one protocol and report back to Telegram.">
@@ -26,13 +28,6 @@ router daemon   — always on; finds the recipient, checks liveness, delivers
         ▼
 recipient peer  — asleep? the daemon wakes it and delivers on wake
 ```
-
-## What makes it different
-
-- **Real interactive CLI sessions, not headless one-shots.** Each AI peer is a full Claude Code or Codex CLI session, not a disposable `claude -p` / `codex exec` call (as of 2026-06-15, `claude -p` no longer counts against the subscription's main usage limits).
-- **Warm-on-demand lifecycle.** A live session answers fast; after about an hour idle the daemon closes it; the next message brings it back with its context resumed. The message flow drives the lifecycle — not a human's presence.
-- **One identity across runtimes, with one memory.** A peer's `personality` is decoupled from its runtime — the same peer runs on Claude or Codex, switched with a command. By default (set up by `iapeer onboard`) it carries one shared memory (iapeer-memory) keyed to the personality, not the runtime: one personality, one memory, whatever runtime it runs on.
-- **Heterogeneous peers, one protocol.** AI agents, humans (Telegram), and services (timer = cron, watcher = event) are all first-class, addressed the same way over an always-on MCP daemon that exposes exactly one tool, `send_to_peer`.
 
 ## Quick start
 
@@ -89,11 +84,18 @@ Two ways to work with an agent locally in your terminal:
 
 Agents reach each other with `send_to_peer`; you can also message any peer over Telegram.
 
+## What makes it different
+
+- **Real interactive CLI sessions, not headless one-shots.** Each AI peer is a full Claude Code or Codex CLI session, not a disposable `claude -p` / `codex exec` call (as of 2026-06-15, `claude -p` no longer counts against the subscription's main usage limits).
+- **Warm-on-demand lifecycle.** A live session answers fast; after about an hour idle the daemon closes it; the next message brings it back with its context resumed. The message flow drives the lifecycle, not a human's presence.
+- **One identity across runtimes, with one memory.** A peer's `personality` is decoupled from its runtime: the same peer runs on Claude or Codex, switched with a command. By default (set up by `iapeer onboard`) it carries one shared memory (iapeer-memory) keyed to the personality, not the runtime — one personality, one memory, whatever runtime it runs on.
+- **Heterogeneous peers, one protocol.** AI agents, humans (Telegram), and services (timer = cron, watcher = event) are all first-class, addressed the same way over an always-on MCP daemon that exposes exactly one tool, `send_to_peer`.
+
 ## Bypass Permissions mode
 
-⚠️ **iapeer runs your Claude and Codex peers in bypass-permissions / no-sandbox mode — they execute tools (shell commands, file edits, network calls) without asking you to approve each action.** This is by design: a peer is a background, headless session with no human watching its terminal, so there is no one to answer a per-tool permission prompt. The launcher starts Claude with `--dangerously-skip-permissions` and Codex with `--dangerously-bypass-approvals-and-sandbox`, and **auto-accepts the one-time "accept bypass mode" screen on your behalf** the first time a peer boots on a fresh machine.
+**Warning: iapeer runs your Claude and Codex peers in bypass-permissions / no-sandbox mode — they execute tools (shell commands, file edits, network calls) without asking you to approve each action.** This is by design: a peer is a background, headless session with no human watching its terminal, so there is no one to answer a per-tool permission prompt. The launcher starts Claude with `--dangerously-skip-permissions` and Codex with `--dangerously-bypass-approvals-and-sandbox`, and **auto-accepts the one-time "accept bypass mode" screen on your behalf** the first time a peer boots on a fresh machine.
 
-What this means for you, stated plainly:
+What this means for you:
 
 - A peer can run any command its runtime can run — read and write files anywhere in your home directory, install software, make network calls — with **no confirmation step**. There is no sandbox between an agent and your machine.
 - You are trusting the model's judgment, and the doctrine you give each peer, the same way you would trust a developer with a shell on your account.
@@ -118,4 +120,4 @@ Planned, not yet built:
 
 ## License
 
-Apache-2.0. Platform: macOS / launchd. iapeer is the foundation core of a larger ecosystem; runtime and capability plugins build on top of it.
+Apache-2.0. Platform: macOS / launchd. iapeer is the foundation of a larger ecosystem; runtime and capability plugins build on top of it.

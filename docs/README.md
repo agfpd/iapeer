@@ -2,7 +2,7 @@
 
 [Русский](ru/README.md) · **English**
 
-iapeer is the core of a multi-agent system on one host. It maintains a registry of participants, a single router daemon for messaging between them, and a set of commands to manage participants: create, start, sleep, restart, connect to external channels.
+iapeer is the foundation of a multi-agent system on one host. It maintains a registry of participants, a single router daemon for messaging between them, and a set of commands to manage participants: create, start, sleep, restart, connect to external channels.
 
 A participant in the system is called a **peer**. A peer can be an AI agent (Claude, Codex), a human (over Telegram), or a service process (a scheduler, a watcher). iapeer doesn't distinguish them by nature at the transport level — they're all addressed the same way and exchange messages over one protocol.
 
@@ -81,7 +81,7 @@ The sections are layered: from "install and use" to "understand the architecture
 
 Built and working: the single router daemon, the messaging protocol (IAP), the peer registry, identity and its ABI, the lifecycle (wake, sleep, restart, supervision), runtime adapters for Claude, Codex, Telegram, and notifier, host install and onboarding, Telegram connection, the memory slot, and capability plugins.
 
-Planned on top of the core: a package-compatibility graph, a whole-team health doctor, and an interactive coordination interface. Until those exist, coordination operations live in the `iapeer` CLI.
+Planned on top of the foundation: a package-compatibility graph, a whole-team health doctor, and an interactive coordination interface. Until those exist, coordination operations live in the `iapeer` CLI.
 
 ## Roadmap
 
