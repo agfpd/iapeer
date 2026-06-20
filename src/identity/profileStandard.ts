@@ -183,8 +183,10 @@ export function migrateProfileRuntimeField(cwd: string): boolean {
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
   const obj = raw as Record<string, unknown>
-  const inShape =
-    isRuntime(obj.default_runtime) && (obj.runtime === undefined || obj.runtime === obj.default_runtime)
+  // Phase-3: in-shape = default_runtime present AND NO legacy `runtime` field at all. An in-sync mirror
+  // (runtime === default_runtime) is NO LONGER in shape — it must be stripped (writePeerProfileAtomic
+  // drops it), so `verify --fix` cleans every profile still carrying the mirror.
+  const inShape = isRuntime(obj.default_runtime) && obj.runtime === undefined
   if (inShape) return false
   const profile = readPeerProfile(cwd)
   if (!profile) return false
