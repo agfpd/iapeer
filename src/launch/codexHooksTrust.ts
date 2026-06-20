@@ -50,9 +50,6 @@ import { dirname } from 'path'
 import { writeFileAtomic } from '../storage/index.ts'
 import { codexGlobalConfigPath } from './nativeMemory.ts'
 
-/** The codex-cli version the hash algorithm + key format were verified on. */
-export const TRUST_HOOKS_TESTED_CODEX_VERSION = '0.138.0'
-
 /** hooks.json event names → the snake_case labels codex keys state with
  *  (upstream `hook_event_key_label`). */
 const EVENT_LABELS: Record<string, string> = {

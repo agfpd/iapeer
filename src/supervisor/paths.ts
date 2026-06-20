@@ -1,7 +1,7 @@
 // Supervisor session paths — under a configurable run dir (NOT hardcoded). Prod resolves it to
 // ~/.iapeer/state/supervisor via the storage layer; tests pass a temp dir, so the daemon's
 // socket/pid files never touch a real location.
-import { renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { renameSync, writeFileSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pluginStateDir } from '../storage/index.ts'
@@ -56,13 +56,4 @@ export function readGeometry(runDir: string, session: string): { cols: number; r
     /* absent / malformed → caller falls back to HOST */
   }
   return null
-}
-
-/** Remove the geometry sidecar (shutdown cleanup); best-effort. */
-export function clearGeometry(runDir: string, session: string): void {
-  try {
-    unlinkSync(geometryPath(runDir, session))
-  } catch {
-    /* */
-  }
 }

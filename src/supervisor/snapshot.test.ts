@@ -4,8 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Terminal } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
-import { readGeometry, writeGeometry, clearGeometry, geometryPath } from './paths.ts'
-import { existsSync } from 'node:fs'
+import { readGeometry, writeGeometry, geometryPath } from './paths.ts'
 
 // The attach catch-up is `SerializeAddon.serialize()` of the resolved model (the emulate-then-rerender
 // architecture of tmux/zellij). Two things must hold and are pinned here: (1) serialize carries SGR COLOUR
@@ -59,9 +58,6 @@ describe('geometry sidecar — follows the detached session pty size', () => {
       expect(readGeometry(dir, 'sess')).toEqual({ cols: 90, rows: 30 })
       writeGeometry(dir, 'sess', 200, 50) // a later real resize updates it
       expect(readGeometry(dir, 'sess')).toEqual({ cols: 200, rows: 50 })
-      clearGeometry(dir, 'sess')
-      expect(existsSync(geometryPath(dir, 'sess'))).toBe(false)
-      expect(readGeometry(dir, 'sess')).toBeNull()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
