@@ -93,3 +93,39 @@ d('supervisor pane-log ≡ tmux pipe-pane', () => {
     }
   })
 })
+
+// Defect 2 — a pane-log unlinked out from under a LIVE session must self-heal (the supervisor reopens
+// it on the next output), else every occupancy reader of <identity>.log goes blind: composer-busy
+// delivery detection AND telegram-runtime's mtime typing/activity indicator. No tmux needed → runs in CI.
+const dp = bunPty ? describe : describe.skip
+dp('supervisor pane-log self-heal (Defect 2)', () => {
+  test('a pane-log unlinked mid-session is recreated on the next output', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'panelog-heal-'))
+    const logSup = join(dir, 'sup.log')
+    const runDir = join(dir, 'run')
+    // emit AAA once, then CCC repeatedly so a write reliably lands after the 1 s heal throttle window
+    const child = ['sh', '-c', `printf 'AAA\\n'; sleep 0.4; i=0; while [ $i -lt 12 ]; do printf 'CCC\\n'; sleep 0.5; i=$((i+1)); done`]
+    try {
+      startSupervisorDaemon({ session: 'heal', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
+      for (let i = 0; i < 20 && !readBuf(logSup).includes(Buffer.from('AAA')); i++) await sleep(100)
+      expect(readBuf(logSup).includes(Buffer.from('AAA'))).toBe(true)
+      // unlink the live pane-log out from under the supervisor (the observed Defect-2 scenario)
+      rmSync(logSup, { force: true })
+      expect(existsSync(logSup)).toBe(false)
+      // subsequent child output must self-heal: path recreated + new bytes land
+      for (let i = 0; i < 60 && !readBuf(logSup).includes(Buffer.from('CCC')); i++) await sleep(100)
+      expect(existsSync(logSup)).toBe(true)
+      expect(readBuf(logSup).includes(Buffer.from('CCC'))).toBe(true)
+      // the recreated file is a fresh inode — it holds only post-reopen bytes, not the pre-deletion AAA
+      expect(readBuf(logSup).includes(Buffer.from('AAA'))).toBe(false)
+    } finally {
+      try {
+        killSession(runDir, 'heal')
+      } catch {
+        /* */
+      }
+      await sleep(300)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

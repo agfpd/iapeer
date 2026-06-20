@@ -12,7 +12,7 @@
 // @xterm/headless bundles under `bun build --compile` (pure JS; the Bun-native pty has no native addon).
 import { Terminal } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   BackpressureWriter,
@@ -157,14 +157,43 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // corrupts multibyte glyphs like ❯/›; the canonical latin1/Buffer grabli). Parent dir 0700, matching
   // launch's mkdir before pipe-pane. Unset paneLogPath → no log (throwaway/tick).
   let paneLogFd = -1
-  if (opts.paneLogPath) {
+  let paneLogIno = -1 // inode the fd points at — to detect an out-from-under-us unlink/replace
+  let paneLogCheckedMs = 0
+  const PANELOG_HEAL_MS = 1000 // throttle the path-existence re-check to ≤1/sec regardless of output volume
+  const openPaneLog = (): void => {
+    if (!opts.paneLogPath) return
     try {
       mkdirSync(dirname(opts.paneLogPath), { recursive: true, mode: 0o700 })
+      if (paneLogFd >= 0) try { closeSync(paneLogFd) } catch { /* */ }
       paneLogFd = openSync(opts.paneLogPath, 'a')
+      paneLogIno = fstatSync(paneLogFd).ino
     } catch {
       paneLogFd = -1 // best-effort: a log open hiccup never blocks serving the session
+      paneLogIno = -1
     }
   }
+  // SELF-HEAL (Defect 2): the pane-log path can be unlinked out from under a live session (observed on
+  // the fleet: long-lived sessions' lifecycle pane-logs vanished while the supervisor ran). The fd then
+  // keeps writing to a now-unlinked inode — the path stays gone and every occupancy reader of
+  // `<logDir>/<identity>.log` goes blind: composer-busy delivery detection AND telegram-runtime's
+  // mtime-based typing/activity indicator (shared file). Throttled re-check before a write: if the path
+  // vanished or now maps to a DIFFERENT inode than the fd, reopen 'a'. capPaneLogs truncates IN PLACE
+  // (same inode) so a normal cap never triggers a spurious reopen. Tied to output (no idle wakeups) —
+  // exactly when the log matters.
+  const healPaneLog = (): void => {
+    if (!opts.paneLogPath || paneLogFd < 0) return
+    const now = Date.now()
+    if (now - paneLogCheckedMs < PANELOG_HEAL_MS) return
+    paneLogCheckedMs = now
+    let ino = -1
+    try {
+      ino = statSync(opts.paneLogPath).ino
+    } catch {
+      ino = -1 // path gone
+    }
+    if (ino !== paneLogIno) openPaneLog()
+  }
+  openPaneLog()
 
   const clients = new Set<unknown>()
   const writers = new WeakMap<object, BackpressureWriter>()
@@ -234,12 +263,14 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         const buf = Buffer.isBuffer(d) ? d : typeof d === 'string' ? Buffer.from(d, 'utf8') : Buffer.from(d)
         // PANE-LOG: the RAW child bytes, exactly as pipe-pane writes them (before any query-stripping
         // for clients) — written as a Buffer, never a string. The `s` below is for query DETECTION only.
-        if (paneLogFd >= 0)
+        if (paneLogFd >= 0) {
+          healPaneLog() // reopen if the path was unlinked/replaced out from under us (Defect 2)
           try {
             writeSync(paneLogFd, buf)
           } catch {
             /* best-effort */
           }
+        }
         const s = buf.toString('latin1')
         writeSeq++ // a new write arrived (lets the attach drain detect bytes that land mid-await)
         writeChain = new Promise<void>(resolve => xterm.write(buf, () => resolve())) // authoritative model (+ parse barrier)
