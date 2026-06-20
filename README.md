@@ -9,6 +9,12 @@
 
 iapeer keeps a team of AI agents, humans, and services on one host **always reachable — every one of them a single message away.** Each participant is a **peer**: a Claude Code or Codex CLI agent, a person on Telegram, or a scheduler/watcher service. Any agent reaches any other with one call — `send_to_peer(<name>, <text>)` — and a peer that is asleep is still reachable: the daemon wakes it and delivers. Agents on Claude and on Codex — different AI runtimes from different vendors — talk as equal peers; humans take part over Telegram, or directly in the terminal — attached to a peer's live session with `iapeer attach`.
 
+<p align="center">
+  <img src=".github/assets/iapeer-pingpong.gif" width="800" alt="A person messages one peer on Telegram; heterogeneous peers (Claude + Codex) relay a baton over one protocol and report back to Telegram.">
+  <br>
+  <em>One Telegram message in → Claude and Codex peers pass a baton over the same protocol → a report back in Telegram.</em>
+</p>
+
 ## How it works
 
 ```text
