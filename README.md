@@ -20,18 +20,18 @@ Agents on Claude and on Codex are different AI runtimes from different vendors, 
 ## How it works
 
 ```text
-send_to_peer(name, text)     ← from any peer
+send_to_peer(name, text)   ← from any peer
         │
         ▼
-router daemon   — always on; finds the recipient, checks liveness, delivers
+router daemon              — always on; finds the recipient, checks liveness, delivers
         │
         ▼
-recipient peer  — asleep? the daemon wakes it and delivers on wake
+recipient peer             — asleep? the daemon wakes it and delivers on wake
 ```
 
 ## What makes it different
 
-- **Real interactive CLI sessions, not headless one-shots.** Each AI peer is a full Claude Code or Codex CLI session, not a disposable `claude -p` / `codex exec` call (as of 2026-06-15, `claude -p` no longer counts against the subscription's main usage limits).
+- **Real interactive CLI sessions, not headless one-shots.** Each AI peer is a full Claude Code or Codex CLI session, not a disposable `claude -p` / `codex exec` call.
 - **Warm-on-demand lifecycle.** A live session answers fast; after about an hour idle the daemon closes it; the next message brings it back with its context resumed. The message flow drives the lifecycle, not a human's presence.
 - **One identity across runtimes, with one memory.** A peer's `personality` is decoupled from its runtime: the same peer runs on Claude or Codex, switched with a command. By default (set up by `iapeer onboard`) it carries one shared memory (iapeer-memory) keyed to the personality, not the runtime — one personality, one memory, whatever runtime it runs on.
 - **Heterogeneous peers, one protocol.** AI agents, humans (Telegram), and services (timer = cron, watcher = event) are all first-class, addressed the same way over an always-on MCP daemon that exposes exactly one tool, `send_to_peer`.
