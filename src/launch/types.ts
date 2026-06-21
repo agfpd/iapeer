@@ -134,6 +134,8 @@ export interface LaunchAdapterConfig {
   telegramBin?: string
   /** notifier-runtime launch binary (router runtime, infra/always-on). */
   notifierBin?: string
+  /** voicetalk-runtime launch binary (router runtime, infra/always-on — the owner's voice channel). */
+  voicetalkBin?: string
 }
 
 export interface LaunchSpec {

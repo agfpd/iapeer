@@ -23,6 +23,7 @@ import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
 import { notifierAdapter } from './adapters/notifier.ts'
+import { voicetalkAdapter } from './adapters/voicetalk.ts'
 import type {
   LaunchConfig,
   LaunchFn,
@@ -88,6 +89,7 @@ export function getAdapter(runtime: Runtime): RuntimeAdapter {
   if (runtime === 'codex') return codexAdapter
   if (runtime === 'telegram') return telegramAdapter
   if (runtime === 'notifier') return notifierAdapter
+  if (runtime === 'voicetalk') return voicetalkAdapter
   throw new Error(`no launch adapter for runtime "${runtime}"`)
 }
 

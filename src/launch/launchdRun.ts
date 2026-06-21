@@ -96,6 +96,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
     // (installAlwaysOnPlist) uses — so the pin and the read can never drift.
     telegramBin: env[INFRA_RUNTIME_BIN_ENV.telegram],
     notifierBin: env[INFRA_RUNTIME_BIN_ENV.notifier],
+    voicetalkBin: env[INFRA_RUNTIME_BIN_ENV.voicetalk],
     sockDir,
     bootDeadlineSecs: 30,
     readyGateSecs: 30,

@@ -4,6 +4,8 @@ import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
 import { notifierAdapter } from './adapters/notifier.ts'
+import { voicetalkAdapter } from './adapters/voicetalk.ts'
+import { defaultIntelligenceForRuntime, INFRA_RUNTIME_BIN_ENV, INFRA_RUNTIME_DEFAULT_BIN, isInfraRuntime } from '../core/constants.ts'
 import type { LaunchAdapterConfig, LaunchConfig, LaunchSpec } from './types.ts'
 
 const cfg: LaunchAdapterConfig = { claudeBin: '/bin/claude', codexBin: 'codex' }
@@ -34,6 +36,7 @@ describe('getAdapter', () => {
     expect(getAdapter('codex')).toBe(codexAdapter)
     expect(getAdapter('telegram')).toBe(telegramAdapter)
     expect(getAdapter('notifier')).toBe(notifierAdapter)
+    expect(getAdapter('voicetalk')).toBe(voicetalkAdapter)
   })
   test('codex is tui+doctrine, telegram is router+no-doctrine', () => {
     expect(codexAdapter.kind).toBe('tui')
@@ -122,6 +125,37 @@ describe('telegramAdapter (router — no TUI surface)', () => {
     expect(telegramAdapter.bootDialogKeys('anything')).toBeNull()
     expect(telegramAdapter.isInputReady('anything')).toBe(true)
     expect(telegramAdapter.newestActivityMtime('/w')).toBeNull()
+  })
+})
+
+describe('voicetalkAdapter (router — presence-runtime, human voice channel)', () => {
+  test('kind:router, no doctrine, requires natural', () => {
+    expect(voicetalkAdapter.runtime).toBe('voicetalk')
+    expect(voicetalkAdapter.kind).toBe('router')
+    expect(voicetalkAdapter.usesDoctrine).toBe(false)
+    expect(voicetalkAdapter.requiresIntelligence).toBe('natural') // a human channel — refuse non-natural
+  })
+  test('buildArgv = voicetalk-runtime run [+extra], default + pinned bin', () => {
+    expect(voicetalkAdapter.buildArgv(spec({ runtime: 'voicetalk' }), cfg)).toEqual(['voicetalk-runtime', 'run'])
+    expect(
+      voicetalkAdapter.buildArgv(spec({ runtime: 'voicetalk', extraArgs: ['--foo'] }), { ...cfg, voicetalkBin: '/v/bin' }),
+    ).toEqual(['/v/bin', 'run', '--foo'])
+  })
+  test('router predicates are trivial', () => {
+    expect(voicetalkAdapter.bootDialogKeys('anything')).toBeNull()
+    expect(voicetalkAdapter.isInputReady('anything')).toBe(true)
+    expect(voicetalkAdapter.newestActivityMtime('/w')).toBeNull()
+    expect(voicetalkAdapter.resolveResume('/w').ok).toBe(true)
+    expect(voicetalkAdapter.executeControl({ kind: 'interrupt' } as never)).toBeNull()
+  })
+})
+
+describe('voicetalk runtime classification (constants)', () => {
+  test('voicetalk is infra (launchd always-on) + natural + has bin mappings', () => {
+    expect(isInfraRuntime('voicetalk')).toBe(true)
+    expect(defaultIntelligenceForRuntime('voicetalk')).toBe('natural')
+    expect(INFRA_RUNTIME_DEFAULT_BIN.voicetalk).toBe('voicetalk-runtime')
+    expect(INFRA_RUNTIME_BIN_ENV.voicetalk).toBe('VOICETALK_RUNTIME_BIN')
   })
 })
 

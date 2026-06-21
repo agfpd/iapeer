@@ -56,7 +56,7 @@ export function normalizeIntelligenceValue(value: unknown): Intelligence | undef
   return LEGACY_INTELLIGENCE[value]
 }
 
-const NATURAL_RUNTIMES = new Set(['telegram', 'discord', 'matrix', 'email', 'web'])
+const NATURAL_RUNTIMES = new Set(['telegram', 'discord', 'matrix', 'email', 'web', 'voicetalk'])
 const ABSENT_RUNTIMES = new Set(['notifier', 'webhook', 'api', 'cron'])
 
 export function defaultIntelligenceForRuntime(runtime: string): Intelligence {
@@ -67,12 +67,12 @@ export function defaultIntelligenceForRuntime(runtime: string): Intelligence {
 
 // Infra runtimes are ALWAYS-ON (held live by launchd KeepAlive), as opposed to the
 // warm-on-demand agentic runtimes (claude/codex, woken by the daemon). Liveness is
-// a property of the RUNTIME, not the personality (zone Идентичность). Both infra
-// runtimes are routers with a tmux endpoint: telegram receives inbound messages,
-// notifier receives send_to_peer(timer|watcher, …) registration/live-reload — so
-// each needs a live tmux pane for the daemon's deliverViaTmux to paste into. This
-// set gates always-on launchd plist generation (src/launch/launchd.ts).
-const INFRA_RUNTIMES = new Set(['notifier', 'telegram'])
+// a property of the RUNTIME, not the personality (zone Идентичность). Infra runtimes
+// are routers hosted by the pty supervisor: telegram/voicetalk carry a human channel
+// (inbound messages / voice), notifier receives send_to_peer(timer|watcher, …)
+// registration/live-reload — outbound to each is deliverHosted → the child's stdin.
+// This set gates always-on launchd plist generation (src/launch/launchd.ts).
+const INFRA_RUNTIMES = new Set(['notifier', 'telegram', 'voicetalk'])
 
 export function isInfraRuntime(runtime: string): boolean {
   return INFRA_RUNTIMES.has(runtime)
@@ -89,6 +89,7 @@ export function isInfraRuntime(runtime: string): boolean {
 export const INFRA_RUNTIME_BIN_ENV: Readonly<Record<string, string>> = {
   notifier: 'NOTIFIER_RUNTIME_BIN',
   telegram: 'TELEGRAM_RUNTIME_BIN',
+  voicetalk: 'VOICETALK_RUNTIME_BIN',
 }
 
 /** The PATH-resolvable default launcher name per infra runtime (when no abs path
@@ -97,6 +98,7 @@ export const INFRA_RUNTIME_BIN_ENV: Readonly<Record<string, string>> = {
 export const INFRA_RUNTIME_DEFAULT_BIN: Readonly<Record<string, string>> = {
   notifier: 'notifier-runtime',
   telegram: 'telegram-runtime',
+  voicetalk: 'voicetalk-runtime',
 }
 
 // codex MCP token-free import (contract Установка §codex MCP). codex REFUSES to import
