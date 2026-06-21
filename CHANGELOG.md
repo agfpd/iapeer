@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-06-21
+
+### Fixed
+
+- Ephemeral idle-reap no longer kills a **working** session mid-turn. An armed ephemeral
+  worker (one that has sent its reply) was reaped after 20s of *transcript* silence, but the
+  transcript goes quiet during a long model generation — so a still-working worker was killed
+  mid-turn. The reap now folds in the pane-log (TUI render-stream) mtime, so "quiet" means the
+  turn truly ended: a working session is never reaped, while an idle one still reaps in ~20s
+  (keeping the ephemeral serial conveyor draining promptly).
+
 ## [0.4.14] - 2026-06-21
 
 ### Fixed
@@ -222,7 +233,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.14...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.15...HEAD
+[0.4.15]: https://github.com/agfpd/iapeer/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/agfpd/iapeer/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/agfpd/iapeer/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/agfpd/iapeer/compare/v0.4.11...v0.4.12
