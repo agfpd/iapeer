@@ -12,7 +12,7 @@
 // before any wake or reap. wakeOrSpawn refuses a launchd peer; superviseTick and
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -74,20 +74,21 @@ export interface LifecycleConfig {
   crashLoopWindowSecs: number
   /** wake_policy:ephemeral M2 — the quiet window (seconds of activity-proxy silence)
    *  after which an ARMED ephemeral session (it has sent its outbound reply) is
-   *  reaped. Long enough for the post-reply housekeeping writes (operative notes)
-   *  to keep resetting it; far below idleSecs. ASSUMPTION (by design): the
-   *  transcript mtime is a LIVENESS proxy — "no longer writing" — not a semantic
-   *  "done" signal. */
+   *  reaped. Kept SHORT so the M3 serial conveyor drains the peer's next queued task
+   *  promptly once its session is truly idle. "Quiet" here is BOTH the transcript proxy
+   *  AND the pane-log (TUI render-stream) silent — the pane-log advances ~1s while the
+   *  TUI renders a turn (generation OR a tool), so a still-working session is NEVER
+   *  reaped mid-turn even though the transcript is momentarily quiet (the live incident
+   *  this fixes: an armed worker generating its next step >20s was reaped at age=29s). */
   ephemeralQuietSecs: number
   /** wake_policy:ephemeral — the UNARMED idle bound (seconds): an ephemeral session
    *  that never armed (finished silently / lost its arm to a daemon-restart window)
-   *  is reaped after this much activity-proxy silence. Live case: a worker that
-   *  ended silently without its final outbound stalled its M3 FIFO for the FULL
-   *  generic idleSecs (1 h) — with serial drain that blocks the whole conveyor per
-   *  silent worker. Bound chosen ≫ the legitimate silent-tool case
-   *  (sleep-180) and ≪ idleSecs. DOCUMENTED RISK: an ephemeral worker whose tool
-   *  stays silent longer than this MID-TASK is reaped and its consumed queue item
-   *  is lost — ephemeral workers must emit activity (or their reply) within it. */
+   *  is reaped after this much TRUE-idle silence (transcript AND pane-log both quiet).
+   *  Live case: a worker that ended silently without its final outbound stalled its M3
+   *  FIFO for the FULL generic idleSecs (1 h) — with serial drain that blocks the whole
+   *  conveyor per silent worker. Bound chosen ≫ a brief no-output gap and ≪ idleSecs.
+   *  A still-WORKING silent-tool worker keeps the pane-log fresh via the TUI render, so it
+   *  is no longer reaped mid-task — only a genuinely idle/wedged session crosses this. */
   ephemeralUnarmedIdleSecs: number
 }
 
@@ -340,6 +341,21 @@ export function clearEphemeralArmed(cfg: LifecycleConfig, identity: string): voi
     rmSync(ephemeralArmedPath(cfg, identity), { force: true })
   } catch {
     /* already gone */
+  }
+}
+
+/** mtime (ms) of a hosted session's pane-log (`<logDir>/<identity>.log`) — the RAW TUI
+ *  render byte-stream the supervisor appends for the session's whole life. It advances
+ *  ~1s while the TUI is rendering a turn (the "esc to interrupt" elapsed counter ticks
+ *  during BOTH model generation AND a tool run) and goes quiet at the prompt. So it is
+ *  the truest active-turn liveness signal — the SAME mtime telegram-runtime reads for its
+ *  typing/activity indicator — and unlike the transcript proxy it does NOT go quiet during
+ *  a long model generation (no JSONL write until the message completes). null if absent. */
+function paneLogMtimeMs(cfg: LifecycleConfig, identity: string): number | null {
+  try {
+    return statSync(join(cfg.logDir, `${identity}.log`)).mtimeMs
+  } catch {
+    return null
   }
 }
 
@@ -1147,6 +1163,9 @@ export interface SuperviseDeps {
   /** Liveness seam (default: the real `sessionAlive` = pty-host OR tmux-fallback). Tests inject a
    *  fixed verdict so the idle path is exercised hermetically — no live tmux/pty session needed. */
   sessionAlive?: (sock: string, identity: string) => boolean
+  /** Pane-log mtime seam (default: the real pane-log file mtime). Tests inject a controlled value to
+   *  exercise the ephemeral active-turn vs idle distinction without a real pane-log on disk. */
+  paneLogMtime?: (identity: string) => number | null
 }
 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
@@ -1154,6 +1173,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const nowMs = deps.nowMs ?? Date.now()
   const activityMtime = deps.newestActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).newestActivityMtime(c))
   const isAlive = deps.sessionAlive ?? sessionAlive
+  const paneLogMt = deps.paneLogMtime ?? ((identity: string) => paneLogMtimeMs(cfg, identity))
   const verbose = superviseLogVerbose(env)
   // Pane-log volume cap (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
@@ -1241,17 +1261,31 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
     } catch {
       /* no adapter for this runtime yet → wokeAt baseline */
     }
+    const ephemeral = isEphemeralPeer(s.cwd)
+    if (ephemeral) {
+      // FOLD IN the pane-log (TUI render-stream) mtime for ephemeral peers. The transcript
+      // proxy goes QUIET during a long model generation (no JSONL write until the message
+      // completes), so the short ephemeral windows below mis-read mid-generation as "done"
+      // and reap the worker MID-TURN (live incident 2026-06-20: Index reaped age=29s while
+      // generating the next step after a tool_result). The pane-log advances ~1s while the
+      // TUI renders a turn (model generation OR a tool run — the "esc to interrupt" elapsed
+      // counter ticks) and goes quiet only at the prompt, so it is the truer active-turn
+      // signal. max() means "quiet" iff BOTH are silent — it can only DELAY a reap, never
+      // cause an earlier one, so the pipeline serial-drain (idle → quiet → reaped) is
+      // preserved while a working session is never killed mid-turn.
+      const plMt = paneLogMt(s.identity)
+      if (plMt !== null) mt = Math.max(mt, plMt)
+    }
     const ageSecs = Math.floor((nowMs - mt) / 1000)
     // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
     // daemon routed its outbound reply) is reaped after a QUIET window, checked
-    // BEFORE the idle branch (quiet ≪ idle). Quiet = the activity proxy stayed
-    // silent for ephemeralQuietSecs — post-reply housekeeping (operative-note
-    // writes) keeps resetting it, so the worker finishes its bookkeeping first.
-    // NOT armed (still mid-task, e.g. a long silent tool run) → the ordinary
-    // idle bound below is its only reaper. Deliberate, policy-driven death:
-    // NO .idle-reaped (an ephemeral peer never resumes) and NO recordDeath
-    // (the crash-loop ring counts faults, not policy reaps).
-    if (isEphemeralPeer(s.cwd) && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
+    // BEFORE the idle branch (quiet ≪ idle). Quiet = transcript AND pane-log both
+    // silent for ephemeralQuietSecs — a still-rendering turn keeps the pane-log fresh,
+    // so the worker finishes its turn first; post-reply housekeeping also resets it.
+    // NOT armed (still mid-task) → the ordinary idle bound below is its only reaper.
+    // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
+    // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).
+    if (ephemeral && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
       killSession(sock, s.identity)
       clearEphemeralArmed(cfg, s.identity)
       removeSessionState(cfg, s.identity)
@@ -1274,8 +1308,11 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
     // silent-finish path is `iapeer self-done` (arm without waking anyone —
     // the invariant «нет пустых пробуждений» stays intact); this branch only
     // bounds the damage when a worker does neither. Policy reap: NO .idle-reaped
-    // (ephemeral never resumes), NO recordDeath (the ring counts faults).
-    if (isEphemeralPeer(s.cwd) && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
+    // (ephemeral never resumes), NO recordDeath (the ring counts faults). The pane-log
+    // fold-in above also covers this branch: a STILL-WORKING unarmed worker (a silent
+    // tool, no reply yet) keeps the pane-log fresh via the TUI render, so it is no longer
+    // reaped mid-task — only a genuinely idle/wedged unarmed session crosses this bound.
+    if (ephemeral && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
       killSession(sock, s.identity)
       clearEphemeralArmed(cfg, s.identity)
       removeSessionState(cfg, s.identity)

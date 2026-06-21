@@ -758,6 +758,100 @@ describe('ephemeral-armed marker + config', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ephemeral armed quiet-reap — pane-log render-liveness (the mid-turn-kill fix)
+//  The transcript proxy goes QUIET during a long model generation (no JSONL write
+//  until the message completes), so the 20s armed-quiet window used to reap a STILL-
+//  WORKING armed session mid-turn (live incident: Index reaped age=29s while
+//  generating after a tool_result). Folding the pane-log (TUI render-stream) mtime
+//  into the activity proxy makes "quiet" = transcript AND pane-log both silent = the
+//  turn truly ended — a working session is never killed, an idle one still reaps fast.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
+  function ephemeralLiveEnv(personality: string): {
+    env: NodeJS.ProcessEnv
+    cfg: LifecycleConfig
+    root: string
+    laDir: string
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-eph-pl-root-'))
+    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-eph-pl-la-')) // empty → not launchd-managed
+    const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_SOCK_DIR: join(root, 'socks') }
+    const cfg = loadLifecycleConfig(env)
+    mkdirSync(cfg.stateDir, { recursive: true })
+    const cwd = join(root, 'peers', personality)
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality, default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial', wake_policy: 'ephemeral' }),
+    )
+    // a LIVE session woken 10 min ago (so the wokeAt floor never masks the quiet age)
+    writeFileSync(
+      join(cfg.stateDir, `claude-${personality}.session`),
+      JSON.stringify({ identity: `claude-${personality}`, runtime: 'claude', personality, cwd, wokeAt: Date.now() - 600_000 }),
+    )
+    setEphemeralArmed(cfg, `claude-${personality}`) // it sent its outbound reply
+    return { env, cfg, root, laDir }
+  }
+
+  test('armed + transcript quiet but pane-log FRESH (rendering a turn) → NOT reaped mid-turn', () => {
+    const { env, cfg, root, laDir } = ephemeralLiveEnv('w')
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 120_000, // transcript silent 2 min (a long generation)
+        paneLogMtime: () => now - 1_000, // pane-log fresh — the TUI is still rendering the turn
+      })
+      expect(out.find(x => x.identity === 'claude-w')?.action).toBe('alive') // NOT reaped
+      expect(hasEphemeralArmed(cfg, 'claude-w')).toBe(true) // session lives on, still armed
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + transcript AND pane-log both quiet (truly idle at the prompt) → reaped (conveyor drains)', () => {
+    const { env, cfg, root, laDir } = ephemeralLiveEnv('i')
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 120_000,
+        paneLogMtime: () => now - 120_000, // pane-log also quiet → the turn ended
+      })
+      expect(out.find(x => x.identity === 'claude-i')?.action).toBe('reaped-ephemeral')
+      expect(hasEphemeralArmed(cfg, 'claude-i')).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a MISSING pane-log (no file) falls back to the transcript proxy → idle still reaps', () => {
+    const { env, cfg, root, laDir } = ephemeralLiveEnv('m')
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 120_000,
+        paneLogMtime: () => null, // no pane-log → fold-in is a no-op, transcript governs
+      })
+      expect(out.find(x => x.identity === 'claude-m')?.action).toBe('reaped-ephemeral')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // classifyGoneSession — the death-class tag for reaped-gone (server-dead vs
 // session-gone). Live case: iapeer-memory 10.06 — the whole tmux server died
 // (SIGKILL class), exits.log stayed empty; lifecycle.log must carry the class.
