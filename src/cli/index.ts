@@ -11,7 +11,7 @@
 // sentinel-marked always-on plist) are stop/start-able.
 
 import { spawnSync } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, renameSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import {
@@ -54,6 +54,7 @@ import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the su
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
 import { cycleDaemon, isFoundationOwnedPlist, launchctlBootstrap, launchdLabel, launchdPlistPath } from '../launch/launchd.ts'
 import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
+import { claudeProjectsRoot, transcriptSlug } from '../launch/adapters/claude.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import {
   isConformant,
@@ -836,27 +837,37 @@ export async function removePeerCli(
 export interface RenameOutcome {
   oldPersonality: string
   newPersonality: string
-  action: 'renamed' | 'absent' | 'target-exists' | 'refused-live'
+  action: 'renamed' | 'absent' | 'target-exists' | 'target-cwd-exists' | 'refused-live'
   reason?: string
-  cwd?: string
+  oldCwd?: string
+  newCwd?: string
+  transcriptMoved?: boolean
   purgedState?: string[]
+  sideEffects?: string[]
 }
 
 /**
- * Rename a peer's personality through renamePeer (registry + per-cwd profile, atomic;
- * cwd KEPT — the transcript history keyed by slug=realpath(cwd) survives). Refuses a LIVE
- * peer unless --force: a running session carries the OLD identity in its env
- * (PEER_PERSONALITY, set at launch), so renaming under it desyncs the registry from the
- * live process — stop it first, it respawns under the new identity. Purges the OLD
- * identity-keyed lifecycle markers (remove-parity) so a future namesake can't inherit
- * them. Does NOT move memory: the operativka folder + author/index attribution are
- * personality-keyed (the memory provider re-keys them separately); native-memory is
- * cwd-keyed and rides the kept cwd unchanged.
+ * FULL folder rename of a peer (Arthur's invariant: personality == normalize(basename(cwd)),
+ * a self-healed mirror — so a rename MUST move the folder, or profile-standard self-heal
+ * reverts the personality back to the basename). Atomic core, best-effort side-effects:
+ *  1. mv the cwd folder oldCwd → dirname(oldCwd)/<new> (the per-cwd profile, .mcp.json,
+ *     native-memory, CLAUDE.md, .git all ride it).
+ *  2. mv the claude transcript slug dir (~/.claude/projects/<oldSlug> → <newSlug>) — keyed
+ *     by realpath(cwd), so this is how the claude history is NOT orphaned. (codex history
+ *     is keyed by the cwd recorded INSIDE each ~/.codex/sessions jsonl, not a path-dir, so
+ *     it does NOT carry — a documented limitation; codex starts fresh sessions at the new cwd.)
+ *  3. renamePeer(…, newCwd): atomic registry personality+cwd + per-cwd profile personality.
+ * On any failure in 1-3 the fs moves are rolled back (folder + transcript back). Then
+ * best-effort: codex re-trust the new cwd + clean the old, re-write the claude .mcp.json
+ * identity fallback, purge the old identity's lifecycle markers. Refuses a LIVE peer unless
+ * --force. Does NOT touch memory (operativka/author/index) — the provider re-keys that
+ * separately AFTER this rename; deliberately NO `remove`/unprovision (which would risk a
+ * memory purge). `claudeProjectsDir` is a test seam (default ~/.claude/projects).
  */
 export async function renamePeerCli(
   oldPersonality: string,
   newPersonality: string,
-  opts: CliEnvOptions & { force?: boolean } = {},
+  opts: CliEnvOptions & { force?: boolean; claudeProjectsDir?: string } = {},
 ): Promise<RenameOutcome> {
   const env = opts.env ?? process.env
   const index = readPeersIndex({ env })
@@ -864,6 +875,11 @@ export async function renamePeerCli(
   if (!peer) return { oldPersonality, newPersonality, action: 'absent' }
   if (findPeer(index, newPersonality)) {
     return { oldPersonality, newPersonality, action: 'target-exists', reason: `"${newPersonality}" already exists` }
+  }
+  const oldCwd = peer.cwd
+  const newCwd = join(dirname(oldCwd), newPersonality)
+  if (existsSync(newCwd)) {
+    return { oldPersonality, newPersonality, action: 'target-cwd-exists', reason: `${newCwd} already exists — move or remove it first` }
   }
   const cfg = loadLifecycleConfig(env)
   if (!opts.force) {
@@ -873,13 +889,57 @@ export async function renamePeerCli(
         oldPersonality,
         newPersonality,
         action: 'refused-live',
-        reason: `"${oldPersonality}" is LIVE on ${liveRt} — its running session carries the old identity in its env; stop it first (\`iapeer stop ${oldPersonality}\`) or pass --force`,
+        reason: `"${oldPersonality}" is LIVE on ${liveRt} — its session + folder must be quiescent for the move; stop it first (\`iapeer stop ${oldPersonality}\`) or pass --force`,
       }
     }
   }
-  await renamePeer(oldPersonality, newPersonality, { env })
+  // ── atomic core (1-3) with rollback ──────────────────────────────────────────
+  const projectsDir = opts.claudeProjectsDir ?? claudeProjectsRoot()
+  const oldSlug = transcriptSlug(oldCwd) // BEFORE the mv — realpath needs the live dir
+  const oldTx = join(projectsDir, oldSlug)
+  renameSync(oldCwd, newCwd) // 1. folder (atomic on one filesystem)
+  let transcriptMoved = false
+  let newTx: string | undefined
+  try {
+    const newSlug = transcriptSlug(newCwd) // AFTER the mv — realpath(newCwd) resolves
+    newTx = join(projectsDir, newSlug)
+    if (oldSlug !== newSlug && existsSync(oldTx) && !existsSync(newTx)) {
+      renameSync(oldTx, newTx) // 2. claude transcript slug dir
+      transcriptMoved = true
+    }
+    await renamePeer(oldPersonality, newPersonality, { env }, newCwd) // 3. atomic registry+profile
+  } catch (e) {
+    if (transcriptMoved && newTx) {
+      try { renameSync(newTx, oldTx) } catch { /* best-effort rollback */ }
+    }
+    try { renameSync(newCwd, oldCwd) } catch { /* best-effort rollback */ }
+    throw e
+  }
+  // ── best-effort side-effects (the core rename already committed) ──────────────
+  const sideEffects: string[] = []
+  if (peer.runtimes.includes('codex')) {
+    try {
+      const { preTrustCodexCwd, removeCodexCwdTrust } = await import('../launch/nativeMemory.ts')
+      preTrustCodexCwd(newCwd, env)
+      removeCodexCwdTrust(oldCwd, env)
+      const { removeCodexHooksTrustUnder } = await import('../launch/codexHooksTrust.ts')
+      removeCodexHooksTrustUnder(oldCwd, env)
+      sideEffects.push('codex-trust: re-trusted new cwd + cleaned old')
+    } catch (e) {
+      sideEffects.push(`codex-trust: failed (${e instanceof Error ? e.message : String(e)})`)
+    }
+  }
+  if (peer.runtimes.includes('claude')) {
+    try {
+      const { writeClaudeMcpConfig, resolveDaemonMcpUrl } = await import('../init/index.ts')
+      writeClaudeMcpConfig(newCwd, newPersonality, resolveDaemonMcpUrl({ env }))
+      sideEffects.push('claude .mcp.json: identity rewritten')
+    } catch (e) {
+      sideEffects.push(`claude .mcp.json: failed (${e instanceof Error ? e.message : String(e)})`)
+    }
+  }
   const purgedState = peer.runtimes.flatMap(rt => purgeIdentityState(cfg, buildProcessAddress(rt, oldPersonality)))
-  return { oldPersonality, newPersonality, action: 'renamed', cwd: peer.cwd, purgedState }
+  return { oldPersonality, newPersonality, action: 'renamed', oldCwd, newCwd, transcriptMoved, purgedState, sideEffects }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1054,7 +1114,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'LAZY soft-reload: agentic peer comes up FRESH (re-reads doctrine) on its NEXT natural wake — no kill, no burst-wake; non-agentic runtimes skipped. --all = whole fleet. (eager: `new`/self-fresh)',
   },
   { sig: 'remove <peer> [--force]', desc: 'delete a peer\'s registry record (locked writer); refuses a LIVE peer unless --force' },
-  { sig: 'rename <old> <new> [--force]', desc: 'rename a peer\'s personality (registry + per-cwd profile, atomic; cwd/transcript-history kept); refuses a LIVE peer unless --force. Memory re-key is the provider\'s separate step.' },
+  { sig: 'rename <old> <new> [--force]', desc: 'rename a peer — moves the cwd folder + claude transcript + atomic registry/profile (personality = folder name); refuses a LIVE peer unless --force. Memory re-key is the provider\'s separate step.' },
   {
     sig: 'send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]',
     desc: 'manual IAP send (fallback)',
@@ -1759,19 +1819,23 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         return o.action === 'refused-live' ? 1 : 0
       }
       case 'rename': {
-        // Rename a peer's personality (registry + per-cwd profile, atomic; cwd KEPT so
-        // the transcript history survives). Refuses a LIVE peer unless --force. Memory
-        // (operativka folder + author/index) is personality-keyed and re-keyed separately
-        // by the provider — say so, or it reads as a silent data loss.
+        // FULL folder rename (Arthur's invariant: personality == basename(cwd)): mv the
+        // folder + the claude transcript slug dir + atomic registry cwd+personality, with
+        // rollback; best-effort codex re-trust + .mcp.json rewrite + old-marker purge.
+        // Refuses a LIVE peer unless --force. Memory + codex-history caveats are stated —
+        // a silent data move reads as loss otherwise.
         if (!positionals[0] || !positionals[1]) {
           return argErr(errOut, 'rename needs old and new names — usage: iapeer rename <old> <new> [--force]')
         }
         const o = await renamePeerCli(positionals[0], positionals[1], { force: flags.force === true, env })
         if (o.action === 'renamed') {
-          out(`renamed "${o.oldPersonality}" → "${o.newPersonality}" (registry + per-cwd profile; cwd kept: ${o.cwd})\n`)
-          if (o.purgedState?.length) out(`lifecycle state purged (old identity): ${o.purgedState.join(', ')}\n`)
+          out(`renamed "${o.oldPersonality}" → "${o.newPersonality}"\n`)
+          out(`  folder: ${o.oldCwd} → ${o.newCwd}\n`)
+          out(`  claude transcript: ${o.transcriptMoved ? 'moved (history preserved)' : 'no slug dir to move'}\n`)
+          if (o.sideEffects?.length) out(`  ${o.sideEffects.join('\n  ')}\n`)
+          if (o.purgedState?.length) out(`  lifecycle state purged (old identity): ${o.purgedState.join(', ')}\n`)
           out(
-            `NOTE: memory is NOT moved by rename — re-key the operativka folder + author/index attribution under "${o.newPersonality}" via the memory provider (native-memory rides the kept cwd, unchanged). Wake "${o.newPersonality}" to verify identity + history.\n`,
+            `NOTE: memory (operativka folder + author/index) is personality-keyed — re-key it under "${o.newPersonality}" via the memory provider separately. codex resume-history for the old cwd does NOT carry (codex keys sessions on the in-file cwd). Wake "${o.newPersonality}" to verify identity + history.\n`,
           )
         } else if (o.action === 'absent') errOut(`rename: "${o.oldPersonality}" not registered\n`)
         else errOut(`rename: ${o.reason}\n`)

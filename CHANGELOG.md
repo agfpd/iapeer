@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-06-22
+
+### Changed
+
+- `iapeer rename <old> <new>` now performs a **full folder rename** (extends 0.4.17's
+  personality-only rename). The personality is a self-healed mirror of `normalize(basename(cwd))`,
+  so a rename that kept the cwd would be reverted by profile-standard self-heal — the folder
+  must move. The verb now atomically moves the cwd folder (the per-cwd profile, `.mcp.json`,
+  native-memory, `CLAUDE.md`, and the `.git` clone ride it), moves the claude transcript slug
+  dir (`~/.claude/projects/<slug>`, keyed by `realpath(cwd)` — so claude history is preserved),
+  and updates the registry cwd + personality + per-cwd profile, with rollback of the fs moves on
+  failure. Best-effort afterwards: re-trust the new cwd for codex + clean the old, rewrite the
+  claude `.mcp.json` identity, purge the old identity's lifecycle markers. Refuses a LIVE peer
+  unless `--force`. Memory (operativka folder + author/index attribution) re-key is the memory
+  provider's separate step; codex resume-history (keyed by the cwd recorded inside each session
+  file, not a path-dir) does not carry to the new cwd.
+
 ## [0.4.17] - 2026-06-21
 
 ### Added
@@ -257,7 +274,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.17...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.18...HEAD
+[0.4.18]: https://github.com/agfpd/iapeer/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/agfpd/iapeer/compare/v0.4.16...v0.4.17
 [0.4.16]: https://github.com/agfpd/iapeer/compare/v0.4.15...v0.4.16
 [0.4.15]: https://github.com/agfpd/iapeer/compare/v0.4.14...v0.4.15

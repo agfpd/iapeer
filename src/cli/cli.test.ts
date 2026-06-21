@@ -9,6 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { addRuntime, compactPeer, defaultRuntime, formatListTable, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
 import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
+import { transcriptSlug } from '../launch/adapters/claude.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
 import { launchdPlistPath } from '../launch/launchd.ts'
 import { err, ok } from '../core/errors.ts'
@@ -660,7 +661,7 @@ describe('init — FU5 parity with create: declares ALL installed agentic runtim
   })
 })
 
-describe('rename (peer identity — registry + per-cwd profile, cwd kept)', () => {
+describe('rename (full folder rename — personality = folder name, history moves)', () => {
   async function seedWithProfile(personality: string): Promise<string> {
     const cwd = join(root, personality)
     mkdirSync(join(cwd, '.iapeer'), { recursive: true })
@@ -672,35 +673,64 @@ describe('rename (peer identity — registry + per-cwd profile, cwd kept)', () =
     return cwd
   }
 
-  test('renames personality in BOTH registry and per-cwd profile; cwd kept (history preserved)', async () => {
-    const cwd = await seedWithProfile('old-name')
+  test('moves the folder + registry cwd + profile personality (personality = new folder name)', async () => {
+    const oldCwd = await seedWithProfile('old-name')
+    const newCwd = join(root, 'new-name')
     const e = env()
-    const o = await renamePeerCli('old-name', 'new-name', { env: e })
+    const o = await renamePeerCli('old-name', 'new-name', { env: e, claudeProjectsDir: join(root, 'fake-projects') })
     expect(o.action).toBe('renamed')
-    expect(o.cwd).toBe(cwd) // cwd UNCHANGED → transcript slug (realpath(cwd)) stable → history survives
+    expect(o.oldCwd).toBe(oldCwd)
+    expect(o.newCwd).toBe(newCwd)
+    expect(existsSync(oldCwd)).toBe(false) // old folder gone
+    expect(existsSync(join(newCwd, '.iapeer', 'peer-profile.json'))).toBe(true) // folder (profile) moved
     expect(findPeer(readPeersIndex({ env: e }), 'old-name')).toBeNull()
-    expect(findPeer(readPeersIndex({ env: e }), 'new-name')).not.toBeNull()
-    expect(JSON.parse(readFileSync(join(cwd, '.iapeer', 'peer-profile.json'), 'utf8')).personality).toBe('new-name')
+    const rec = findPeer(readPeersIndex({ env: e }), 'new-name')
+    expect(rec?.cwd).toBe(newCwd) // registry cwd updated
+    expect(JSON.parse(readFileSync(join(newCwd, '.iapeer', 'peer-profile.json'), 'utf8')).personality).toBe('new-name')
+  })
+
+  test('moves the claude transcript slug dir (history preserved) via the projectsDir seam', async () => {
+    const oldCwd = await seedWithProfile('tx-old')
+    const newCwd = join(root, 'tx-new')
+    const projectsDir = join(root, 'fake-projects')
+    const oldSlug = transcriptSlug(oldCwd)
+    mkdirSync(join(projectsDir, oldSlug), { recursive: true })
+    writeFileSync(join(projectsDir, oldSlug, 's.jsonl'), '{"type":"x"}\n')
+    const o = await renamePeerCli('tx-old', 'tx-new', { env: env(), claudeProjectsDir: projectsDir })
+    expect(o.action).toBe('renamed')
+    expect(o.transcriptMoved).toBe(true)
+    const newSlug = transcriptSlug(newCwd)
+    expect(existsSync(join(projectsDir, oldSlug))).toBe(false) // old slug dir gone
+    expect(existsSync(join(projectsDir, newSlug, 's.jsonl'))).toBe(true) // transcript at the new slug
+  })
+
+  test('refuses when the target folder already exists (no clobber, source untouched)', async () => {
+    await seedWithProfile('src-peer')
+    mkdirSync(join(root, 'dst-peer'), { recursive: true }) // target folder pre-exists
+    const o = await renamePeerCli('src-peer', 'dst-peer', { env: env(), claudeProjectsDir: join(root, 'fp') })
+    expect(o.action).toBe('target-cwd-exists')
+    expect(existsSync(join(root, 'src-peer'))).toBe(true) // source folder untouched
+    expect(findPeer(readPeersIndex({ env: env() }), 'src-peer')).not.toBeNull()
   })
 
   test('absent old peer → no-op outcome (not an error)', async () => {
     expect((await renamePeerCli('ghost', 'whatever', { env: env() })).action).toBe('absent')
   })
 
-  test('target name already exists → refused (no clobber)', async () => {
+  test('target personality already registered → refused (no clobber)', async () => {
     await seedWithProfile('a')
     await seedWithProfile('b')
-    const o = await renamePeerCli('a', 'b', { env: env() })
+    const o = await renamePeerCli('a', 'b', { env: env(), claudeProjectsDir: join(root, 'fp') })
     expect(o.action).toBe('target-exists')
-    // both survive untouched
     expect(findPeer(readPeersIndex({ env: env() }), 'a')).not.toBeNull()
     expect(findPeer(readPeersIndex({ env: env() }), 'b')).not.toBeNull()
   })
 
-  test('runCli rename wires through (exit 0, registry renamed)', async () => {
+  test('runCli rename wires through (exit 0, folder + registry cwd moved)', async () => {
     await seedWithProfile('cli-old')
     expect(await runCli(['rename', 'cli-old', 'cli-new'], env())).toBe(0)
-    expect(findPeer(readPeersIndex({ env: env() }), 'cli-new')).not.toBeNull()
+    expect(existsSync(join(root, 'cli-old'))).toBe(false)
+    expect(findPeer(readPeersIndex({ env: env() }), 'cli-new')?.cwd).toBe(join(root, 'cli-new'))
   })
 
   test('runCli rename missing args → usage error (exit 2)', async () => {

@@ -89,7 +89,7 @@ function anyBootDialog(pane: string): boolean {
  * mkdtemp temp cwd. realpath first so a symlinked cwd maps to the dir claude
  * actually wrote (a stale path falls through to the original string).
  */
-function transcriptSlug(workDir: string): string {
+export function transcriptSlug(workDir: string): string {
   let phys = workDir
   try {
     phys = realpathSync(workDir)
@@ -99,8 +99,15 @@ function transcriptSlug(workDir: string): string {
   return phys.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
-function transcriptDir(workDir: string): string {
-  return join(homedir(), '.claude', 'projects', transcriptSlug(workDir))
+/** The base dir holding all claude project transcript slugs (~/.claude/projects).
+ *  Exported so a cwd-move (peer folder rename) can relocate the slug dir from the
+ *  SINGLE source of the slug encoding, never a re-implementation that could drift. */
+export function claudeProjectsRoot(): string {
+  return join(homedir(), '.claude', 'projects')
+}
+
+export function transcriptDir(workDir: string): string {
+  return join(claudeProjectsRoot(), transcriptSlug(workDir))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

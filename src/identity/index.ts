@@ -634,6 +634,7 @@ export async function renamePeer(
   oldPersonality: string,
   newPersonality: string,
   options: PeersUpdateOptions = {},
+  newCwd?: string,
 ): Promise<PeersIndex> {
   if (!isValidName(oldPersonality) || !isValidName(newPersonality)) {
     throw new IapError('peers rename requires valid personalities')
@@ -647,22 +648,30 @@ export async function renamePeer(
     if (index.peers.some(peer => peer.personality === newPersonality)) {
       throw new IapError(`peer "${newPersonality}" already exists`)
     }
-    const sourceProfile = readPeerProfile(target.cwd)
+    // newCwd: the FOLDER was already moved by the caller (the cwd-move rename), so the
+    // profile now lives at newCwd; read/rewrite it THERE and update the registry cwd
+    // pointer atomically with the personality. Omitted → keep-cwd rename (profile at the
+    // registry's current cwd). The folder mv + transcript mv are the caller's side (cli),
+    // done BEFORE this atomic registry write (with rollback on failure).
+    const profileCwd = newCwd ?? target.cwd
+    const sourceProfile = readPeerProfile(profileCwd)
     if (!sourceProfile) {
       throw new IapError(
-        `peer "${oldPersonality}" cwd ${target.cwd} has no ${IAPEER_DIR}/${PEER_PROFILE_FILE}; restore the cwd or remove the registry entry`,
+        `peer "${oldPersonality}" cwd ${profileCwd} has no ${IAPEER_DIR}/${PEER_PROFILE_FILE}; restore the cwd or remove the registry entry`,
       )
     }
     if (sourceProfile.personality !== oldPersonality) {
       throw new IapError(
-        `peer "${oldPersonality}" cwd ${target.cwd} profile has personality "${sourceProfile.personality}", not "${oldPersonality}"; registry out of sync`,
+        `peer "${oldPersonality}" cwd ${profileCwd} profile has personality "${sourceProfile.personality}", not "${oldPersonality}"; registry out of sync`,
       )
     }
-    writePeerProfileAtomic(target.cwd, { ...sourceProfile, personality: newPersonality })
+    writePeerProfileAtomic(profileCwd, { ...sourceProfile, personality: newPersonality })
     return {
       ...index,
       peers: index.peers.map(peer =>
-        peer.personality === oldPersonality ? { ...peer, personality: newPersonality } : peer,
+        peer.personality === oldPersonality
+          ? { ...peer, personality: newPersonality, ...(newCwd ? { cwd: newCwd } : {}) }
+          : peer,
       ),
     }
   }, options)
