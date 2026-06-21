@@ -4,10 +4,10 @@
 // persistent-peer launchd plist must be refused.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { addRuntime, compactPeer, defaultRuntime, formatListTable, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
+import { addRuntime, compactPeer, defaultRuntime, formatListTable, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
 import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
 import { launchdPlistPath } from '../launch/launchd.ts'
@@ -657,5 +657,53 @@ describe('init — FU5 parity with create: declares ALL installed agentic runtim
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }
+  })
+})
+
+describe('rename (peer identity — registry + per-cwd profile, cwd kept)', () => {
+  async function seedWithProfile(personality: string): Promise<string> {
+    const cwd = join(root, personality)
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality, default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' }),
+    )
+    await upsertPeer({ personality, runtime: 'claude', cwd, intelligence: 'artificial' }, { rootDir: root })
+    return cwd
+  }
+
+  test('renames personality in BOTH registry and per-cwd profile; cwd kept (history preserved)', async () => {
+    const cwd = await seedWithProfile('old-name')
+    const e = env()
+    const o = await renamePeerCli('old-name', 'new-name', { env: e })
+    expect(o.action).toBe('renamed')
+    expect(o.cwd).toBe(cwd) // cwd UNCHANGED → transcript slug (realpath(cwd)) stable → history survives
+    expect(findPeer(readPeersIndex({ env: e }), 'old-name')).toBeNull()
+    expect(findPeer(readPeersIndex({ env: e }), 'new-name')).not.toBeNull()
+    expect(JSON.parse(readFileSync(join(cwd, '.iapeer', 'peer-profile.json'), 'utf8')).personality).toBe('new-name')
+  })
+
+  test('absent old peer → no-op outcome (not an error)', async () => {
+    expect((await renamePeerCli('ghost', 'whatever', { env: env() })).action).toBe('absent')
+  })
+
+  test('target name already exists → refused (no clobber)', async () => {
+    await seedWithProfile('a')
+    await seedWithProfile('b')
+    const o = await renamePeerCli('a', 'b', { env: env() })
+    expect(o.action).toBe('target-exists')
+    // both survive untouched
+    expect(findPeer(readPeersIndex({ env: env() }), 'a')).not.toBeNull()
+    expect(findPeer(readPeersIndex({ env: env() }), 'b')).not.toBeNull()
+  })
+
+  test('runCli rename wires through (exit 0, registry renamed)', async () => {
+    await seedWithProfile('cli-old')
+    expect(await runCli(['rename', 'cli-old', 'cli-new'], env())).toBe(0)
+    expect(findPeer(readPeersIndex({ env: env() }), 'cli-new')).not.toBeNull()
+  })
+
+  test('runCli rename missing args → usage error (exit 2)', async () => {
+    expect(await runCli(['rename', 'only-one'], env())).toBe(2)
   })
 })

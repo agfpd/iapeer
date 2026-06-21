@@ -53,7 +53,7 @@ import { getAdapter } from '../launch/index.ts'
 import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
 import { cycleDaemon, isFoundationOwnedPlist, launchctlBootstrap, launchdLabel, launchdPlistPath } from '../launch/launchd.ts'
-import { readPeerProfile, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
+import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import {
   isConformant,
@@ -828,6 +828,61 @@ export async function removePeerCli(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// rename — first-class peer-identity rename (parity with remove/create). Wraps
+// renamePeer (registry + per-cwd profile, atomic, inside the lock) and KEEPS the
+// cwd, so the claude transcript history (slug = realpath(cwd)) survives the rename.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RenameOutcome {
+  oldPersonality: string
+  newPersonality: string
+  action: 'renamed' | 'absent' | 'target-exists' | 'refused-live'
+  reason?: string
+  cwd?: string
+  purgedState?: string[]
+}
+
+/**
+ * Rename a peer's personality through renamePeer (registry + per-cwd profile, atomic;
+ * cwd KEPT — the transcript history keyed by slug=realpath(cwd) survives). Refuses a LIVE
+ * peer unless --force: a running session carries the OLD identity in its env
+ * (PEER_PERSONALITY, set at launch), so renaming under it desyncs the registry from the
+ * live process — stop it first, it respawns under the new identity. Purges the OLD
+ * identity-keyed lifecycle markers (remove-parity) so a future namesake can't inherit
+ * them. Does NOT move memory: the operativka folder + author/index attribution are
+ * personality-keyed (the memory provider re-keys them separately); native-memory is
+ * cwd-keyed and rides the kept cwd unchanged.
+ */
+export async function renamePeerCli(
+  oldPersonality: string,
+  newPersonality: string,
+  opts: CliEnvOptions & { force?: boolean } = {},
+): Promise<RenameOutcome> {
+  const env = opts.env ?? process.env
+  const index = readPeersIndex({ env })
+  const peer = findPeer(index, oldPersonality)
+  if (!peer) return { oldPersonality, newPersonality, action: 'absent' }
+  if (findPeer(index, newPersonality)) {
+    return { oldPersonality, newPersonality, action: 'target-exists', reason: `"${newPersonality}" already exists` }
+  }
+  const cfg = loadLifecycleConfig(env)
+  if (!opts.force) {
+    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, oldPersonality, cfg.sockDir))
+    if (liveRt) {
+      return {
+        oldPersonality,
+        newPersonality,
+        action: 'refused-live',
+        reason: `"${oldPersonality}" is LIVE on ${liveRt} — its running session carries the old identity in its env; stop it first (\`iapeer stop ${oldPersonality}\`) or pass --force`,
+      }
+    }
+  }
+  await renamePeer(oldPersonality, newPersonality, { env })
+  const purgedState = peer.runtimes.flatMap(rt => purgeIdentityState(cfg, buildProcessAddress(rt, oldPersonality)))
+  return { oldPersonality, newPersonality, action: 'renamed', cwd: peer.cwd, purgedState }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // send — manual IAP send fallback (contract Примитивы §send). Goes through the
 // same router path as send_to_peer (resolve → deliver / wake), in-process so it
 // works even when the daemon HTTP listener is down. --from sets the sender.
@@ -999,6 +1054,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'LAZY soft-reload: agentic peer comes up FRESH (re-reads doctrine) on its NEXT natural wake — no kill, no burst-wake; non-agentic runtimes skipped. --all = whole fleet. (eager: `new`/self-fresh)',
   },
   { sig: 'remove <peer> [--force]', desc: 'delete a peer\'s registry record (locked writer); refuses a LIVE peer unless --force' },
+  { sig: 'rename <old> <new> [--force]', desc: 'rename a peer\'s personality (registry + per-cwd profile, atomic; cwd/transcript-history kept); refuses a LIVE peer unless --force. Memory re-key is the provider\'s separate step.' },
   {
     sig: 'send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]',
     desc: 'manual IAP send (fallback)',
@@ -1701,6 +1757,25 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         } else if (o.action === 'absent') out(`"${o.personality}" not registered — no-op\n`)
         else errOut(`remove: ${o.reason}\n`)
         return o.action === 'refused-live' ? 1 : 0
+      }
+      case 'rename': {
+        // Rename a peer's personality (registry + per-cwd profile, atomic; cwd KEPT so
+        // the transcript history survives). Refuses a LIVE peer unless --force. Memory
+        // (operativka folder + author/index) is personality-keyed and re-keyed separately
+        // by the provider — say so, or it reads as a silent data loss.
+        if (!positionals[0] || !positionals[1]) {
+          return argErr(errOut, 'rename needs old and new names — usage: iapeer rename <old> <new> [--force]')
+        }
+        const o = await renamePeerCli(positionals[0], positionals[1], { force: flags.force === true, env })
+        if (o.action === 'renamed') {
+          out(`renamed "${o.oldPersonality}" → "${o.newPersonality}" (registry + per-cwd profile; cwd kept: ${o.cwd})\n`)
+          if (o.purgedState?.length) out(`lifecycle state purged (old identity): ${o.purgedState.join(', ')}\n`)
+          out(
+            `NOTE: memory is NOT moved by rename — re-key the operativka folder + author/index attribution under "${o.newPersonality}" via the memory provider (native-memory rides the kept cwd, unchanged). Wake "${o.newPersonality}" to verify identity + history.\n`,
+          )
+        } else if (o.action === 'absent') errOut(`rename: "${o.oldPersonality}" not registered\n`)
+        else errOut(`rename: ${o.reason}\n`)
+        return o.action === 'renamed' ? 0 : 1
       }
       case 'send': {
         // Message body from EITHER --message <text> OR --message-file <f> (f='-' →
