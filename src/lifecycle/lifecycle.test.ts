@@ -852,6 +852,93 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// generic idle-reap — pane-log is the idle proxy, NOT the transcript file mtime
+//  The fleet-reap incident: claude re-touches its session .jsonl ~every 30-45min
+//  WITHOUT a real turn, so the transcript proxy stays < idleSecs forever and a claude
+//  peer never idle-reaps. The pane-log (TUI render-stream) goes truly quiet at the
+//  prompt → it is the reliable idle signal. pane-log PRIMARY; transcript only as a
+//  fallback when the pane-log is missing (legacy supervisor); never wokeAt-as-activity.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
+  function liveEnv(personality: string, wokeMsAgo: number): { env: NodeJS.ProcessEnv; cfg: LifecycleConfig; root: string; laDir: string } {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-idle-pl-root-'))
+    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-idle-pl-la-')) // empty → not launchd-managed
+    const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_SOCK_DIR: join(root, 'socks') }
+    const cfg = loadLifecycleConfig(env)
+    mkdirSync(cfg.stateDir, { recursive: true })
+    const cwd = join(root, 'peers', personality)
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality, default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' }), // NOT ephemeral
+    )
+    writeFileSync(
+      join(cfg.stateDir, `claude-${personality}.session`),
+      JSON.stringify({ identity: `claude-${personality}`, runtime: 'claude', personality, cwd, wokeAt: Date.now() - wokeMsAgo }),
+    )
+    return { env, cfg, root, laDir }
+  }
+
+  test('THE FIX: stale pane-log + FALSELY-fresh transcript → reaped-idle (pane-log governs)', () => {
+    const { env, cfg, root, laDir } = liveEnv('w', 7_200_000) // woke 2h ago
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 60_000, // transcript FALSELY fresh (claude re-touch)
+        paneLogMtime: () => now - 7_200_000, // pane-log truly stale 2h → idle
+      })
+      expect(out.find(x => x.identity === 'claude-w')?.action).toBe('reaped-idle')
+      expect(hasIdleReaped(cfg, 'claude-w')).toBe(true) // daemon-initiated park → resume-eligible
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('active: fresh pane-log + stale transcript → alive (pane-log keeps it warm)', () => {
+    const { env, cfg, root, laDir } = liveEnv('a', 7_200_000)
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 7_200_000, // transcript stale
+        paneLogMtime: () => now - 30_000, // pane-log fresh (active turn) → NOT idle
+      })
+      expect(out.find(x => x.identity === 'claude-a')?.action).toBe('alive')
+      expect(hasIdleReaped(cfg, 'claude-a')).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('missing pane-log (legacy) → transcript fallback: fresh transcript PROTECTS an active legacy session', () => {
+    const { env, cfg, root, laDir } = liveEnv('x', 100_000_000) // woke ~28h ago (legacy)
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        newestActivityMtime: () => now - 60_000, // genuinely active (real fresh transcript)
+        paneLogMtime: () => null, // legacy supervisor: no pane-log
+      })
+      // never reaped from the hours-old wokeAt — the transcript fallback protects it (no self-reap)
+      expect(out.find(x => x.identity === 'claude-x')?.action).toBe('alive')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // classifyGoneSession — the death-class tag for reaped-gone (server-dead vs
 // session-gone). Live case: iapeer-memory 10.06 — the whole tmux server died
 // (SIGKILL class), exits.log stayed empty; lifecycle.log must carry the class.

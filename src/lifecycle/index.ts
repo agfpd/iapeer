@@ -1246,42 +1246,41 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
       trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
       continue
     }
-    // Idle accounting via the runtime adapter's activity proxy (claude transcript
-    // / codex session mtime), FLOORED at wokeAt: a session cannot be idle longer than
-    // it has been awake. A wake that produced no model turn (e.g. an attach-only resume)
-    // leaves the proxy at its PRE-wake value; the old `?? wokeAt` floored only the NULL
-    // case, so a stale-but-non-null proxy (older than this wake) made a freshly-woken
-    // session look idle for its entire prior life → idle-reaped on the very next tick,
-    // out from under an attaching operator. max(), not ??, is the fix — and it still
-    // reaps a session that produced zero further turns (mt=wokeAt → reaped idleSecs
-    // after the wake), and falls back to wokeAt when no adapter exists for the runtime.
-    let mt = s.wokeAt
-    try {
-      mt = Math.max(activityMtime(s.runtime, s.cwd) ?? 0, s.wokeAt)
-    } catch {
-      /* no adapter for this runtime yet → wokeAt baseline */
-    }
+    // Idle accounting via the PANE-LOG (TUI render-stream) mtime — the RELIABLE idle
+    // signal: it advances ~1s while the TUI renders ANY turn (model generation OR a tool
+    // run — the "esc to interrupt" elapsed counter ticks) and goes quiet ONLY at the
+    // prompt. NOT the transcript file mtime: a live claude session RE-TOUCHES its session
+    // .jsonl ~every 30-45min WITHOUT a real turn (a system/bridge re-save), so the
+    // transcript proxy is perpetually < idleSecs and a claude peer NEVER idle-reaps — the
+    // fleet-reap incident: a warm claude pile, last real turn hours ago, never reaped;
+    // codex's session file is NOT re-touched, so codex reaps (the claude-vs-codex split).
+    // The transcript stays the launch ready-gate's signal (it needs "a real turn produced
+    // output"); only this idle proxy moves to the pane-log. FLOORED at wokeAt: a session
+    // cannot be idle longer than it has been awake (a wake that produced no turn →
+    // mt=wokeAt → reaped idleSecs after the wake, never out from under an attaching op).
     const ephemeral = isEphemeralPeer(s.cwd)
-    if (ephemeral) {
-      // FOLD IN the pane-log (TUI render-stream) mtime for ephemeral peers. The transcript
-      // proxy goes QUIET during a long model generation (no JSONL write until the message
-      // completes), so the short ephemeral windows below mis-read mid-generation as "done"
-      // and reap the worker MID-TURN (live incident 2026-06-20: Index reaped age=29s while
-      // generating the next step after a tool_result). The pane-log advances ~1s while the
-      // TUI renders a turn (model generation OR a tool run — the "esc to interrupt" elapsed
-      // counter ticks) and goes quiet only at the prompt, so it is the truer active-turn
-      // signal. max() means "quiet" iff BOTH are silent — it can only DELAY a reap, never
-      // cause an earlier one, so the pipeline serial-drain (idle → quiet → reaped) is
-      // preserved while a working session is never killed mid-turn.
-      const plMt = paneLogMt(s.identity)
-      if (plMt !== null) mt = Math.max(mt, plMt)
+    const plMt = paneLogMt(s.identity)
+    let mt: number
+    if (plMt !== null) {
+      mt = Math.max(plMt, s.wokeAt)
+    } else {
+      // Pane-log MISSING (a legacy pre-pane-log supervisor) → fall back to the transcript
+      // proxy, NEVER to wokeAt-as-activity: a wokeAt-only age would read an ACTIVE legacy
+      // session's idle from its hours-old wokeAt and reap it MID-WORK. The transcript is
+      // false-fresh at idle (so an IDLE legacy peer lingers warm until its next respawn
+      // earns a pane-log — bounded, self-heals), but an ACTIVE legacy peer keeps a
+      // genuinely-fresh transcript and is correctly protected. Safe direction preserved.
+      let tx = 0
+      try { tx = activityMtime(s.runtime, s.cwd) ?? 0 } catch { /* no adapter → wokeAt */ }
+      mt = Math.max(tx, s.wokeAt)
     }
     const ageSecs = Math.floor((nowMs - mt) / 1000)
     // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
     // daemon routed its outbound reply) is reaped after a QUIET window, checked
-    // BEFORE the idle branch (quiet ≪ idle). Quiet = transcript AND pane-log both
-    // silent for ephemeralQuietSecs — a still-rendering turn keeps the pane-log fresh,
-    // so the worker finishes its turn first; post-reply housekeeping also resets it.
+    // BEFORE the idle branch (quiet ≪ idle). Quiet = the pane-log silent for
+    // ephemeralQuietSecs (the reliable render signal above) — a still-rendering turn
+    // keeps it fresh, so the worker finishes its turn first; post-reply housekeeping
+    // (operative-note writes) also advances it.
     // NOT armed (still mid-task) → the ordinary idle bound below is its only reaper.
     // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
     // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).

@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-06-21
+
+### Fixed
+
+- Idle-reap now uses the pane-log (TUI render-stream) mtime as its activity proxy, not the
+  transcript file mtime. A live claude session re-touches its session `.jsonl` periodically
+  *without a real turn*, so the transcript proxy never crossed `idleSecs` and **claude peers
+  never idle-reaped** — the fleet piled up warm while codex peers (whose session file isn't
+  re-touched) reaped normally. The pane-log goes truly quiet at the prompt, so idle peers now
+  reap as intended. Pane-log primary; transcript fallback only when the pane-log is missing
+  (legacy supervisor); the launch ready-gate still uses the transcript.
+
 ## [0.4.15] - 2026-06-21
 
 ### Fixed
@@ -233,7 +245,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.15...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.16...HEAD
+[0.4.16]: https://github.com/agfpd/iapeer/compare/v0.4.15...v0.4.16
 [0.4.15]: https://github.com/agfpd/iapeer/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/agfpd/iapeer/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/agfpd/iapeer/compare/v0.4.12...v0.4.13
