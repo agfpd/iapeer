@@ -51,6 +51,7 @@ import { defaultDaemonSocketPath } from '../daemon/index.ts'
 // shapes but receives the component-updaters as injected deps.
 import type { UpdateRuntimeResult } from '../runtime/update.ts'
 import type { MemoryUpdateResult } from '../onboard/memory.ts'
+import type { VoiceUpdateResult } from '../onboard/voice.ts'
 
 /** The npm package the foundation publishes / updates from. */
 export const IAPEER_PACKAGE = '@agfpd/iapeer'
@@ -320,10 +321,10 @@ export function updateIapeer(deps: UpdateDeps = {}): UpdateResult {
 // ─────────────────────────────────────────────────────────────────────────────
 // cascadeTail — the runtimes + memory legs of the cascade `iapeer update` (FU12).
 // Runs AFTER a healthy foundation update (the CLI owns that, abort-on-hard-fail);
-// here we update every installed runtime then the memory provider, BEST-EFFORT — a
-// component failure is reported, never aborts the rest. Pure orchestration over
-// injected component-updaters (no value-import of runtime/onboard → no cycle), so it
-// is hermetically testable. Returns whether anything failed (→ exit≠0).
+// here we update every installed runtime, then the memory provider, then the voice
+// provider, BEST-EFFORT — a component failure is reported, never aborts the rest. Pure
+// orchestration over injected component-updaters (no value-import of runtime/onboard →
+// no cycle), so it is hermetically testable. Returns whether anything failed (→ exit≠0).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface CascadeTailDeps {
@@ -331,6 +332,8 @@ export interface CascadeTailDeps {
   runtimes: () => Promise<UpdateRuntimeResult[]>
   /** = updateMemoryProvider (onboard/memory.ts). */
   memory: () => MemoryUpdateResult | Promise<MemoryUpdateResult>
+  /** = updateVoiceProvider (onboard/voice.ts). */
+  voice: () => VoiceUpdateResult | Promise<VoiceUpdateResult>
   out: (s: string) => void
 }
 
@@ -352,6 +355,11 @@ export async function cascadeTail(deps: CascadeTailDeps): Promise<{ failed: bool
   const mver = m.from || m.to ? ` ${m.from ?? '?'} → ${m.to ?? '?'}` : ''
   deps.out(`memory: ${m.state}${m.package ? ` (${m.package}${mver})` : ''}${m.detail ? ` — ${m.detail}` : ''}\n`)
   if (m.state === 'failed') failed = true
+
+  const v = await deps.voice()
+  const vver = v.from || v.to ? ` ${v.from ?? '?'} → ${v.to ?? '?'}` : ''
+  deps.out(`voice: ${v.state}${v.package ? ` (${v.package}${vver})` : ''}${v.detail ? ` — ${v.detail}` : ''}\n`)
+  if (v.state === 'failed') failed = true
 
   return { failed }
 }

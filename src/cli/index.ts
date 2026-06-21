@@ -1088,10 +1088,10 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'help | --help | -h', desc: 'print this usage (works appended to any verb; executes nothing)' },
   { sig: 'daemon [--install-plist]', desc: 'run the host-wide HTTP-MCP router (launchd-held)' },
   {
-    sig: 'onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--infra <csv>]',
-    desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
+    sig: 'onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--no-voice] [--voice <pkg>] [--infra <csv>]',
+    desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory → voice (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
   },
-  { sig: 'status', desc: 'host snapshot: version, daemon health, memory slot (<provider> | none)' },
+  { sig: 'status', desc: 'host snapshot: version, daemon health, memory + voice slots (<provider> | none)' },
   { sig: 'install-runtime <runtime> [--package pkg] [--npx]', desc: 'npx-install a runtime package + deploy its declared peer-set' },
   { sig: 'update-runtime <runtime> | --all [--force]', desc: "version-gate → re-install + re-provision declared set → restart the runtime's peers" },
   { sig: 'init [cwd] [--runtime r] [--description d]', desc: 'onboard the CURRENT folder as a peer (name = folder name; identity + MCP + doctrine)' },
@@ -1231,7 +1231,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Interactive TUI wizard (Фаза TUI-редизайн) — the DEFAULT for an
         // interactive `iapeer onboard`. Routed ONLY in a real interactive terminal
         // and never for an automation path (--accept-risk / --dry-run / --no-memory
-        // / --infra), which stay on the deterministic linear flow below. Escape
+        // / --no-voice / --infra), which stay on the deterministic linear flow below. Escape
         // hatch: IAPEER_ONBOARD_WIZARD=0 forces the linear path (recovery / scripts
         // that want the old flow). The wizard owns its own gate screen, so we route
         // BEFORE the readline gate. It fails closed: no real TTY →
@@ -1241,6 +1241,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           flags['accept-risk'] === true ||
           flags['dry-run'] === true ||
           flags['no-memory'] === true ||
+          flags['no-voice'] === true ||
           typeof flags.infra === 'string'
         if (!wizardOptOut && !automationFlag && process.stdin.isTTY === true && process.stdout.isTTY === true) {
           const { runOnboardWizard, WIZARD_NOT_INTERACTIVE } = await import('../tui/onboard/run.tsx')
@@ -1342,6 +1343,19 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         })
         const memLabel = mem.provider ? `${mem.provider.provider} ${mem.provider.version}` : 'none'
         out(`memory: ${mem.state}${mem.detail ? ` — ${mem.detail}` : ''} (slot: ${memLabel})\n`)
+        // Voice slot (host backend only — per-peer voice tooling is the separate
+        // `iapeer enable voice-connect <peer>`): optional DEFAULT-YES install of the
+        // voice provider; its own init runs with INHERITED stdio (it owns the TTS-key
+        // prompts). REPORT-ONLY for the exit code — an empty slot is a valid state.
+        const { onboardVoiceProvider } = await import('../onboard/voice.ts')
+        const voice = await onboardVoiceProvider({
+          skip: flags['no-voice'] === true,
+          package: typeof flags.voice === 'string' ? flags.voice : undefined,
+          dryRun: flags['dry-run'] === true,
+          env,
+        })
+        const voiceLabel = voice.provider ? `${voice.provider.provider} ${voice.provider.version}` : 'none'
+        out(`voice: ${voice.state}${voice.detail ? ` — ${voice.detail}` : ''} (slot: ${voiceLabel})\n`)
         // Runtime auth readiness (clean-host prerequisite): a peer runs the runtime's
         // interactive TUI; the launcher auto-clears first-run modals (theme/trust) but
         // CANNOT complete a login OAuth flow. Warn for every INSTALLED runtime (marketplace
@@ -1945,9 +1959,11 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // ── Cascade tail: runtimes + memory provider (best-effort) ──
         const { updateAllRuntimes } = await import('../runtime/update.ts')
         const { updateMemoryProvider } = await import('../onboard/memory.ts')
+        const { updateVoiceProvider } = await import('../onboard/voice.ts')
         const tail = await cascadeTail({
           runtimes: () => updateAllRuntimes({ force: flags.force === true, env, warn: m => errOut(`warn: ${m}\n`) }),
           memory: () => updateMemoryProvider({ env }),
+          voice: () => updateVoiceProvider({ env }),
           out,
         })
         return foundationExit === 0 && !tail.failed ? 0 : 1

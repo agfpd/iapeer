@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-06-22
+
+### Added
+
+- **Voice provider slot** (`@agfpd/voice-connect`) — a second declarative provider slot
+  alongside memory, integrated into the host lifecycle:
+  - `iapeer onboard` now offers an optional **DEFAULT-YES** voice step (after memory) in
+    both the linear path (`--no-voice` / `--voice <pkg>`) and the interactive wizard. It
+    installs the voice provider's **HOST BACKEND only** (a self-managed launchd HTTP
+    TTS/STT service) via the provider's own `init` (inherited stdio) — per-peer voice
+    tooling stays the separate explicit `iapeer enable voice-connect <peer>`. Report-only
+    for the exit code (an empty slot is a valid state).
+  - `iapeer update` cascades to the voice provider (best-effort, version-gated) via its
+    own `npm exec --package=@agfpd/voice-connect@latest -- voice-connect update` verb —
+    after foundation + runtimes + memory.
+  - `iapeer status` shows a `voice:` line (`<provider> <version> @ <endpoint>` + heartbeat
+    freshness, or `none`). The voice slot is read-only to the core, fail-open; unlike
+    memory it carries no provision/unprovision (voice is opt-in per-peer, not at birth)
+    and adds an `endpoint` for HTTP-facade discovery (telegram-STT / voicetalk).
+
 ## [0.4.18] - 2026-06-22
 
 ### Changed
@@ -274,7 +294,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.18...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.19...HEAD
+[0.4.19]: https://github.com/agfpd/iapeer/compare/v0.4.18...v0.4.19
 [0.4.18]: https://github.com/agfpd/iapeer/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/agfpd/iapeer/compare/v0.4.16...v0.4.17
 [0.4.16]: https://github.com/agfpd/iapeer/compare/v0.4.15...v0.4.16

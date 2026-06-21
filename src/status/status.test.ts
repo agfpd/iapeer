@@ -13,6 +13,8 @@ import {
   hostStatus,
   memoryProviderPath,
   readMemoryProvider,
+  readVoiceProvider,
+  voiceProviderPath,
   type HostStatus,
   type MemoryProvider,
 } from './index.ts'
@@ -106,6 +108,75 @@ describe('readMemoryProvider (slot declaration, fail-open)', () => {
   })
 })
 
+const VALID_VOICE = {
+  provider: 'voice-connect',
+  package: '@agfpd/voice-connect',
+  version: '0.1.11',
+  registeredAt: '2026-06-20T00:00:00Z',
+}
+
+describe('readVoiceProvider (voice slot — same declarative contract, no provision)', () => {
+  test('absent file → null (EMPTY slot — valid bare state)', () => {
+    expect(readVoiceProvider(envFor(mkTmp()))).toBeNull()
+  })
+
+  test('valid declaration → parsed; heartbeat + endpoint optional', () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    writeFileSync(voiceProviderPath(env), JSON.stringify({ ...VALID_VOICE, heartbeat: '/tmp/vhb', endpoint: 'http://127.0.0.1:8088' }))
+    expect(readVoiceProvider(env)).toMatchObject({ ...VALID_VOICE, heartbeat: '/tmp/vhb', endpoint: 'http://127.0.0.1:8088' })
+    // without optionals — fields absent, not empty-string
+    writeFileSync(voiceProviderPath(env), JSON.stringify(VALID_VOICE))
+    const p = readVoiceProvider(env)
+    expect(p?.heartbeat).toBeUndefined()
+    expect(p?.endpoint).toBeUndefined()
+  })
+
+  test('self-management extras (label/managed/host/port/routes) → IGNORED; declaration stays valid', () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    writeFileSync(
+      voiceProviderPath(env),
+      JSON.stringify({ ...VALID_VOICE, label: 'com.voice-connect.http', managed: true, host: '127.0.0.1', port: 8088, routes: { tts: '/v1/audio/speech' } }),
+    )
+    const p = readVoiceProvider(env) as Record<string, unknown> | null
+    expect(p).not.toBeNull()
+    expect(p?.routes).toBeUndefined()
+    expect(p?.managed).toBeUndefined()
+    expect(p?.port).toBeUndefined()
+  })
+
+  test('garbage / missing required fields → null, NEVER throws', () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    for (const bad of ['NOT JSON {{{', '[]', '{}', JSON.stringify({ provider: 'x' }), JSON.stringify({ ...VALID_VOICE, version: 42 })]) {
+      writeFileSync(voiceProviderPath(env), bad)
+      expect(readVoiceProvider(env)).toBeNull()
+    }
+  })
+})
+
+describe('voice slot rendering (formatHostStatus)', () => {
+  test('occupied voice slot → "voice: <provider> <version> @ <endpoint>"', async () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    writeFileSync(voiceProviderPath(env), JSON.stringify({ ...VALID_VOICE, endpoint: 'http://127.0.0.1:8088' }))
+    const s = await hostStatus({ env, probe: async () => true, fdaProbe: () => null })
+    expect(formatHostStatus(s)).toContain('voice: voice-connect 0.1.11 @ http://127.0.0.1:8088')
+  })
+
+  test('voice heartbeat declared but file ABSENT → "daemon not running"', () => {
+    const s: HostStatus = {
+      version: '0.0.0',
+      daemon: { healthy: true, url: null, sock: null },
+      memory: { provider: null, heartbeatAgeSecs: null },
+      voice: { provider: { ...VALID_VOICE, heartbeat: '/nope/vhb' }, heartbeatAgeSecs: null },
+      fda: null,
+    }
+    expect(formatHostStatus(s)).toContain('voice: voice-connect 0.1.11 (daemon not running — no heartbeat file)')
+  })
+})
+
 describe('heartbeatAgeSecs', () => {
   test('no heartbeat declared → null; declared but absent file → null; present → age', () => {
     const root = mkTmp()
@@ -127,7 +198,9 @@ describe('hostStatus + formatHostStatus', () => {
     const s = await hostStatus({ env: envFor(root), probe: async () => true, fdaProbe: () => null })
     expect(s.daemon.healthy).toBe(true)
     expect(s.memory.provider).toBeNull()
+    expect(s.voice.provider).toBeNull()
     expect(formatHostStatus(s)).toContain('memory: none')
+    expect(formatHostStatus(s)).toContain('voice: none')
   })
 
   test('occupied slot + fresh heartbeat → provider line with age', async () => {
@@ -148,6 +221,7 @@ describe('hostStatus + formatHostStatus', () => {
         provider: { ...VALID, heartbeat: '/nope/hb' } as MemoryProvider,
         heartbeatAgeSecs: null,
       },
+      voice: { provider: null, heartbeatAgeSecs: null },
       fda: null,
     }
     const text = formatHostStatus(s)
@@ -174,6 +248,7 @@ describe('FDA detection (iapeer status — fresh-host observability)', () => {
       version: '0.0.0',
       daemon: { healthy: true, url: null, sock: null },
       memory: { provider: null, heartbeatAgeSecs: null },
+      voice: { provider: null, heartbeatAgeSecs: null },
       fda,
     }
   }

@@ -71,7 +71,7 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
   // wizard only runs on one), off under NO_COLOR.
   const a = makeAnsi(colorEnabled(env, process.stdout))
 
-  let result: WizardResult = { code: 0, memoryConsent: false, telegramConsent: false, advisories: [], summary: [] }
+  let result: WizardResult = { code: 0, memoryConsent: false, voiceConsent: false, telegramConsent: false, advisories: [], summary: [] }
   try {
     const app = render(<OnboardApp env={env} onResult={r => (result = r)} />)
     await app.waitUntilExit()
@@ -79,9 +79,10 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     return WIZARD_NOT_INTERACTIVE
   }
 
-  // Post-Ink interactive provisioning — telegram THEN memory (the canonical order:
-  // telegram creates the human peer that memory's --human resolves from). These own
-  // the terminal (inherited stdio / readline), so they run AFTER Ink unmounts (no
+  // Post-Ink interactive provisioning — telegram THEN memory THEN voice (the canonical
+  // order: telegram creates the human peer that memory's --human resolves from; voice is
+  // an independent host backend). These own the terminal (inherited stdio / readline),
+  // so they run AFTER Ink unmounts (no
   // contention). NON-WEDGE: ignore SIGINT in the parent so Ctrl-C kills only the
   // CURRENT step's child/readline and onboard continues to the summary, instead of
   // the whole flow dying. The no-op handler is queued past the blocking spawnSync.
@@ -134,6 +135,33 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     } else {
       process.stdout.write(
         '\n' + paintResult('memory', 'skipped', ' — set it up later with `npx @agfpd/iapeer-memory init`', a) + '\n',
+      )
+    }
+
+    if (result.voiceConsent) {
+      const { onboardVoiceProvider } = await import('../../onboard/voice.ts')
+      process.stdout.write(
+        '\n' +
+          a.bold('Installing the voice provider backend (@agfpd/voice-connect)…') +
+          '\n' +
+          a.dim(
+            'A local TTS/STT HTTP service. Voice is OPTIONAL: press Ctrl-C to skip it\n' +
+              '(set it up later with `npx @agfpd/voice-connect init`).',
+          ) +
+          '\n\n',
+      )
+      try {
+        const v = await onboardVoiceProvider({ env, timeoutMs: 12 * 60_000 })
+        const label = v.provider ? `${v.provider.provider} ${v.provider.version}` : 'none'
+        const rest = `${v.detail ? ` — ${v.detail}` : ''} ${a.dim(`(slot: ${label})`)}`
+        process.stdout.write('\n' + paintResult('voice', v.state, rest, a) + '\n')
+      } catch (e) {
+        const rest = ` — ${e instanceof Error ? e.message : String(e)} ${a.dim('(set up later: `npx @agfpd/voice-connect init`)')}`
+        process.stdout.write('\n' + paintResult('voice', 'step skipped', rest, a) + '\n')
+      }
+    } else {
+      process.stdout.write(
+        '\n' + paintResult('voice', 'skipped', ' — set it up later with `npx @agfpd/voice-connect init`', a) + '\n',
       )
     }
   } finally {

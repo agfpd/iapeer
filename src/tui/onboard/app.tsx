@@ -18,6 +18,7 @@ import { iapeerBinPath } from '../../install/index.ts'
 export interface WizardResult {
   code: number
   memoryConsent: boolean
+  voiceConsent: boolean
   advisories: string[]
   summary: string[]
   telegramConsent: boolean
@@ -27,7 +28,7 @@ export interface WizardResult {
   hostRuntime?: OnboardRuntime
 }
 
-type Phase = 'gate' | 'running' | 'telegram' | 'memory' | 'declined' | 'finishing'
+type Phase = 'gate' | 'running' | 'telegram' | 'memory' | 'voice' | 'declined' | 'finishing'
 type StepStatus = 'pending' | 'running' | 'ok' | 'warn' | 'fail'
 interface Step {
   key: string
@@ -96,16 +97,17 @@ export function OnboardApp({
   const [advisories, setAdvisories] = useState<string[]>([])
   const [hostRuntime, setHostRuntime] = useState<OnboardRuntime | undefined>(undefined)
   const [telegramConsent, setTelegramConsent] = useState(false)
+  const [memoryConsent, setMemoryConsent] = useState(false)
   const spin = useSpinnerFrame(phase === 'running')
 
-  const finish = (memoryConsent: boolean): void => {
+  const finish = (voiceConsent: boolean): void => {
     const failed = steps.some(s => s.status === 'fail')
     const summary = steps.map(s => {
       const mark = s.status === 'ok' ? '✓' : s.status === 'warn' ? '!' : s.status === 'fail' ? '✗' : '·'
       return `  ${mark} ${s.label}${s.detail ? ` — ${s.detail}` : ''}`
     })
     summary.unshift(failed ? 'Onboard finished with errors:' : 'Onboard complete:')
-    onResult({ code: failed ? 1 : 0, memoryConsent, telegramConsent, advisories, summary, hostRuntime })
+    onResult({ code: failed ? 1 : 0, memoryConsent, voiceConsent, telegramConsent, advisories, summary, hostRuntime })
     setPhase('finishing')
     setTimeout(() => exit(), 30)
   }
@@ -135,19 +137,34 @@ export function OnboardApp({
     { isActive: phase === 'telegram' },
   )
 
-  // Memory consent — DEFAULT-YES ([Y/n]: Enter or y → install).
+  // Memory consent — DEFAULT-YES ([Y/n]: Enter or y → install). Records the decision
+  // and advances to the voice consent (the install itself runs post-Ink). Then → voice.
+  useInput(
+    (input, key) => {
+      if (input === 'n' || input === 'N') {
+        setMemoryConsent(false)
+        setPhase('voice')
+      } else if (input === 'y' || input === 'Y' || key.return) {
+        setMemoryConsent(true)
+        setPhase('voice')
+      }
+    },
+    { isActive: phase === 'memory' },
+  )
+
+  // Voice consent — DEFAULT-YES ([Y/n]: Enter or y → install). The LAST consent → finish.
   useInput(
     (input, key) => {
       if (input === 'n' || input === 'N') finish(false)
       else if (input === 'y' || input === 'Y' || key.return) finish(true)
     },
-    { isActive: phase === 'memory' },
+    { isActive: phase === 'voice' },
   )
 
   // Declined → exit 1 (no host mutation).
   useEffect(() => {
     if (phase !== 'declined') return
-    onResult({ code: 1, memoryConsent: false, telegramConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
+    onResult({ code: 1, memoryConsent: false, voiceConsent: false, telegramConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
     const t = setTimeout(() => exit(), 30)
     return () => clearTimeout(t)
   }, [phase, onResult, exit])
@@ -305,7 +322,7 @@ export function OnboardApp({
     return <Text color="red">onboard aborted — risk not accepted.</Text>
   }
 
-  // running | telegram | memory | finishing
+  // running | telegram | memory | voice | finishing
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
@@ -350,6 +367,14 @@ export function OnboardApp({
             ? Install the shared-memory provider (@agfpd/iapeer-memory)?
           </Text>
           <Text dimColor> Gives your agents a shared knowledge vault. [Y/n]</Text>
+        </Box>
+      ) : null}
+      {phase === 'voice' ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color="cyan">
+            ? Install the voice provider backend (@agfpd/voice-connect)?
+          </Text>
+          <Text dimColor> A local text-to-speech / speech-to-text HTTP service. Per-agent voice tools are a separate `iapeer enable`. [Y/n]</Text>
         </Box>
       ) : null}
     </Box>

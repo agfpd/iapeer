@@ -1,10 +1,14 @@
 // Status — the host-snapshot verb: installed-binary version, daemon health, and
-// the MEMORY SLOT line (docs/Слот памяти — контракт memory provider.md). The slot
-// is DECLARATIVE: a root file `~/.iapeer/memory-provider.json` written (atomically)
-// by the PROVIDER's own init/uninstall — the core only ever READS it. An absent or
-// unreadable file is the EMPTY slot — a fully valid state (bare core), never an
-// error (fail-open). The core never acts on heartbeat staleness — it only REPORTS
-// it (healing the provider's daemon is the provider's job).
+// the provider-SLOT lines (docs/Слот памяти — контракт memory provider.md). A slot
+// is DECLARATIVE: a root file (`~/.iapeer/memory-provider.json`, `voice-provider.json`)
+// written (atomically) by the PROVIDER's own init/uninstall — the core only ever
+// READS it. An absent or unreadable file is the EMPTY slot — a fully valid state
+// (bare core), never an error (fail-open). The core never acts on heartbeat
+// staleness — it only REPORTS it (healing the provider's daemon is the provider's
+// job). Two slots share the same declarative contract: MEMORY (auto-at-birth, carries
+// provision/unprovision) and VOICE (host-level backend only; per-peer voice tooling is
+// the separate `iapeer enable voice-connect <peer>` — the voice slot carries NO
+// provision/unprovision, and adds an `endpoint` for HTTP-facade discovery).
 
 import { closeSync, openSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
@@ -97,13 +101,71 @@ export function readMemoryProvider(env: NodeJS.ProcessEnv = process.env): Memory
   }
 }
 
-/** Age (s) of the provider's heartbeat file, or null (none declared / unreadable). */
-export function heartbeatAgeSecs(provider: MemoryProvider, nowMs: number = Date.now()): number | null {
+/** Age (s) of a provider's heartbeat file, or null (none declared / unreadable).
+ *  Generic over any slot carrying an optional `heartbeat` path (memory + voice). */
+export function heartbeatAgeSecs(provider: { heartbeat?: string }, nowMs: number = Date.now()): number | null {
   if (!provider.heartbeat) return null
   try {
     return Math.max(0, Math.floor((nowMs - statSync(provider.heartbeat).mtimeMs) / 1000))
   } catch {
     return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VOICE slot — the voice-connect provider declaration (the same declarative
+// contract as memory, two differences by design: NO provision/unprovision (voice
+// is opt-in PER-PEER via `iapeer enable`, not auto-at-birth), and an `endpoint`
+// (+ a named `routes` object the core does NOT parse) for the HTTP-facade that
+// telegram-STT / voicetalk consume with no MCP at all). The core only READS it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The voice-slot declaration filename in the storage root. */
+export const VOICE_PROVIDER_FILE = 'voice-provider.json'
+
+export interface VoiceProvider {
+  /** Provider name occupying the slot (e.g. "voice-connect"). */
+  provider: string
+  /** npm package of the provider (e.g. "@agfpd/voice-connect"). */
+  package: string
+  version: string
+  registeredAt: string
+  /** Optional liveness proxy: an absolute path whose mtime the provider's HTTP
+   *  daemon refreshes. status reports its age; the core takes NO action on staleness. */
+  heartbeat?: string
+  /** Base URL of the provider's HTTP facade (e.g. "http://127.0.0.1:PORT") — shown
+   *  in status for discovery. Opaque to the core. */
+  endpoint?: string
+}
+
+export function voiceProviderPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveGlobalRoot(env), VOICE_PROVIDER_FILE)
+}
+
+/**
+ * Read the voice-slot declaration. null = EMPTY slot (absent / unreadable /
+ * schema-invalid file) — a valid state, so this NEVER throws (fail-open to bare).
+ * Self-management extras the provider may add (label/managed/host/port/routes) are
+ * ignored — the core reads only the contract fields it acts/reports on.
+ */
+export function readVoiceProvider(env: NodeJS.ProcessEnv = process.env): VoiceProvider | null {
+  try {
+    const raw = JSON.parse(readFileSync(voiceProviderPath(env), 'utf8')) as unknown
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const o = raw as Record<string, unknown>
+    if (typeof o.provider !== 'string' || !o.provider.trim()) return null
+    if (typeof o.package !== 'string' || !o.package.trim()) return null
+    if (typeof o.version !== 'string' || !o.version.trim()) return null
+    return {
+      provider: o.provider.trim(),
+      package: o.package.trim(),
+      version: o.version.trim(),
+      registeredAt: typeof o.registeredAt === 'string' ? o.registeredAt : '',
+      ...(typeof o.heartbeat === 'string' && o.heartbeat.trim() ? { heartbeat: o.heartbeat.trim() } : {}),
+      ...(typeof o.endpoint === 'string' && o.endpoint.trim() ? { endpoint: o.endpoint.trim() } : {}),
+    }
+  } catch {
+    return null // empty slot — bare core is valid
   }
 }
 
@@ -137,6 +199,7 @@ export interface HostStatus {
   version: string
   daemon: { healthy: boolean; url: string | null; sock: string | null }
   memory: { provider: MemoryProvider | null; heartbeatAgeSecs: number | null }
+  voice: { provider: VoiceProvider | null; heartbeatAgeSecs: number | null }
   /** Full Disk Access of the iapeer binary: true granted / false not-granted /
    *  null undeterminable (non-macOS or TCC.db unreadable for a non-TCC reason). */
   fda: boolean | null
@@ -165,11 +228,13 @@ export async function hostStatus(opts: HostStatusOptions = {}): Promise<HostStat
   }
   const health = await waitForDaemonHealthy({ env, timeoutMs: 2500, needConsecutive: 1, probe: opts.probe })
   const provider = readMemoryProvider(env)
+  const voice = readVoiceProvider(env)
   const fda = (opts.fdaProbe ?? (() => probeFullDiskAccess(env)))()
   return {
     version: IAPEER_VERSION,
     daemon: { healthy: health.healthy, url, sock },
     memory: { provider, heartbeatAgeSecs: provider ? heartbeatAgeSecs(provider) : null },
+    voice: { provider: voice, heartbeatAgeSecs: voice ? heartbeatAgeSecs(voice) : null },
     fda,
   }
 }
@@ -190,6 +255,17 @@ export function formatHostStatus(s: HostStatus): string {
       : ' (daemon not running — no heartbeat file)'
   }
   const memory = s.memory.provider ? `${s.memory.provider.provider} ${s.memory.provider.version}${hb}` : 'none'
+  // Voice slot — same heartbeat semantics as memory; also show the HTTP endpoint
+  // (discovery target for telegram-STT / voicetalk). 'none' when the slot is empty.
+  let vhb = ''
+  if (s.voice.provider?.heartbeat) {
+    vhb = s.voice.heartbeatAgeSecs !== null
+      ? ` (heartbeat ${s.voice.heartbeatAgeSecs}s ago)`
+      : ' (daemon not running — no heartbeat file)'
+  }
+  const voice = s.voice.provider
+    ? `${s.voice.provider.provider} ${s.voice.provider.version}${s.voice.provider.endpoint ? ` @ ${s.voice.provider.endpoint}` : ''}${vhb}`
+    : 'none'
   // FDA line: granted → terse OK; NOT granted → the actionable hint (a fresh host
   // without FDA silently meets TCC prompts on every new protected class — peers
   // read protected folders + foreign app containers, attributed to this binary;
@@ -204,5 +280,5 @@ export function formatHostStatus(s: HostStatus): string {
   } else {
     fda = 'fda: unknown (not macOS / undeterminable)'
   }
-  return `iapeer ${s.version}\ndaemon: ${daemon}\nmemory: ${memory}\n${fda}\n`
+  return `iapeer ${s.version}\ndaemon: ${daemon}\nmemory: ${memory}\nvoice: ${voice}\n${fda}\n`
 }

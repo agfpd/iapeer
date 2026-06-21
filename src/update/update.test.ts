@@ -208,7 +208,7 @@ describe('waitForDaemonHealthy', () => {
   })
 })
 
-describe('cascadeTail (FU12 — runtimes + memory legs, best-effort)', () => {
+describe('cascadeTail (FU12 — runtimes + memory + voice legs, best-effort)', () => {
   const cap = (): { out: (s: string) => void; text: () => string } => {
     const lines: string[] = []
     return { out: (s: string) => void lines.push(s), text: () => lines.join('') }
@@ -223,10 +223,12 @@ describe('cascadeTail (FU12 — runtimes + memory legs, best-effort)', () => {
         { runtime: 'notifier', state: 'already-latest', from: '0.3.0', to: '0.3.0', peers: [], restarted: [] },
       ],
       memory: () => ({ state: 'updated', package: '@agfpd/iapeer-memory', from: '0.4.0', to: '0.4.1' }),
+      voice: () => ({ state: 'updated', package: '@agfpd/voice-connect', from: '0.1.10', to: '0.1.11' }),
     })
     expect(res.failed).toBe(false)
     expect(c.text()).toContain('telegram: updated 0.17.0 → 0.18.0')
     expect(c.text()).toContain('memory: updated')
+    expect(c.text()).toContain('voice: updated (@agfpd/voice-connect 0.1.10 → 0.1.11)')
   })
 
   test('a runtime install-failed → failed (still best-effort rendered, not aborted)', async () => {
@@ -234,6 +236,7 @@ describe('cascadeTail (FU12 — runtimes + memory legs, best-effort)', () => {
       out: () => {},
       runtimes: async () => [{ runtime: 'telegram', state: 'install-failed', peers: [], restarted: [] }],
       memory: () => ({ state: 'no-slot' }),
+      voice: () => ({ state: 'no-slot' }),
     })
     expect(res.failed).toBe(true)
   })
@@ -243,19 +246,32 @@ describe('cascadeTail (FU12 — runtimes + memory legs, best-effort)', () => {
       out: () => {},
       runtimes: async () => [{ runtime: 'notifier', state: 'updated', peers: [], restarted: [{ personality: 'timer', state: 'failed' }] }],
       memory: () => ({ state: 'already-latest' }),
+      voice: () => ({ state: 'already-latest' }),
     })
     expect(res.failed).toBe(true)
   })
 
   test('memory failed → failed; zero runtimes renders "(none installed)"', async () => {
     const c = cap()
-    const res = await cascadeTail({ out: c.out, runtimes: async () => [], memory: () => ({ state: 'failed', detail: 'exited 1' }) })
+    const res = await cascadeTail({ out: c.out, runtimes: async () => [], memory: () => ({ state: 'failed', detail: 'exited 1' }), voice: () => ({ state: 'no-slot' }) })
     expect(res.failed).toBe(true)
     expect(c.text()).toContain('(none installed)')
   })
 
   test('memory skipped-unavailable / no-slot are SOFT → not failed', async () => {
-    const res = await cascadeTail({ out: () => {}, runtimes: async () => [], memory: () => ({ state: 'skipped-unavailable' }) })
+    const res = await cascadeTail({ out: () => {}, runtimes: async () => [], memory: () => ({ state: 'skipped-unavailable' }), voice: () => ({ state: 'no-slot' }) })
     expect(res.failed).toBe(false)
+  })
+
+  test('voice failed → failed (best-effort, rendered, never aborts the rest)', async () => {
+    const c = cap()
+    const res = await cascadeTail({ out: c.out, runtimes: async () => [], memory: () => ({ state: 'no-slot' }), voice: () => ({ state: 'failed', package: '@agfpd/voice-connect', from: '0.1.11', detail: 'exited 1' }) })
+    expect(res.failed).toBe(true)
+    expect(c.text()).toContain('voice: failed')
+  })
+
+  test('voice skipped-unavailable / no-slot are SOFT → not failed', async () => {
+    expect((await cascadeTail({ out: () => {}, runtimes: async () => [], memory: () => ({ state: 'no-slot' }), voice: () => ({ state: 'skipped-unavailable' }) })).failed).toBe(false)
+    expect((await cascadeTail({ out: () => {}, runtimes: async () => [], memory: () => ({ state: 'no-slot' }), voice: () => ({ state: 'no-slot' }) })).failed).toBe(false)
   })
 })
