@@ -412,7 +412,7 @@ describe('--help/-h global intercept (CLI hygiene — usage printed, NOTHING exe
     // The full verb surface — including verbs with REAL side effects (onboard ran on
     // prod swallowing --help; stop would set a durable flag; remove would delete).
     const verbs = [
-      'onboard', 'install', 'update', 'rollback', 'version', 'daemon', 'status',
+      'onboard', 'install', 'update', 'rollback', 'version', 'daemon', 'status', 'live-runtime',
       'install-runtime', 'init', 'create', 'list', 'stop', 'start', 'remove', 'send',
       'enable', 'attach', 'interrupt', 'compact', 'self-fresh', 'native-memory', 'run-infra',
     ]

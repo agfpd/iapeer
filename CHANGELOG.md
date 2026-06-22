@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.22] - 2026-06-22
+
+### Added
+
+- **`iapeer live-runtime <peer>`** — prints the peer's CURRENT live runtime: the
+  freshest-pane-log among its **pid-alive** supervisor sessions (a peer can be alive on
+  more than one runtime at once — a `/codex` flip can leave the old session running
+  alongside the new). This is the authoritative, real-time signal for "what runtime is
+  this peer running right now" — NOT `default_runtime` (only the wake-default) and NOT a
+  `.session` wake-record (alive-filtered only on a supervise-tick latency). Exit 0 + the
+  runtime on stdout when one is live; exit 1 + no output when none is alive. For external
+  consumers (e.g. telegram-runtime's typing/tool-use indicator) that must resolve the live
+  runtime of a peer running on a non-default runtime, instead of inferring it. Exposed as
+  `resolveLiveRuntime` (transport).
+
 ## [0.4.21] - 2026-06-22
 
 ### Fixed
@@ -325,7 +340,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.21...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.22...HEAD
+[0.4.22]: https://github.com/agfpd/iapeer/compare/v0.4.21...v0.4.22
 [0.4.21]: https://github.com/agfpd/iapeer/compare/v0.4.20...v0.4.21
 [0.4.20]: https://github.com/agfpd/iapeer/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/agfpd/iapeer/compare/v0.4.18...v0.4.19

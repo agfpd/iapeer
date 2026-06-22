@@ -279,6 +279,33 @@ function defaultPaneLogMtime(address: string): number | null {
   }
 }
 
+/**
+ * The CURRENT live runtime of a peer — the AUTHORITATIVE, real-time signal for "what
+ * runtime is this peer running right now" (NOT default_runtime, which is only the wake
+ * DEFAULT, and NOT a `.session` file, a wake-record cleaned on a supervise-tick latency).
+ *
+ * Resolution: among the peer's PID-ALIVE supervisor sessions (listHostedPeers — the same
+ * source delivery uses; `sessionAlive` = pidfile exists AND kill-0), pick the one with the
+ * FRESHEST pane-log. A peer can be alive on >1 runtime at once (a `/codex` flip can leave
+ * the old session running alongside the new), so the freshest-pane-log among the alive set
+ * is the currently-active surface. The alive-filter is what fixes the flip-race: a
+ * just-died runtime's pane-log / .sock / .session all LINGER, but its pid is dead → it is
+ * excluded here. Returns null when no session is alive.
+ *
+ * Deps are injectable for hermetic tests (the defaults read the real run-dir + pane-logs).
+ */
+export function resolveLiveRuntime(
+  personality: string,
+  deps: { aliveRuntimes?: (p: string) => string[]; paneLogMtime?: (address: string) => number | null } = {},
+): string | null {
+  const aliveOf = deps.aliveRuntimes ?? ((p: string) => listHostedPeers().filter(h => h.personality === p).map(h => h.runtime))
+  const paneMt = deps.paneLogMtime ?? defaultPaneLogMtime
+  const alive = aliveOf(personality)
+  if (alive.length <= 1) return alive[0] ?? null
+  // >1 alive → the freshest pane-log mtime (the currently-rendering turn surface).
+  return alive.reduce((best, rt) => ((paneMt(`${rt}-${personality}`) ?? 0) > (paneMt(`${best}-${personality}`) ?? 0) ? rt : best))
+}
+
 
 // ─── Compact done gate (dialogue control must report FACT, not keystroke delivery) ──
 

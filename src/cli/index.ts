@@ -1139,6 +1139,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory → voice (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
   },
   { sig: 'status', desc: 'host snapshot: version, daemon health, memory + voice slots (<provider> | none)' },
+  { sig: 'live-runtime <peer>', desc: 'print the peer\'s CURRENT live runtime (freshest pane-log among pid-alive sessions; NOT default_runtime). Exit 1 + no output if none alive' },
   { sig: 'install-runtime <runtime> [--package pkg] [--npx]', desc: 'npx-install a runtime package + deploy its declared peer-set' },
   { sig: 'update-runtime <runtime> | --all [--force]', desc: "version-gate → re-install + re-provision declared set → restart the runtime's peers" },
   { sig: 'init [cwd] [--runtime r] [--description d]', desc: 'onboard the CURRENT folder as a peer (name = folder name; identity + MCP + doctrine)' },
@@ -1500,6 +1501,21 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const s = await hostStatus({ env })
         out(formatHostStatus(s))
         return s.daemon.healthy ? 0 : 1
+      }
+      case 'live-runtime': {
+        // The AUTHORITATIVE current live runtime of a peer (machine-readable, for external
+        // consumers like telegram-runtime's typing indicator). Prints the runtime the peer
+        // is RUNNING right now — the freshest-pane-log among its PID-alive supervisor
+        // sessions — NOT default_runtime (the wake-default) and NOT a .session wake-record.
+        // A peer can be alive on >1 runtime (a /codex flip leaves both); this picks the
+        // currently-active. Exit 0 + the runtime on stdout when one is live; exit 1 + no
+        // output when none is alive (queryable: `rt=$(iapeer live-runtime <p>) || handle-down`).
+        if (!positionals[0]) return argErr(errOut, 'live-runtime needs a peer name — usage: iapeer live-runtime <peer>')
+        const { resolveLiveRuntime } = await import('../transport/index.ts')
+        const rt = resolveLiveRuntime(positionals[0])
+        if (!rt) return 1 // no live session — no output, non-zero
+        out(`${rt}\n`)
+        return 0
       }
       case 'install-runtime': {
         // §6 onboard a runtime END-TO-END: npx-install the package (auto-resolved from

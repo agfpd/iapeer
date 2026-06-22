@@ -11,7 +11,7 @@
 // Hermetic: both proxies are injected seams (no live supervisor, no host fs). Routers (no transcript
 // proxy) confirm by the socket-ack.
 import { describe, expect, test } from 'bun:test'
-import { deliverWarm, type DeliveryTarget, type WarmDeliverSeam } from './index.ts'
+import { deliverWarm, resolveLiveRuntime, type DeliveryTarget, type WarmDeliverSeam } from './index.ts'
 
 const hostedTarget: DeliveryTarget = {
   runtime: 'codex',
@@ -137,5 +137,36 @@ describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript/pa
     const r = await deliverWarm(routerTarget, '<iap>x</iap>', '/peer/cwd', seam)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error.message).toContain('deliver failed')
+  })
+})
+
+// resolveLiveRuntime — the AUTHORITATIVE current live runtime (freshest pane-log among the
+// PID-alive supervisor sessions), the signal external packages (telegram-runtime typing)
+// must use instead of default_runtime / a lingering .session. Deps injected for hermeticity.
+describe('resolveLiveRuntime — freshest pane-log among pid-alive sessions', () => {
+  test('no alive session → null', () => {
+    expect(resolveLiveRuntime('p', { aliveRuntimes: () => [] })).toBeNull()
+  })
+
+  test('exactly one alive → that runtime (pane-log not even consulted)', () => {
+    let probes = 0
+    const rt = resolveLiveRuntime('p', { aliveRuntimes: () => ['codex'], paneLogMtime: () => (probes++, 1) })
+    expect(rt).toBe('codex')
+    expect(probes).toBe(0)
+  })
+
+  test('multiple alive (a /codex flip left both) → the freshest pane-log = the active surface', () => {
+    const mt: Record<string, number> = { 'claude-p': 100, 'codex-p': 200 }
+    expect(resolveLiveRuntime('p', { aliveRuntimes: () => ['claude', 'codex'], paneLogMtime: a => mt[a] ?? 0 })).toBe('codex')
+    // freshness flips → the resolver follows the active surface
+    mt['claude-p'] = 300
+    expect(resolveLiveRuntime('p', { aliveRuntimes: () => ['claude', 'codex'], paneLogMtime: a => mt[a] ?? 0 })).toBe('claude')
+  })
+
+  test('a dead runtime is EXCLUDED even if its pane-log is freshest (the flip-race fix)', () => {
+    // codex just died (not in the alive set) but its pane-log is the freshest (lingers);
+    // claude is the only ALIVE one → resolver returns claude, NOT the stale-fresh codex.
+    const mt: Record<string, number> = { 'claude-p': 100, 'codex-p': 999 }
+    expect(resolveLiveRuntime('p', { aliveRuntimes: () => ['claude'], paneLogMtime: a => mt[a] ?? 0 })).toBe('claude')
   })
 })
