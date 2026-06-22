@@ -1,7 +1,7 @@
 {
   "name": "@agfpd/iapeer",
   "version": "0.4.25",
-  "description": "Foundation core for the iapeer multi-agent ecosystem: identity, registry, storage, codec.",
+  "description": "Run Claude Code and Codex CLI as local background agents that message each other, wake on demand, and share one memory.",
   "license": "Apache-2.0",
   "author": "agfpd",
   "homepage": "https://github.com/agfpd/iapeer#readme",
@@ -13,12 +13,18 @@
     "url": "https://github.com/agfpd/iapeer/issues"
   },
   "keywords": [
-    "multi-agent",
-    "agents",
+    "claude-code",
+    "codex-cli",
+    "codex",
     "mcp",
-    "ipc",
-    "launchd",
-    "bun"
+    "shared-memory",
+    "peer-to-peer",
+    "background-agents",
+    "ai-agents",
+    "multi-agent",
+    "telegram",
+    "macos",
+    "launchd"
   ],
   "type": "module",
   "bin": {

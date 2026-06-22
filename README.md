@@ -1,6 +1,6 @@
 # iapeer
 
-**The foundation for a team of AI agents on one machine.**
+**Run Claude Code and Codex CLI as local background agents that message each other, wake on demand, and share one memory.**
 
 [![CI](https://github.com/agfpd/iapeer/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/iapeer/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/iapeer)](https://www.npmjs.com/package/@agfpd/iapeer)
@@ -32,9 +32,21 @@ recipient peer             — asleep? the daemon wakes it and delivers on wake
 ## What makes it different
 
 - **Real interactive CLI sessions, not headless one-shots.** Each AI peer is a full Claude Code or Codex CLI session, not a disposable `claude -p` / `codex exec` call.
-- **Warm-on-demand lifecycle.** A live session answers fast; after about an hour idle the daemon closes it; the next message brings it back with its context resumed. The message flow drives the lifecycle, not a human's presence.
+- **Warm on demand, always reachable.** A live session answers fast; when it goes idle the daemon parks it and brings it back — context resumed — on the next message. Availability never depends on a human keeping the session open. [Lifecycle and daemon](docs/04-lifecycle-and-daemon.md).
 - **One identity across runtimes, with one memory.** A peer's `personality` is decoupled from its runtime: the same peer runs on Claude or Codex, switched with a command. By default (set up by `iapeer onboard`) it carries one shared memory (iapeer-memory) keyed to the personality, not the runtime — one personality, one memory, whatever runtime it runs on.
 - **Heterogeneous peers, one protocol.** AI agents, humans (Telegram), and services (timer = cron, watcher = event) are all first-class, addressed the same way over an always-on MCP daemon that exposes exactly one tool, `send_to_peer`.
+
+Where iapeer sits next to the tools it gets compared to:
+
+| | iapeer | Task orchestrator | One-shot wrapper (`claude -p`) | Memory server | MCP messaging tool |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Persistent peer identity | ✓ | — | — | — | — |
+| Full interactive sessions, not headless | ✓ | — | — | — | — |
+| Claude ↔ Codex as equal peers | ✓ | — | — | — | — |
+| Wake on demand, context resumed | ✓ | — | — | — | — |
+| Shared memory across runtimes | ✓ | — | — | ✓ | — |
+| Peer-to-peer messaging | ✓ | — | — | — | ✓ |
+| Humans and services as peers | ✓ | — | — | — | — |
 
 ## Quick start
 
@@ -58,15 +70,21 @@ iapeer onboard
 
 Either path runs `onboard` interactively: it surfaces the security checks (runtime sign-in, macOS Full Disk Access) and asks before installing the memory provider — nothing is auto-approved behind your back. You can read [`install.sh`](./install.sh) before running it, or preview every step with `IAPEER_INSTALL_DRYRUN=1`.
 
-**Then create your first agent and talk to it:**
+**Then create your agents and put them in touch.** A Claude peer and a Codex peer talk as equals — create one on each runtime:
 
 ```sh
-# create your first agent
-iapeer create assistant --runtime claude
+# create two peers, one per runtime
+iapeer create architect --runtime claude
+iapeer create implementer --runtime codex
 
-# talk to it live in your terminal — detach with Ctrl-] (or just close it; the agent keeps running)
-iapeer attach assistant
+# message one from your terminal
+iapeer send implementer --message "Draft the parser API; the architect will review."
+
+# or join a peer's live session — detach with Ctrl-] (or just close it; the agent keeps running)
+iapeer attach architect
 ```
+
+Inside a peer's own session the agent reaches others with `send_to_peer(<name>, <text>)`; `iapeer send` is the terminal equivalent.
 
 **Already have a project folder?** In step 3, use `init` instead of `create`: `cd` into the project and register that folder itself as a peer.
 
@@ -79,11 +97,11 @@ The peer's name is the folder name, normalized (`myagent`). `create` sets up a f
 
 Two ways to work with an agent locally in your terminal:
 
-- **Join its live session** — `iapeer attach assistant`. The daemon wakes the peer first if it is asleep. Detach with `Ctrl-]` — or just close the terminal — and the session keeps running in the background; reattach with `iapeer attach` whenever you need it.
+- **Join its live session** — `iapeer attach architect`. The daemon wakes the peer first if it is asleep. Detach with `Ctrl-]` — or just close the terminal — and the session keeps running in the background; reattach with `iapeer attach` whenever you need it.
 - **Open a fresh session in the peer's folder** — go to the peer's directory and launch its runtime:
 
   ```sh
-  cd ~/.iapeer/peers/assistant
+  cd ~/.iapeer/peers/architect
   iapeer claude
   ```
 
