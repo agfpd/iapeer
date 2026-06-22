@@ -176,6 +176,17 @@ function hostLivenessGraceMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : livenessGraceMs()
 }
 
+// Launchd-revive retry — a MISS on a launchd-managed target the daemon can't wake (H4)
+// but launchd KeepAlive WILL revive (router restart / crash-revive window). routeSend
+// re-resolves for up to this window before failing, bridging the gap (silent-loss guard).
+// Env-tunable; default ~4s (a bootout→bootstrap router restart settles well under it).
+const LAUNCHD_REVIVE_POLL_MS = 300
+function launchdReviveGraceMs(): number {
+  const raw = process.env.IAP_LAUNCHD_REVIVE_GRACE_MS
+  const n = raw === undefined ? NaN : Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 4000
+}
+
 // ─── Warm delivery (pty-only — supervisor socket) ────────────────────────────────────────────────
 
 /** Test seam for `deliverWarm`. Production defaults route on the real supervisor; tests inject a
@@ -793,6 +804,17 @@ export interface RouteDeps {
    *  imports lifecycle (layering — main.ts is where the two meet); call sites
    *  swallow hook errors (a hook must never fail a delivered message). */
   noteLiveTopic?: (identity: string, topic: string) => void
+  /** H4 launchd-managed detector (injected so transport never imports lifecycle —
+   *  main.ts wires the real `isLaunchdManaged`). A MISS on a launchd-managed target is
+   *  almost always a TRANSIENT restart window (router restart on connect / `iapeer
+   *  update`, or a crash that KeepAlive is reviving), NOT a real outage: the daemon
+   *  can't wake it (H4) but launchd WILL revive it in ~1s. So routeSend retries the
+   *  RESOLVE for a bounded window before failing, bridging the gap (prevents the
+   *  silent-loss class: an in-flight delivery — esp. to a HUMAN over a telegram router —
+   *  dropped during a restart). Absent → no retry (legacy behaviour). */
+  isLaunchdManaged?: (personality: string) => boolean
+  /** Injectable async sleep for the launchd-revive retry poll (tests). Default: setTimeout. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /** Best-effort noteLiveTopic invocation — only on a non-empty topic, never throws. */
@@ -1159,6 +1181,42 @@ export async function routeSend(
 
   // MISS — peer offline.
   if (!deps.wake) return target // Ф1: explicit offline, no wake
+  // LAUNCHD-REVIVE RETRY: a launchd-managed target the daemon can't wake (H4) but launchd
+  // KeepAlive WILL revive — a MISS here is almost always a transient RESTART WINDOW (router
+  // restart on connect / `iapeer update`, or a crash-revive), not a real outage. Wake would
+  // just refuse (launchd-managed) and the delivery would fail in ~16ms — losing an in-flight
+  // message (observed: natalya→arthur ok=false ms=16 during a connect router restart; a
+  // message to a HUMAN, the silent-loss-adjacent class). Bridge it: re-resolve for a bounded
+  // window and deliver the instant it revives. Each poll RE-RESOLVES the live target
+  // (verify-before-act) → the ok reflects a CONFIRMED delivery (no false-OK); a genuinely
+  // down peer still fails LOUD after the window (retryable, never silent).
+  if (deps.isLaunchdManaged?.(personality)) {
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+    const reviveDeadline = monotonicMs() + launchdReviveGraceMs()
+    while (monotonicMs() < reviveDeadline) {
+      await sleep(LAUNCHD_REVIVE_POLL_MS)
+      const revived = resolvePeerDeliveryTarget(personality, runtime, peer)
+      if (!revived.ok) continue // not back yet — keep polling until the deadline
+      if (revived.value.address === caller.address) return err('cannot send to self')
+      const reviveGuard = telegramSenderGuard(caller, revived.value.runtime, personality)
+      if (!reviveGuard.ok) return reviveGuard
+      const delivered = await deliverWarm(revived.value, envelope, peer.cwd)
+      if (delivered.ok) {
+        noteTopic(deps, revived.value.address, topic)
+        return ok({
+          ok: true,
+          delivered_to: { personality: revived.value.personality, runtime: revived.value.runtime },
+          woke: false,
+          ts: new Date().toISOString(),
+        })
+      }
+      // resolved but the deliver didn't land (session still settling) → keep polling
+    }
+    return err(
+      `peer "${personality}" (launchd-managed) offline and did not revive within ${launchdReviveGraceMs()}ms ` +
+        `(restart window outlasted the grace?) — message NOT delivered; retry`,
+    )
+  }
   const woke = await deps.wake({ personality, runtime, topic, task: envelope })
   if (woke.status === 'FAILED') {
     // C1 — a durably STOPPED peer is a deliberate halt, not a transient miss:

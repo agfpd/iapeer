@@ -25,6 +25,7 @@ import { spawnSync } from 'child_process'
 import { normalizeIntelligenceValue } from '../core/constants.ts'
 import { runtimeRoot } from '../storage/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
+import { reindexFromLocals } from '../identity/profileStandard.ts'
 import { readRuntimeManifest } from '../runtime/index.ts'
 
 export interface TgRunResult {
@@ -227,6 +228,22 @@ export async function connectTelegram(opts: ConnectTelegramOptions): Promise<Con
   const iface = runTg(['interface', 'bot', alias, '--peer', peer], env)
   if (iface.status !== 0) {
     return { state: 'interface-failed', peer, username, detail: (iface.stderr || iface.stdout || `exit ${iface.status}`).trim() }
+  }
+
+  // (2b) EAGER reindex — `interface bot` merged interfaces.telegram into the per-cwd
+  // profile (source of truth), but the derived registry (peers-profiles.json) is a
+  // PROJECTION that only refreshes on specific verbs (verify --fix, default-runtime…).
+  // Until then the peer's telegram FACE is INVISIBLE to the sender-guard
+  // (hasTelegramPresence reads the REGISTRY passport) — so the peer's OUTBOUND telegram
+  // is blocked ("no telegram face") + list/attach are stale. Project it now (same
+  // reindexFromLocals the default-runtime verb uses). Best-effort: a reindex hiccup must
+  // not fail a connect whose profile + bot are already in place (registry catches up on
+  // the next reindex verb). Runs on EVERY connect, incl. the idempotent no-op below — so
+  // a registry that drifted on a prior (pre-fix) connect self-heals here too.
+  try {
+    await reindexFromLocals({ env })
+  } catch {
+    /* registry lazily catches up on the next reindex verb; profile + bot are correct */
   }
 
   // (3) Idempotency gate: the SAME token leaves bots/<alias>/.env byte-stable →

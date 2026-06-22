@@ -35,6 +35,7 @@ import {
   drainEphemeralQueue,
   enqueueEphemeralTask,
   isEphemeralPeer,
+  isLaunchdManaged,
   addTopic,
   loadLifecycleConfig,
   processEagerRelaunches,
@@ -332,6 +333,10 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // Busy-human-composer queue: fast queued ack, async drain, fail all pending
     // on daemon close/update so a queued envelope is never silently lost.
     composerQueue,
+    // H4 launchd-revive delivery retry (see RouteDeps.isLaunchdManaged): a MISS on a
+    // launchd-managed target (the daemon can't wake it, but KeepAlive revives it) → retry-
+    // resolve for a bounded window instead of failing in ~16ms — bridges a router restart.
+    isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
     supervise: {
       intervalMs: opts.superviseIntervalMs ?? DEFAULT_SUPERVISE_INTERVAL_MS,
       // idle-reap / zombie-sweep, THEN the eager fresh re-launch for any peer whose

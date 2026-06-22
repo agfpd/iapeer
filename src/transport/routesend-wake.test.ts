@@ -190,3 +190,60 @@ describe('telegram sender policy — routeSend refusal', () => {
     if (!r.ok) expect(r.error.message).toContain('telegram policy')
   })
 })
+
+// ─── #2: launchd-revive delivery retry (bridge the router-restart window) ─────
+// A MISS on a LAUNCHD-MANAGED target — the daemon can't wake it (H4) but launchd
+// KeepAlive WILL revive it (~1s router restart on connect / `iapeer update`). Without
+// the retry, delivery failed in ~16ms with "wake failed: launchd-managed" and an
+// in-flight message was lost (observed: natalya→arthur ok=false ms=16 during a connect
+// router restart). The fix retries-resolve for a bounded window, then fails LOUD
+// (retryable, never silent). TARGET is offline here (no live session in the temp root),
+// so the resolve keeps missing and the retry exhausts — exercising the safety path.
+describe('launchd-revive delivery retry (#2)', () => {
+  const savedGrace = process.env.IAP_LAUNCHD_REVIVE_GRACE_MS
+  afterAll(() => {
+    if (savedGrace === undefined) delete process.env.IAP_LAUNCHD_REVIVE_GRACE_MS
+    else process.env.IAP_LAUNCHD_REVIVE_GRACE_MS = savedGrace
+  })
+
+  test('launchd-managed offline target → bounded retry, LOUD err, wake NOT reached', async () => {
+    process.env.IAP_LAUNCHD_REVIVE_GRACE_MS = '60' // small window → exits in a few polls
+    let wakeCalled = false
+    let polls = 0
+    const r = await routeSend(
+      caller,
+      { personality: TARGET, message: 'm' },
+      {
+        wake: async () => ((wakeCalled = true), { status: 'FAILED', woke: false, reason: 'should-not-reach' }),
+        isLaunchdManaged: () => true,
+        sleep: async () => {
+          polls++
+          await new Promise<void>(r => setTimeout(r, 20))
+        },
+      },
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.error.message).toContain('did not revive') // the launchd-revive err, NOT "wake failed"
+      expect(r.error.message).toContain('retry') // retryable, loud — never silent
+    }
+    expect(polls).toBeGreaterThan(0) // it RETRIED (polled), not an immediate ~16ms fail
+    expect(wakeCalled).toBe(false) // launchd path returns before the wake (which would just refuse)
+  })
+
+  test('NON-launchd offline target → normal wake path (retry skipped, wake invoked)', async () => {
+    let wakeCalled = false
+    await routeSend(
+      caller,
+      { personality: TARGET, message: 'm' },
+      { wake: async () => ((wakeCalled = true), { status: 'FAILED', woke: false, reason: 'offline' }), isLaunchdManaged: () => false },
+    )
+    expect(wakeCalled).toBe(true) // not launchd → straight to wake (existing behavior preserved)
+  })
+
+  test('no isLaunchdManaged dep → legacy behavior (wake path, no retry)', async () => {
+    let wakeCalled = false
+    await routeSend(caller, { personality: TARGET, message: 'm' }, { wake: async () => ((wakeCalled = true), { status: 'FAILED', woke: false, reason: 'offline' }) })
+    expect(wakeCalled).toBe(true)
+  })
+})

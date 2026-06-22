@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.25] - 2026-06-22
+
+### Fixed
+
+- **`connect telegram` now eager-reindexes the registry** (#1). `interface bot` merges
+  interfaces.telegram into the per-cwd profile (source of truth), but the derived registry
+  (peers-profiles.json) is a projection that only refreshed on specific verbs — so until
+  then the peer's telegram FACE was invisible to the sender-guard (`hasTelegramPresence`
+  reads the REGISTRY passport), **blocking the peer's outbound telegram** (observed live:
+  impact-finder "no telegram face"). connect now calls `reindexFromLocals` after a
+  successful `interface bot` (best-effort), so the face lands in the registry immediately —
+  no manual `iapeer verify --fix`.
+- **Launchd-revive delivery retry** (#2): a MISS on a launchd-managed target — which the
+  daemon can't wake (H4) but launchd KeepAlive revives in ~1s — no longer fails terminally
+  in ~16ms. During a router restart (on `connect` / `iapeer update`) an in-flight delivery
+  was lost (observed: `natalya→arthur ok=false ms=16` mid-restart — a message to a HUMAN).
+  routeSend now retries-resolve for a bounded window (`IAP_LAUNCHD_REVIVE_GRACE_MS`, ~4s)
+  and delivers the instant the target revives; it re-resolves each poll (verify-before-act,
+  so the ok reflects a CONFIRMED delivery — no false-OK), and a genuinely-down peer still
+  fails LOUD and retryable (never silent). `isLaunchdManaged` injected via deps (no
+  transport→lifecycle coupling).
+
 ## [0.4.24] - 2026-06-22
 
 ### Fixed
@@ -366,7 +388,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.24...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.25...HEAD
+[0.4.25]: https://github.com/agfpd/iapeer/compare/v0.4.24...v0.4.25
 [0.4.24]: https://github.com/agfpd/iapeer/compare/v0.4.23...v0.4.24
 [0.4.23]: https://github.com/agfpd/iapeer/compare/v0.4.22...v0.4.23
 [0.4.22]: https://github.com/agfpd/iapeer/compare/v0.4.21...v0.4.22

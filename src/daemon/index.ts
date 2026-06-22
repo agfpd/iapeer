@@ -194,6 +194,10 @@ export interface CallToolDeps {
   noteLiveTopic?: (identity: string, topic: string) => void
   /** Busy-human-composer queue — see transport.createComposerDeliveryQueue. */
   composerQueue?: ComposerQueueRouteDeps
+  /** H4 launchd-managed detector — see transport.RouteDeps.isLaunchdManaged (the
+   *  launchd-revive delivery retry). Injected so the daemon never imports lifecycle;
+   *  the production main wires the real isLaunchdManaged. */
+  isLaunchdManaged?: (personality: string) => boolean
 }
 
 export async function callTool(
@@ -216,6 +220,7 @@ export async function callTool(
       ephemeral: deps.ephemeral,
       noteLiveTopic: deps.noteLiveTopic,
       composerQueue: deps.composerQueue,
+      isLaunchdManaged: deps.isLaunchdManaged,
     })
     // Ф-#8a: ONE durable outcome line per delivery attempt (delivery.log, sibling
     // to lifecycle.log) — metadata only, never the body. Both branches of the
@@ -392,6 +397,9 @@ export interface StartDaemonOptions extends StorageOptions {
    * senders on shutdown/restart.
    */
   composerQueue?: ComposerQueueRouteDeps
+  /** H4 launchd-managed detector — see CallToolDeps.isLaunchdManaged / the launchd-revive
+   *  delivery retry. OFF by default (library/tests); production main wires the real one. */
+  isLaunchdManaged?: (personality: string) => boolean
   /**
    * Write the discovery file (router.json) at <root>/state/iapeer/router.json with
    * the active addresses `{sock, tcp}` — atomically on listen, removed on close.
@@ -426,6 +434,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
       ephemeral: opts.ephemeral,
       noteLiveTopic: opts.noteLiveTopic,
       composerQueue: opts.composerQueue,
+      isLaunchdManaged: opts.isLaunchdManaged,
     })
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
