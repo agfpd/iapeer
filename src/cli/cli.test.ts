@@ -287,6 +287,58 @@ describe('remove (registry record via the locked writer)', () => {
     expect(existsSync(join(cfg.stateDir, 'claude-reborn.queue'))).toBe(false)
     expect(isStopped(cfg, 'claude-reborn2')).toBe(true) // dot-delimited: no prefix bleed
   })
+
+  // PLIST TEARDOWN (boris 22.06): removing an always-on peer WITHOUT booting out + rm-ing
+  // its com.iapeer.<p> plist left an ORPHAN → launchd KeepAlive crash-looped run-infra
+  // against the deleted record. remove now tears down a FOUNDATION-OWNED plist, with the
+  // H4 fleet-guard refusing a FOREIGN persistent-peer plist.
+  const writePlist = (personality: string, e: NodeJS.ProcessEnv, foundationOwned: boolean): string => {
+    const p = launchdPlistPath(personality, e)
+    const sentinel = foundationOwned ? '<key>com.iapeer.managed</key><true/>' : '<key>SomeForeignOwner</key><true/>'
+    writeFileSync(p, `<?xml version="1.0"?><plist><dict>${sentinel}</dict></plist>`)
+    return p
+  }
+
+  test('always-on peer (foundation-owned plist) → bootout + plist removed (no orphan crash-loop)', async () => {
+    await register('voicebot', 'voicetalk', 'natural')
+    const e = env()
+    const plist = writePlist('voicebot', e, true)
+    expect(existsSync(plist)).toBe(true)
+    const o = await removePeerCli('voicebot', { env: e })
+    expect(o.action).toBe('removed')
+    expect(o.plistTeardown).toContain('skipped-sandbox') // sandbox: no real launchctl bootout
+    expect(o.plistTeardown).toContain('plist removed')
+    expect(existsSync(plist)).toBe(false) // the orphan-causing plist is gone
+    expect(findPeer(readPeersIndex({ env: e }), 'voicebot')).toBeNull()
+  })
+
+  test('a warm peer with NO plist → plistTeardown absent (nothing to tear down)', async () => {
+    await register('warmonly')
+    const o = await removePeerCli('warmonly', { env: env() })
+    expect(o.action).toBe('removed')
+    expect(o.plistTeardown).toBeUndefined()
+  })
+
+  test('FLEET GUARD (H4): a FOREIGN launchd plist → refused without --force (registry + foreign plist intact)', async () => {
+    await register('ppfleet')
+    const e = env()
+    const plist = writePlist('ppfleet', e, false) // NO foundation sentinel
+    const o = await removePeerCli('ppfleet', { env: e })
+    expect(o.action).toBe('refused-foreign-launchd')
+    expect(findPeer(readPeersIndex({ env: e }), 'ppfleet')).not.toBeNull() // registry untouched
+    expect(existsSync(plist)).toBe(true) // foreign plist NEVER touched
+  })
+
+  test('FLEET GUARD (H4): --force drops the registry record but LEAVES the foreign plist intact', async () => {
+    await register('ppfleet2')
+    const e = env()
+    const plist = writePlist('ppfleet2', e, false)
+    const o = await removePeerCli('ppfleet2', { env: e, force: true })
+    expect(o.action).toBe('removed')
+    expect(o.plistTeardown).toContain('skipped-foreign')
+    expect(existsSync(plist)).toBe(true) // foreign plist left intact even under --force (H4)
+    expect(findPeer(readPeersIndex({ env: e }), 'ppfleet2')).toBeNull()
+  })
 })
 
 describe('send validation', () => {

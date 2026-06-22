@@ -11,7 +11,7 @@
 // sentinel-marked always-on plist) are stop/start-able.
 
 import { spawnSync } from 'child_process'
-import { existsSync, readFileSync, renameSync } from 'fs'
+import { existsSync, readFileSync, renameSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import {
@@ -693,8 +693,13 @@ export async function compactPeer(
 
 export interface RemoveOutcome {
   personality: string
-  action: 'removed' | 'absent' | 'refused-live'
+  action: 'removed' | 'absent' | 'refused-live' | 'refused-foreign-launchd'
   reason?: string
+  /** Always-on plist teardown outcome (`bootout + plist removed` / `skipped-sandbox` /
+   *  `skipped-foreign …`). Present only when the peer had a com.iapeer.<p> plist — an
+   *  always-on (infra) peer. Without this, remove orphaned the loaded plist → launchd
+   *  KeepAlive crash-looped `run-infra` against the deleted record. */
+  plistTeardown?: string
   /** The removed peer's cwd (registry fact, captured BEFORE the removal). remove
    *  deliberately keeps the folder — user data is never deleted by a registry reap
    *  (say so in the output instead of leaving silent orphans). */
@@ -742,6 +747,47 @@ export async function removePeerCli(
         action: 'refused-live',
         reason: `"${personality}" is LIVE on ${liveRt} — removing its registry record would orphan the running session from routing; stop it first or pass --force`,
       }
+    }
+  }
+  // PLIST TEARDOWN (the always-on / launchd-managed peer). An infra peer
+  // (notifier/telegram/voicetalk) has a com.iapeer.<p> plist with KeepAlive. Removing
+  // ONLY the registry record leaves the plist LOADED → launchd keeps relaunching
+  // `iapeer run-infra <p> <rt>` against the now-deleted record → CRASH-LOOP (doc alerts
+  // "gone-without-disable"). So bootout the job BEFORE the registry remove (stop KeepAlive
+  // before its target vanishes — no crash-loop window), then rm the plist file.
+  // FLEET GUARD (H4): a FOREIGN persistent-peer plist is off-limits — refuse (unless
+  // --force, which then drops ONLY the registry record and leaves the foreign plist intact).
+  let plistTeardown: string | undefined
+  if (isLaunchdManaged(personality, env)) {
+    if (isForeignLaunchd(personality, env)) {
+      if (!opts.force) {
+        return {
+          personality,
+          action: 'refused-foreign-launchd',
+          reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation will not remove it (H4). Use persistent-peer tooling, or --force to drop ONLY the registry record (the foreign plist is left intact).`,
+        }
+      }
+      plistTeardown = 'skipped-foreign (H4 — foreign plist left intact; --force dropped only the registry record)'
+    } else {
+      const plistPath = launchdPlistPath(personality, env)
+      // Sandbox/test: never invoke real launchctl (a test peer's label isn't a real job);
+      // still remove the (temp-dir) plist file so the teardown is observable.
+      let bootoutNote: string
+      if (env.IAPEER_TEST_SANDBOX === '1') {
+        bootoutNote = 'skipped-sandbox'
+      } else {
+        const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
+        // bootout exits non-zero when the job was already unloaded — benign for a teardown.
+        bootoutNote = r.status === 0 ? 'bootout' : `bootout (exit ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''})`
+      }
+      let rmNote: string
+      try {
+        rmSync(plistPath, { force: true })
+        rmNote = ' + plist removed'
+      } catch (e) {
+        rmNote = ` (plist rm FAILED: ${e instanceof Error ? e.message : String(e)} — remove ${plistPath} manually)`
+      }
+      plistTeardown = `${bootoutNote}${rmNote}`
     }
   }
   await removePeer(personality, { env })
@@ -822,6 +868,7 @@ export async function removePeerCli(
     action: 'removed',
     cwd: peer.cwd,
     purgedState,
+    ...(plistTeardown ? { plistTeardown } : {}),
     ...(unprovisionOutcomes.length ? { unprovision: unprovisionOutcomes } : {}),
     ...(trustCleaned ? { codexTrust: trustCleaned } : {}),
     ...(hooksTrustCleaned ? { codexHooksTrust: hooksTrustCleaned } : {}),
@@ -1806,6 +1853,11 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const o = await removePeerCli(positionals[0], { force: flags.force === true, env })
         if (o.action === 'removed') {
           out(`removed "${o.personality}" from the registry\n`)
+          // Always-on plist teardown (bootout + rm) — an orphan loaded plist would
+          // KeepAlive-crash-loop run-infra against the deleted record.
+          if (o.plistTeardown) {
+            out(`launchd plist: ${o.plistTeardown}\n`)
+          }
           // v1.2: the provider unwound its surfaces (occasion=remove) — say how it went.
           if (o.unprovision?.length) {
             out(`memory unprovision: ${o.unprovision.join(', ')}\n`)
@@ -1830,7 +1882,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           }
         } else if (o.action === 'absent') out(`"${o.personality}" not registered — no-op\n`)
         else errOut(`remove: ${o.reason}\n`)
-        return o.action === 'refused-live' ? 1 : 0
+        return o.action === 'refused-live' || o.action === 'refused-foreign-launchd' ? 1 : 0
       }
       case 'rename': {
         // FULL folder rename (Arthur's invariant: personality == basename(cwd)): mv the
