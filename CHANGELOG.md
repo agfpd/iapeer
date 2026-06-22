@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.24] - 2026-06-22
+
+### Fixed
+
+- **`iapeer connect telegram <peer>` (and the `enable telegram` alias) no longer fails for a
+  peer whose personality isn't a valid Telegram @username** (e.g. a hyphen: "impact-finder").
+  connect passed the PERSONALITY as the bot @username to telegram-runtime (which keys bots by
+  `<bot-username>`), so a hyphenated personality was rejected ("must be a telegram @username").
+  The bot @username is TOKEN-derived (set in @BotFather), never the personality. connect now
+  resolves it from the token via Telegram **getMe** and uses that for `bot add` / `interface
+  bot` / storage; the human still owes only the token. An invalid/unreachable token fails
+  early with a getMe-rejected message. (The getMe lives in the telegram-glue module
+  `connect/index.ts` — the foundation core stays Telegram-API-free.)
+
 ## [0.4.23] - 2026-06-22
 
 ### Added
@@ -352,7 +366,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.23...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.24...HEAD
+[0.4.24]: https://github.com/agfpd/iapeer/compare/v0.4.23...v0.4.24
 [0.4.23]: https://github.com/agfpd/iapeer/compare/v0.4.22...v0.4.23
 [0.4.22]: https://github.com/agfpd/iapeer/compare/v0.4.21...v0.4.22
 [0.4.21]: https://github.com/agfpd/iapeer/compare/v0.4.20...v0.4.21

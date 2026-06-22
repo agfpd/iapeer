@@ -5,9 +5,11 @@
 //
 // The human owes EXACTLY ONE external fact: the bot token (prompt walks them
 // through @BotFather → /newbot). Everything else the system resolves: the bot
-// alias (= the peer's personality), `telegram-runtime bot add` (owner adds getMe
-// validation — an invalid token fails THERE, early), `telegram-runtime interface
-// bot` (profile merge; precondition: the peer is registered), then the MANDATORY
+// @username via Telegram getMe(token) — the bot key is TOKEN-derived, NOT the peer
+// personality (a personality may contain a hyphen, structurally invalid as a
+// @username; telegram-runtime keys bots by <bot-username>), `telegram-runtime bot add`
+// (also validates the token), `telegram-runtime interface bot` (profile merge;
+// precondition: the peer is registered), then the MANDATORY
 // router-session restart (the live poller reads bots/ ONCE at start, no fs-watch —
 // without the restart the channel is dead both ways), and the activation hint:
 // the FIRST message from the human to the bot opens the chat (a Telegram platform
@@ -51,6 +53,9 @@ export interface ConnectTelegramOptions {
   runTg?: TgRunner
   /** Injectable router restart (tests). Default: stopPeer→startPeer strictly in order. */
   restart?: RestartFn
+  /** Injectable bot-@username resolver (tests). Default: Telegram getMe(token). Returns the
+   *  bare @username (no leading @) or null on a rejected/unreachable token. */
+  resolveUsername?: (token: string) => Promise<string | null>
 }
 
 export interface ConnectTelegramResult {
@@ -60,6 +65,7 @@ export interface ConnectTelegramResult {
     | 'refused-no-token' // non-tty and no --token (or an empty tty answer)
     | 'unregistered-peer' // precondition: the peer must be in the registry
     | 'runtime-missing' // no telegram runtime manifest — install it first
+    | 'bad-token' // Telegram getMe rejected the token (invalid/revoked) or was unreachable
     | 'bot-add-failed' // telegram-runtime bot add exited non-zero (incl. getMe refusal)
     | 'interface-failed' // telegram-runtime interface bot exited non-zero
   peer: string
@@ -90,6 +96,26 @@ function readBotEnv(alias: string, env: NodeJS.ProcessEnv): string | null {
     return existsSync(p) ? readFileSync(p, 'utf8') : null
   } catch {
     return null
+  }
+}
+
+/**
+ * Resolve the bot's REAL @username from the token via Telegram getMe — the bot identity
+ * is TOKEN-derived (BotFather sets it), NOT the peer personality. telegram-runtime keys
+ * bots by `<bot-username>` (`bot add <bot-username>`, `interface bot <bot-username>`), and a
+ * personality can contain a hyphen which is structurally invalid as a @username — so the
+ * personality can NEVER be the bot-username. Returns the bare username (no leading @) or
+ * null on a rejected/unreachable token. The token goes literally in the URL path
+ * (Telegram tokens are `<digits>:<urlsafe>`; no encoding).
+ */
+async function defaultResolveBotUsername(token: string): Promise<string | null> {
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getMe`)
+    const j = (await r.json()) as { ok?: boolean; result?: { username?: unknown } }
+    const u = j?.ok === true && typeof j.result?.username === 'string' ? j.result.username.trim().replace(/^@/, '') : ''
+    return u || null
+  } catch {
+    return null // network error / non-JSON → treat as unresolvable (bad-token)
   }
 }
 
@@ -173,8 +199,17 @@ export async function connectTelegram(opts: ConnectTelegramOptions): Promise<Con
     if (!token) return { state: 'refused-no-token', peer, detail: 'no answer — nothing connected' }
   }
 
+  // Resolve the bot's REAL @username from the token (getMe) — NOT the personality. The
+  // bot-username is token-derived; a personality with a hyphen (e.g. "impact-finder") is
+  // structurally invalid as a @username and telegram-runtime (which keys bots by
+  // <bot-username>) rejects it. getMe also validates the token early (bad token → fail here).
+  const resolveUsername = opts.resolveUsername ?? defaultResolveBotUsername
+  const botUsername = await resolveUsername(token)
+  if (!botUsername) {
+    return { state: 'bad-token', peer, detail: 'Telegram getMe rejected the token (invalid/revoked) or was unreachable — recheck the token with @BotFather' }
+  }
   const runTg = opts.runTg ?? defaultRunTg(tgBin)
-  const alias = peer // bot alias = the peer's personality (design §(в); passes the owner's NAME_RE)
+  const alias = botUsername // bot key = the REAL @username from getMe (telegram-runtime keys bots by <bot-username>)
   const before = readBotEnv(alias, env)
 
   // (1) bot add — token → bots/<alias>/.env. Owner adds getMe validation here: an
@@ -183,17 +218,10 @@ export async function connectTelegram(opts: ConnectTelegramOptions): Promise<Con
   if (add.status !== 0) {
     return { state: 'bot-add-failed', peer, detail: (add.stderr || add.stdout || `exit ${add.status}`).trim() }
   }
-  // @username: the bots/<alias>/.env TELEGRAM_BOT_USERNAME field is the RELIABLE
-  // source (present on the live host; survives a quiet bot-add stdout — acceptance
-  // testing saw the activation line degrade to the BotFather hint). stdout
-  // match stays as the fallback.
-  const envAfterAdd = readBotEnv(alias, env)
-  const envUser = envAfterAdd?.match(/^TELEGRAM_BOT_USERNAME=(.+)$/m)?.[1]?.trim()
-  const username = envUser
-    ? envUser.startsWith('@')
-      ? envUser
-      : `@${envUser}`
-    : add.stdout.match(/@[A-Za-z0-9_]{3,}/)?.[0]
+  // @username for display / the activation hint: the bot key (alias) IS the
+  // getMe-resolved username, so the display form is simply `@<alias>` — no need to
+  // re-parse bots/<alias>/.env (telegram-runtime writes the same value there).
+  const username = `@${alias}`
 
   // (2) interface bot — merge the channel binding into the peer's profile.
   const iface = runTg(['interface', 'bot', alias, '--peer', peer], env)
