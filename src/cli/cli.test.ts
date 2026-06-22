@@ -393,6 +393,44 @@ describe('send → ephemeral target: M3 FIFO parity with the daemon path (iapeer
   })
 })
 
+describe('enable telegram <peer> — discoverability alias for connect telegram', () => {
+  let cap: string
+  let origOut: typeof process.stdout.write
+  let origErr: typeof process.stderr.write
+  beforeEach(() => {
+    cap = ''
+    origOut = process.stdout.write
+    origErr = process.stderr.write
+    const sink = ((s: string | Uint8Array) => {
+      cap += typeof s === 'string' ? s : Buffer.from(s).toString('utf8')
+      return true
+    }) as typeof process.stdout.write
+    process.stdout.write = sink
+    process.stderr.write = sink
+  })
+  afterEach(() => {
+    process.stdout.write = origOut
+    process.stderr.write = origErr
+  })
+
+  test('routes to the connect flow, NOT enableCapability (output says "connect telegram")', async () => {
+    await register('tgpeer')
+    // sandbox temp root has no telegram runtime manifest → connectTelegram returns
+    // runtime-missing, surfaced as "connect telegram tgpeer: runtime-missing". That string
+    // proves the alias took the CONNECT path (enableCapability would never print it).
+    const code = await runCli(['enable', 'telegram', 'tgpeer'], env())
+    expect(code).toBe(1)
+    expect(cap).toContain('connect telegram tgpeer')
+    expect(cap).toContain('runtime-missing')
+  })
+
+  test('enable telegram with NO peer → usage error (exit 2) that points at the connect alias', async () => {
+    const code = await runCli(['enable', 'telegram'], env())
+    expect(code).toBe(2)
+    expect(cap).toContain('connect telegram')
+  })
+})
+
 describe('--help/-h global intercept (CLI hygiene — usage printed, NOTHING executed)', () => {
   let captured: string
   let origWrite: typeof process.stdout.write

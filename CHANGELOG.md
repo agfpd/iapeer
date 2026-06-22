@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.23] - 2026-06-22
+
+### Added
+
+- **`iapeer enable telegram <peer>`** — a discoverability alias for `iapeer connect telegram
+  <peer>` (give an existing peer a Telegram bot face). A layperson reaches for "enable
+  telegram", not "connect"; both now work and route through the same flow (bot add →
+  interface → router restart; asks only the token). telegram is a CHANNEL, not a marketplace
+  plugin, so the alias routes to the connect flow, not `enableCapability`. The `connect`
+  help line documents the alias. No telegram-runtime change (the mechanism already worked) —
+  purely CLI discoverability.
+
 ## [0.4.22] - 2026-06-22
 
 ### Added
@@ -340,7 +352,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.22...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.23...HEAD
+[0.4.23]: https://github.com/agfpd/iapeer/compare/v0.4.22...v0.4.23
 [0.4.22]: https://github.com/agfpd/iapeer/compare/v0.4.21...v0.4.22
 [0.4.21]: https://github.com/agfpd/iapeer/compare/v0.4.20...v0.4.21
 [0.4.20]: https://github.com/agfpd/iapeer/compare/v0.4.19...v0.4.20

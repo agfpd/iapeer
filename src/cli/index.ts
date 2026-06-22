@@ -875,6 +875,41 @@ export async function removePeerCli(
   }
 }
 
+/**
+ * `connect telegram <peer>` core — give a peer a Telegram bot face (interfaces.telegram).
+ * Shared by the `connect telegram` verb AND the `enable telegram <peer>` discoverability
+ * alias (telegram is a CHANNEL, not a marketplace plugin, so both route here, not through
+ * enableCapability). Returns the process exit code. The human owes only the token (prompted
+ * when omitted on a tty); the system does bot-add → interface → router restart.
+ */
+async function connectTelegramVerb(
+  peer: string,
+  token: string | undefined,
+  env: NodeJS.ProcessEnv,
+  out: (s: string) => void,
+  errOut: (s: string) => void,
+): Promise<number> {
+  const { connectTelegram } = await import('../connect/index.ts')
+  const r = await connectTelegram({ peer, token, env })
+  if (r.state === 'noop-same-token') {
+    out(`connect telegram ${r.peer}: ${r.detail}\n`)
+    return 0
+  }
+  if (r.state !== 'connected') {
+    errOut(`connect telegram ${r.peer}: ${r.state}${r.detail ? ` — ${r.detail}` : ''}\n`)
+    return 1
+  }
+  const rs = r.restart!
+  out(`bot ${r.username ?? `for "${r.peer}"`} added + interfaced to "${r.peer}"\n`)
+  out(
+    rs.state === 'restarted'
+      ? `router restarted — credentials loaded\n`
+      : `router restart ${rs.state}${rs.detail ? ` — ${rs.detail}` : ''} (the channel stays dead until the router restarts)\n`,
+  )
+  out(`activation: send the bot ${r.username ?? '(see @BotFather)'} its FIRST message — Telegram does not let a bot start the chat\n`)
+  return rs.state === 'restarted' ? 0 : 1
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // rename — first-class peer-identity rename (parity with remove/create). Wraps
 // renamePeer (registry + per-cwd profile, atomic, inside the lock) and KEEPS the
@@ -1168,7 +1203,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'manual IAP send (fallback)',
   },
   { sig: '<runtime>', desc: "launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached" },
-  { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token)' },
+  { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token). Alias: `iapeer enable telegram <peer>`' },
   { sig: 'enable <plugin> [peer] [--no-setup]', desc: 'install + enable an agfpd capability for a peer' },
   {
     sig: 'new <peer> [runtime]',
@@ -2287,31 +2322,16 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // alias/bot-add/interface/router-restart are resolved by the system. The
         // FIRST message from the human to the bot activates the chat (platform rule).
         if (positionals[0] !== 'telegram' || !positionals[1]) return argErr(errOut, 'connect needs "telegram <peer>" — usage: iapeer connect telegram <peer> [--token <t>] (e.g. iapeer connect telegram boris)')
-        const { connectTelegram } = await import('../connect/index.ts')
-        const r = await connectTelegram({
-          peer: positionals[1],
-          token: typeof flags.token === 'string' ? flags.token : undefined,
-          env,
-        })
-        if (r.state === 'noop-same-token') {
-          out(`connect telegram ${r.peer}: ${r.detail}\n`)
-          return 0
-        }
-        if (r.state !== 'connected') {
-          errOut(`connect telegram ${r.peer}: ${r.state}${r.detail ? ` — ${r.detail}` : ''}\n`)
-          return 1
-        }
-        const rs = r.restart!
-        out(`bot ${r.username ?? `for "${r.peer}"`} added + interfaced to "${r.peer}"\n`)
-        out(
-          rs.state === 'restarted'
-            ? `router restarted — credentials loaded\n`
-            : `router restart ${rs.state}${rs.detail ? ` — ${rs.detail}` : ''} (the channel stays dead until the router restarts)\n`,
-        )
-        out(`activation: send the bot ${r.username ?? '(see @BotFather)'} its FIRST message — Telegram does not let a bot start the chat\n`)
-        return rs.state === 'restarted' ? 0 : 1
+        return await connectTelegramVerb(positionals[1], typeof flags.token === 'string' ? flags.token : undefined, env, out, errOut)
       }
       case 'enable': {
+        // DISCOVERABILITY ALIAS: `enable telegram <peer>` → `connect telegram <peer>`
+        // (a layperson reaches for "enable telegram"; telegram is a CHANNEL, not a
+        // marketplace plugin, so it routes to the connect flow, NOT enableCapability).
+        if (positionals[0] === 'telegram') {
+          if (!positionals[1]) return argErr(errOut, 'enable telegram needs a peer — usage: iapeer enable telegram <peer> [--token <t>] (alias of `iapeer connect telegram <peer>`)')
+          return await connectTelegramVerb(positionals[1], typeof flags.token === 'string' ? flags.token : undefined, env, out, errOut)
+        }
         // Per-peer capability install (contract Установка §3): install <plugin>@agfpd
         // per-runtime (claude project-scope IN the peer cwd / codex global) + enable +
         // call the plugin's `setup` ONLY if its iapeer.json declares it. Idempotent and
