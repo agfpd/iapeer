@@ -36,18 +36,6 @@ recipient peer             — asleep? the daemon wakes it and delivers on wake
 - **One identity across runtimes, with one memory.** A peer's `personality` is decoupled from its runtime: the same peer runs on Claude or Codex, switched with a command. By default (set up by `iapeer onboard`) it carries one shared memory (iapeer-memory) keyed to the personality, not the runtime — one personality, one memory, whatever runtime it runs on.
 - **Heterogeneous peers, one protocol.** AI agents, humans (Telegram), and services (timer = cron, watcher = event) are all first-class, addressed the same way over an always-on MCP daemon that exposes exactly one tool, `send_to_peer`.
 
-Where iapeer sits next to the tools it gets compared to:
-
-| | iapeer | Task orchestrator | One-shot wrapper (`claude -p`) | Memory server | MCP messaging tool |
-|---|:--:|:--:|:--:|:--:|:--:|
-| Persistent peer identity | ✓ | — | — | — | — |
-| Full interactive sessions, not headless | ✓ | — | — | — | — |
-| Claude ↔ Codex as equal peers | ✓ | — | — | — | — |
-| Wake on demand, context resumed | ✓ | — | — | — | — |
-| Shared memory across runtimes | ✓ | — | — | ✓ | — |
-| Peer-to-peer messaging | ✓ | — | — | — | ✓ |
-| Humans and services as peers | ✓ | — | — | — | — |
-
 ## Quick start
 
 Requirements: **macOS** (Linux is on the [Roadmap](#roadmap)) and at least one agent runtime — Claude Code or Codex CLI (each AI peer is a live session of one). The installer handles the rest ([bun](https://bun.sh) and `~/.local/bin` on `PATH`).
