@@ -33,6 +33,7 @@ import {
   type ProcessAddress,
 } from '../core/socket.ts'
 import { buildEnvelope } from '../codec/index.ts'
+import { resolveGlobalRoot } from '../storage/index.ts'
 import { findPeer, readPeersIndex, type PeerRecord } from '../registry/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 // Delivery markers are OWNED by the runtime adapter. transport
@@ -185,6 +186,12 @@ export interface WarmDeliverSeam {
   deliverHosted?: (identity: string, envelope: string) => Promise<DeliverResult>
   /** Activity proxy for the landed-confirm. Default: the target runtime adapter's transcript mtime. */
   newestActivityMtime?: (cwd: string) => number | null
+  /** SECOND landed-confirm proxy: the pane-log (TUI render-stream) mtime, keyed by process
+   *  ADDRESS. Default: the real `<root>/logs/lifecycle/<address>.log` mtime. The pane-log ticks
+   *  ~1s as the session renders its working state on submit — for codex it advances ~1s while the
+   *  session-jsonl only advances at model-turn-start (~4-6s, past the grace), so this is the signal
+   *  that gives codex delivery parity. See `deliverViaHost`. */
+  paneLogMtime?: (address: string) => number | null
 }
 
 /**
@@ -211,9 +218,12 @@ async function deliverViaHost(
 ): Promise<Result<void>> {
   const adapter = getAdapter(target.runtime)
   const mtimeOf = seam.newestActivityMtime ?? ((c: string) => adapter.newestActivityMtime(c))
-  // Baseline the activity proxy BEFORE delivery (a paste/CR does not move the transcript — only a
-  // model turn does), so an advance afterwards proves the session is alive and took our message.
+  const paneMtimeOf = seam.paneLogMtime ?? ((addr: string) => defaultPaneLogMtime(addr))
+  // Baseline BOTH landed-proxies BEFORE delivery (a paste/CR does not move the transcript — only a
+  // model turn does; the pane-log moves as the session renders), so an advance in EITHER afterwards
+  // proves the session is alive and took our message.
   const baseline = cwd ? mtimeOf(cwd) ?? 0 : 0
+  const paneBaseline = paneMtimeOf(target.address) ?? 0
   const send = seam.deliverHosted ?? deliverHosted
   const sent = await send(target.address, envelope)
   if (!sent.ok) {
@@ -232,20 +242,41 @@ async function deliverViaHost(
   // socket-ack ≠ landed. With no activity proxy (direct callers/tests without a cwd) we can only
   // trust the flushed submit — confirmed-only, mirroring deliverViaTmux's legacy-caller path.
   if (!cwd) return ok(undefined)
-  // Confirm landing by the SAME final arbiter as the tmux busy path: a transcript-mtime advance.
-  // Grace-poll the proxy (the model may take a beat to write its turn); a hosted session has no
-  // input-clear fast path (no capture-pane), so this is the SOLE confirm. Prefer a false-FAIL
-  // (sender retries) over a false-OK (silent loss, forbidden).
+  // Confirm landing by EITHER of two proxies within the grace:
+  //  (a) transcript/session-jsonl mtime advance — the strong "model wrote a turn" signal. claude
+  //      writes the user turn to its transcript promptly (sub-second); CODEX writes its session
+  //      jsonl only at model-turn-START (gated by TTFT, measured ~4-6s after submit), so on the
+  //      transcript-ONLY confirm every codex delivery STRUCTURALLY false-FAILED (the 3000ms grace
+  //      expires before the first session write — proven in delivery.log).
+  //  (b) PANE-LOG (TUI render-stream) mtime advance — the SAME true active-turn signal the 0.4.16
+  //      idle-reap fix uses: it ticks ~1s as the session renders the working state on submit, so it
+  //      catches codex in ~1s, giving codex delivery parity with claude WITHOUT lengthening the
+  //      (synchronous) grace. NOT a false-OK: an advance proves the session is alive and rendered
+  //      output in response to our just-flushed bytes (a wedged/dead pty renders nothing → no
+  //      advance → correct fail); the bytes are then in the session's input (codex queues input
+  //      during a turn). Prefer a false-FAIL (sender retries) over a false-OK (silent loss).
   const graceMs = hostLivenessGraceMs()
   const graceDeadline = monotonicMs() + graceMs
   do {
     if ((mtimeOf(cwd) ?? 0) > baseline) return ok(undefined)
+    if ((paneMtimeOf(target.address) ?? 0) > paneBaseline) return ok(undefined)
     sleepSync(LIVENESS_POLL_MS)
   } while (monotonicMs() < graceDeadline)
   return err(
     `hosted peer "${target.personality}" (${target.runtime}) is listed live but did not accept the message ` +
-      `(no transcript advance within ${graceMs}ms) — live but unresponsive to this delivery (not dead); message NOT delivered`,
+      `(no transcript or pane-log advance within ${graceMs}ms) — live but unresponsive to this delivery (not dead); message NOT delivered`,
   )
+}
+
+/** Pane-log (TUI render-stream) mtime for a process address, or null when absent/unreadable.
+ *  The pane-log is the canonical `<root>/logs/lifecycle/<address>.log` the supervisor appends raw
+ *  pty bytes to (§1 contract). Used as the SECOND landed-confirm proxy in deliverViaHost. */
+function defaultPaneLogMtime(address: string): number | null {
+  try {
+    return statSync(join(resolveGlobalRoot(), 'logs', 'lifecycle', `${address}.log`)).mtimeMs
+  } catch {
+    return null
+  }
 }
 
 

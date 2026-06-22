@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-06-22
+
+### Fixed
+
+- **Codex hosted-delivery no longer false-fails.** The warm-delivery landing-confirm
+  (`deliverViaHost`) confirmed a message "landed" only by a transcript/session-jsonl mtime
+  advance within a 3000ms grace. Claude writes the user turn to its transcript promptly, but
+  **codex writes its session jsonl only at model-turn-start** (gated by time-to-first-token,
+  ~4-6s after submit) — so every codex delivery structurally false-failed with `"no transcript
+  advance within 3000ms"` even though the message landed and codex was processing it (proven in
+  delivery.log: an `ok=false` immediately followed by codex recording the input and replying).
+  The confirm now also accepts a **pane-log (TUI render-stream) mtime advance** — the same true
+  active-turn signal the 0.4.16 idle-reap fix uses; it ticks ~1s as the session renders the
+  working state on submit, giving codex delivery parity with claude without lengthening the
+  (synchronous) grace. An advance proves the session is alive and reacted to the just-flushed
+  bytes (a dead/wedged pty renders nothing → still fails correctly). The typing/tool-use
+  indicator for codex is a separate telegram-runtime concern (its pane-log parsing).
+
 ## [0.4.19] - 2026-06-22
 
 ### Added
@@ -294,7 +312,8 @@ Initial public release — the foundation core of the iapeer multi-agent ecosyst
 - **Heterogeneous peers** — AI agents (Claude, Codex), humans (Telegram), and services
   (timer = cron, watcher = event) are all first-class and addressed the same way.
 
-[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.19...HEAD
+[Unreleased]: https://github.com/agfpd/iapeer/compare/v0.4.20...HEAD
+[0.4.20]: https://github.com/agfpd/iapeer/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/agfpd/iapeer/compare/v0.4.18...v0.4.19
 [0.4.18]: https://github.com/agfpd/iapeer/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/agfpd/iapeer/compare/v0.4.16...v0.4.17
