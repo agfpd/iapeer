@@ -1291,6 +1291,32 @@ export function renderUsage(width: number = helpWidth()): string {
   return lines.join('\n') + '\n'
 }
 
+/** Focused help for ONE verb: the VERBS entry whose signature's first token equals `verb`,
+ *  rendered as its own `usage: iapeer <sig>` + wrapped description — or null when `verb` is
+ *  not a known verb (the caller then falls back to the full renderUsage). This is why
+ *  `iapeer connect telegram --help` prints connect's OWN usage instead of the whole verb list
+ *  (the prior behavior: `--help` anywhere dumped the general usage, burying the subcommand the
+ *  user asked about). First-token match is unambiguous — no two VERBS share a leading token. */
+export function renderVerbHelp(verb: string, width: number = helpWidth()): string | null {
+  const entry = VERBS.find(v => v.sig.split(/\s+/)[0] === verb)
+  if (!entry) return null
+  const W = Math.max(40, width)
+  const lines = [`usage: iapeer ${entry.sig}`, ...wrapText(entry.desc, W - 2).map(d => `  ${d}`)]
+  return lines.join('\n') + '\n'
+}
+
+/** Which verb's help an explicit help request targets, or null for the GENERAL usage:
+ *   - `<verb> --help` / `<verb> -h`  → the verb (argv[0], when it is not itself a help token)
+ *   - `help <verb>`                  → argv[1]
+ *   - bare `help` / `--help` / `-h`  → null (whole verb list)
+ *  An unknown target falls through to the general usage via renderVerbHelp returning null. */
+export function helpTargetVerb(argv: string[]): string | null {
+  const first = argv[0]
+  if (first && first !== 'help' && first !== '--help' && first !== '-h') return first
+  if (first === 'help' && argv[1]) return argv[1]!
+  return null
+}
+
 export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const [verb, ...rest] = argv
   // CLI hygiene (design «Onboard костяка» §CLI-гигиена): an explicit help request —
@@ -1301,7 +1327,10 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
   // match is safe: the look-ahead parser never consumes a `--`-token as a value, so
   // a LITERAL "--help" value is only expressible as `--key=--help` (not intercepted).
   if (verb === 'help' || argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(renderUsage())
+    // Per-verb help when a known verb is named (`connect telegram --help` → connect's own usage,
+    // `help connect` → same); the general verb list only for a bare/unknown help request.
+    const target = helpTargetVerb(argv)
+    process.stdout.write((target && renderVerbHelp(target)) || renderUsage())
     return 0
   }
   const { positionals, flags } = parseArgs(rest)

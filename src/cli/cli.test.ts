@@ -486,8 +486,34 @@ describe('--help/-h global intercept (CLI hygiene — usage printed, NOTHING exe
   })
   test('version --help shows usage, not the version number', async () => {
     expect(await runCli(['version', '--help'], env())).toBe(0)
-    expect(captured).toContain('usage: iapeer')
-    expect(captured.trim().split('\n').length).toBeGreaterThan(3) // usage, not a bare semver line
+    expect(captured).toContain('usage: iapeer version') // version's own usage line
+    expect(captured.trim()).not.toMatch(/^\d+\.\d+\.\d+$/) // NOT a bare semver line
+  })
+
+  test('subcommand --help prints THAT verb\'s help, not the whole verb list', async () => {
+    // The reported UX bug: `connect telegram --help` dumped the general usage instead of
+    // help for `connect telegram <peer>`. Now it prints connect's OWN focused usage.
+    captured = ''
+    expect(await runCli(['connect', 'telegram', '--help'], env())).toBe(0)
+    expect(captured).toContain('connect telegram <peer>') // connect's own signature
+    expect(captured).not.toContain('rollback') // a DIFFERENT verb only the full list carries
+    // `connect --help` (no subcommand) and `help connect` resolve to the same focused help
+    for (const a of [['connect', '--help'], ['help', 'connect']]) {
+      captured = ''
+      expect(await runCli(a, env())).toBe(0)
+      expect(captured).toContain('connect telegram <peer>')
+      expect(captured).not.toContain('rollback')
+    }
+  })
+
+  test('bare/unknown help → the FULL verb list (general usage)', async () => {
+    for (const a of [['--help'], ['help'], ['bogusverb', '--help']]) {
+      captured = ''
+      expect(await runCli(a, env())).toBe(0)
+      // the full list carries many verbs at once
+      expect(captured).toContain('rollback')
+      expect(captured).toContain('connect telegram')
+    }
   })
   test('a literal "--help" value stays expressible via --key=--help (not intercepted)', () => {
     expect(parseArgs(['boris', '--message=--help']).flags.message).toBe('--help')

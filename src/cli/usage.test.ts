@@ -4,7 +4,7 @@
 // the right column to the given width with a continuation indent.
 
 import { describe, expect, test } from 'bun:test'
-import { renderUsage, wrapText } from './index.ts'
+import { renderUsage, renderVerbHelp, helpTargetVerb, wrapText } from './index.ts'
 
 describe('wrapText', () => {
   test('wraps to width; lines of fitting words never exceed width', () => {
@@ -71,5 +71,31 @@ describe('renderUsage', () => {
     expect(lines[i]).not.toContain('backbone host-phase') // desc NOT crammed beside the long sig
     const di = lines.findIndex(l => l.includes('backbone host-phase'))
     expect(di).toBeGreaterThan(i)
+  })
+})
+
+describe('renderVerbHelp + helpTargetVerb (per-verb help routing)', () => {
+  test('renderVerbHelp: a known verb → its OWN focused usage, not the whole list', () => {
+    const out = renderVerbHelp('connect', 100)!
+    expect(out.startsWith('usage: iapeer connect telegram <peer>')).toBe(true)
+    expect(out).toContain('attach a telegram bot') // its description
+    expect(out).not.toContain('rollback') // NOT other verbs
+  })
+
+  test('renderVerbHelp: matches by leading token (supervisor subcommands collapse to one entry)', () => {
+    expect(renderVerbHelp('supervisor', 100)).toContain('usage: iapeer supervisor up|start|attach|list|kill')
+  })
+
+  test('renderVerbHelp: unknown verb → null (caller falls back to the full usage)', () => {
+    expect(renderVerbHelp('bogusverb', 100)).toBeNull()
+  })
+
+  test('helpTargetVerb: <verb> --help → the verb; help <verb> → argv[1]; bare → null', () => {
+    expect(helpTargetVerb(['connect', 'telegram', '--help'])).toBe('connect')
+    expect(helpTargetVerb(['connect', '--help'])).toBe('connect')
+    expect(helpTargetVerb(['help', 'connect'])).toBe('connect')
+    expect(helpTargetVerb(['--help'])).toBeNull()
+    expect(helpTargetVerb(['-h'])).toBeNull()
+    expect(helpTargetVerb(['help'])).toBeNull()
   })
 })
