@@ -38,6 +38,7 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { readFileSync, readdirSync, realpathSync, statSync } from 'fs'
+import { lastTimestampedEntryMs } from './transcriptTail.ts'
 import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,9 +115,16 @@ function canonicalPath(p: string): string {
  * (the model produced its first turn); idle accounting reads the same proxy.
  */
 function newestCodexSessionMtime(cwd: string): number | null {
+  return newestCodexSession(cwd)?.mt ?? null
+}
+
+/** The newest ~/.codex/sessions/**\/*.jsonl whose recorded session cwd realpath-matches `cwd`, as
+ *  {path, mt}, or null when none. Shared by newestActivityMtime (file-mtime) and lastTurnMtime (needs
+ *  the PATH to read the tail). Codex nests its session logs in a date tree, so the scan recurses. */
+function newestCodexSession(cwd: string): { path: string; mt: number } | null {
   const root = join(homedir(), '.codex', 'sessions')
   const target = canonicalPath(cwd)
-  let newest = 0
+  let best = { path: '', mt: 0 }
   function visit(dir: string): void {
     let entries
     try {
@@ -134,14 +142,14 @@ function newestCodexSessionMtime(cwd: string): number | null {
       if (canonicalPath(codexSessionCwd(path) ?? '') !== target) continue
       try {
         const mt = statSync(path).mtimeMs
-        if (mt > newest) newest = mt
+        if (mt > best.mt) best = { path, mt }
       } catch {
         /* race — entry vanished between readdir and stat */
       }
     }
   }
   visit(root)
-  return newest > 0 ? newest : null
+  return best.path ? best : null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +265,17 @@ export const codexAdapter: RuntimeAdapter = {
    */
   newestActivityMtime(cwd: string): number | null {
     return newestCodexSessionMtime(cwd)
+  },
+
+  /**
+   * IDLE-accounting signal: the content-timestamp of the last meaningful entry in the active codex
+   * session jsonl (newest cwd-matching file), read from its tail. codex entries (event_msg /
+   * response_item) carry a top-level `timestamp`, so this reflects real turn activity — immune to a
+   * file re-save and to a statusline pane-log tick. null when no cwd-matching session / no timestamp.
+   */
+  lastTurnMtime(cwd: string): number | null {
+    const s = newestCodexSession(cwd)
+    return s ? lastTimestampedEntryMs(s.path) : null
   },
 
   /**

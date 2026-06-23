@@ -344,21 +344,6 @@ export function clearEphemeralArmed(cfg: LifecycleConfig, identity: string): voi
   }
 }
 
-/** mtime (ms) of a hosted session's pane-log (`<logDir>/<identity>.log`) — the RAW TUI
- *  render byte-stream the supervisor appends for the session's whole life. It advances
- *  ~1s while the TUI is rendering a turn (the "esc to interrupt" elapsed counter ticks
- *  during BOTH model generation AND a tool run) and goes quiet at the prompt. So it is
- *  the truest active-turn liveness signal — the SAME mtime telegram-runtime reads for its
- *  typing/activity indicator — and unlike the transcript proxy it does NOT go quiet during
- *  a long model generation (no JSONL write until the message completes). null if absent. */
-function paneLogMtimeMs(cfg: LifecycleConfig, identity: string): number | null {
-  try {
-    return statSync(join(cfg.logDir, `${identity}.log`)).mtimeMs
-  } catch {
-    return null
-  }
-}
-
 function deathsPath(cfg: LifecycleConfig, identity: string): string {
   return join(cfg.stateDir, `${identity}.deaths`)
 }
@@ -1157,15 +1142,14 @@ export interface SuperviseOutcome {
 export interface SuperviseDeps {
   env?: NodeJS.ProcessEnv
   nowMs?: number
-  /** Activity proxy seam (default: the runtime adapter's transcript/session mtime). Tests inject a
-   *  controlled value to exercise the idle-age floor without a real transcript on disk. */
-  newestActivityMtime?: (runtime: string, cwd: string) => number | null
-  /** Liveness seam (default: the real `sessionAlive` = pty-host OR tmux-fallback). Tests inject a
-   *  fixed verdict so the idle path is exercised hermetically — no live tmux/pty session needed. */
+  /** IDLE-proxy seam (default: the runtime adapter's `lastTurnMtime` = content-ts of the last meaningful
+   *  transcript entry). This is the RELIABLE idle signal — NOT the transcript FILE mtime (re-saved at
+   *  idle) and NOT the pane-log mtime (a statusline re-render ticks it at idle); both falsely keep an
+   *  idle session young. Tests inject a controlled value to exercise the idle/quiet age hermetically. */
+  lastTurnMtime?: (runtime: string, cwd: string) => number | null
+  /** Liveness seam (default: the real `sessionAlive` = pty-host pid-file check). Tests inject a fixed
+   *  verdict so the idle path is exercised hermetically — no live pty session needed. */
   sessionAlive?: (sock: string, identity: string) => boolean
-  /** Pane-log mtime seam (default: the real pane-log file mtime). Tests inject a controlled value to
-   *  exercise the ephemeral active-turn vs idle distinction without a real pane-log on disk. */
-  paneLogMtime?: (identity: string) => number | null
 }
 
 /** Resolved per-tick context threaded into superviseOnePeer (deps already defaulted by superviseTick). */
@@ -1173,9 +1157,8 @@ interface SuperviseCtx {
   cfg: LifecycleConfig
   env: NodeJS.ProcessEnv
   nowMs: number
-  activityMtime: (runtime: string, cwd: string) => number | null
+  lastTurnMt: (runtime: string, cwd: string) => number | null
   isAlive: (sock: string, identity: string) => boolean
-  paneLogMt: (identity: string) => number | null
   verbose: boolean
   trace: (fields: Record<string, string | number | undefined>) => void
 }
@@ -1188,7 +1171,7 @@ interface SuperviseCtx {
  * returns exactly one outcome; the trace side-effects mirror the prior inline behaviour.
  */
 function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
-  const { cfg, env, nowMs, activityMtime, isAlive, paneLogMt, verbose, trace } = ctx
+  const { cfg, env, nowMs, lastTurnMt, isAlive, verbose, trace } = ctx
   // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
   if (isLaunchdManaged(s.personality, env)) {
     if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
@@ -1240,34 +1223,24 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
     return { identity: s.identity, action: 'reaped-gone', reason: gone.reason }
   }
-  // Idle accounting via the PANE-LOG (TUI render-stream) mtime — the RELIABLE idle
-  // signal: it advances ~1s while the TUI renders ANY turn (model generation OR a tool
-  // run — the "esc to interrupt" elapsed counter ticks) and goes quiet ONLY at the
-  // prompt. NOT the transcript file mtime: a live claude session RE-TOUCHES its session
-  // .jsonl ~every 30-45min WITHOUT a real turn (a system/bridge re-save), so the
-  // transcript proxy is perpetually < idleSecs and a claude peer NEVER idle-reaps — the
-  // fleet-reap incident: a warm claude pile, last real turn hours ago, never reaped;
-  // codex's session file is NOT re-touched, so codex reaps (the claude-vs-codex split).
-  // The transcript stays the launch ready-gate's signal (it needs "a real turn produced
-  // output"); only this idle proxy moves to the pane-log. FLOORED at wokeAt: a session
-  // cannot be idle longer than it has been awake (a wake that produced no turn →
-  // mt=wokeAt → reaped idleSecs after the wake, never out from under an attaching op).
+  // Idle accounting via the LAST MEANINGFUL TRANSCRIPT ENTRY's content-timestamp (adapter.lastTurnMtime)
+  // — the only RELIABLE idle signal. The two raw mtimes both report FALSE freshness for an idle session:
+  //   • pane-log mtime — a statusline / footer re-render writes pty bytes at idle (the clock/usage/ctx%
+  //     redraw + Claude Code's own update-check/token-counter), so the pane-log ticks at the prompt. The
+  //     0.4.16 invariant "the pane-log goes quiet ONLY at the prompt" was broken by the statusline.
+  //   • transcript FILE mtime — a live claude session RE-SAVES its .jsonl without appending a new entry,
+  //     so the file is fresh while the last real turn was hours ago (the 0.4.16 re-touch).
+  // Both made real peers live idle 3-5h UNREAPED (incident 23.06: perplex/mrwriter/doc). The transcript
+  // ENTRY stream only advances on actual turn activity, so the last timestamped entry is the true last
+  // turn. The launch ready-gate keeps newestActivityMtime (file-mtime advance = "a turn produced
+  // output"). FLOORED at wokeAt: a freshly-woken session that produced no turn yet (lastTurn from a PRIOR
+  // session is old) must not be reaped out from under an attaching op — max(lastTurn, wokeAt) reaps it
+  // idleSecs after the wake, never before. null lastTurn (unreadable / churned out of the tail) → wokeAt
+  // governs (an old wokeAt = woken-long-ago = idle → reaped; a recent wokeAt = just-woken → protected).
   const ephemeral = isEphemeralPeer(s.cwd)
-  const plMt = paneLogMt(s.identity)
-  let mt: number
-  if (plMt !== null) {
-    mt = Math.max(plMt, s.wokeAt)
-  } else {
-    // Pane-log MISSING (a legacy pre-pane-log supervisor) → fall back to the transcript
-    // proxy, NEVER to wokeAt-as-activity: a wokeAt-only age would read an ACTIVE legacy
-    // session's idle from its hours-old wokeAt and reap it MID-WORK. The transcript is
-    // false-fresh at idle (so an IDLE legacy peer lingers warm until its next respawn
-    // earns a pane-log — bounded, self-heals), but an ACTIVE legacy peer keeps a
-    // genuinely-fresh transcript and is correctly protected. Safe direction preserved.
-    let tx = 0
-    try { tx = activityMtime(s.runtime, s.cwd) ?? 0 } catch { /* no adapter → wokeAt */ }
-    mt = Math.max(tx, s.wokeAt)
-  }
+  let lt = 0
+  try { lt = lastTurnMt(s.runtime, s.cwd) ?? 0 } catch { /* unreadable → wokeAt floor */ }
+  const mt = Math.max(lt, s.wokeAt)
   const ageSecs = Math.floor((nowMs - mt) / 1000)
   // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
   // daemon routed its outbound reply) is reaped after a QUIET window, checked
@@ -1337,9 +1310,8 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
   const env = deps.env ?? process.env
   const nowMs = deps.nowMs ?? Date.now()
-  const activityMtime = deps.newestActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).newestActivityMtime(c))
+  const lastTurnMt = deps.lastTurnMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).lastTurnMtime(c))
   const isAlive = deps.sessionAlive ?? sessionAlive
-  const paneLogMt = deps.paneLogMtime ?? ((identity: string) => paneLogMtimeMs(cfg, identity))
   const verbose = superviseLogVerbose(env)
   // Pane-log volume cap (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
@@ -1356,7 +1328,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const trace = (fields: Record<string, string | number | undefined>): void =>
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise', ...fields }, { env, nowMs })
   const out: SuperviseOutcome[] = []
-  const ctx: SuperviseCtx = { cfg, env, nowMs, activityMtime, isAlive, paneLogMt, verbose, trace }
+  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, isAlive, verbose, trace }
   for (const s of readSessionStates(cfg)) {
     // Per-peer ISOLATION: a throw while evaluating ONE peer must NOT abort the whole sweep — that is
     // the silent fleet-wide reap-outage class (one malformed peer-state and NO peer gets reaped, the

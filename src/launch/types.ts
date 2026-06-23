@@ -263,9 +263,16 @@ export interface RuntimeAdapter {
    *  AND startup dialogs gone). Router runtimes return true (no input surface). */
   isInputReady(pane: string): boolean
 
-  /** Newest activity-proxy mtime for the ready-gate AND idle accounting:
-   *  claude transcript / codex session jsonl mtime; null for a router (no proxy). */
+  /** Newest activity-proxy FILE mtime — used by the READY-GATE (it waits for ANY transcript write past
+   *  baseline = "the model produced its first turn"). NOT for idle accounting: a live session re-saves
+   *  this file without a new entry, so it is falsely fresh at idle. null for a router (no proxy). */
   newestActivityMtime(cwd: string): number | null
+
+  /** Content-timestamp (epoch ms) of the LAST meaningful transcript ENTRY — the reliable IDLE-accounting
+   *  signal. Unlike newestActivityMtime (file mtime, re-touched at idle) and the pane-log mtime (a
+   *  statusline re-render ticks it at idle), the entry stream only advances on real turn activity.
+   *  superviseTick uses THIS for idle/quiet age. null for a router (no transcript). */
+  lastTurnMtime(cwd: string): number | null
 
   /** Resume preflight — validate a resume request fail-loud (never silent fresh).
    *  Returns the resolved ref (claude uuid) or ok:false with a reason. */

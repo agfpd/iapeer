@@ -24,6 +24,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
 import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import { lastTimestampedEntryMs } from './transcriptTail.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Boot dialog + ready markers (lifecycle claudeBootDialog / claudeInputReady)
@@ -278,6 +279,33 @@ export const claudeAdapter: RuntimeAdapter = {
       }
     }
     return newest > 0 ? newest : null
+  },
+
+  /**
+   * IDLE-accounting signal: the content-timestamp of the last meaningful entry in the ACTIVE transcript
+   * (newest .jsonl by file mtime), read from its tail. Immune to the file re-save (file-mtime is fresh
+   * but the last ENTRY is not) and to the statusline pane-log tick (the transcript is untouched by a
+   * status redraw). null when the dir is absent/empty or no timestamped entry sits in the tail.
+   */
+  lastTurnMtime(cwd: string): number | null {
+    let entries: string[]
+    try {
+      entries = readdirSync(transcriptDir(cwd))
+    } catch {
+      return null
+    }
+    let best = { path: '', mt: 0 }
+    for (const name of entries) {
+      if (!name.endsWith('.jsonl')) continue
+      try {
+        const path = join(transcriptDir(cwd), name)
+        const mt = statSync(path).mtimeMs
+        if (mt > best.mt) best = { path, mt }
+      } catch {
+        /* race */
+      }
+    }
+    return best.path ? lastTimestampedEntryMs(best.path) : null
   },
 
   /**

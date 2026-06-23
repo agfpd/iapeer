@@ -863,7 +863,7 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
     return { env, cfg, root, laDir }
   }
 
-  test('armed + transcript quiet but pane-log FRESH (rendering a turn) → NOT reaped mid-turn', () => {
+  test('armed + last-turn FRESH (the turn is still writing entries) → NOT reaped mid-turn', () => {
     const { env, cfg, root, laDir } = ephemeralLiveEnv('w')
     try {
       const now = Date.now()
@@ -871,8 +871,7 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 120_000, // transcript silent 2 min (a long generation)
-        paneLogMtime: () => now - 1_000, // pane-log fresh — the TUI is still rendering the turn
+        lastTurnMtime: () => now - 1_000, // a transcript entry 1s ago — the turn is actively writing
       })
       expect(out.find(x => x.identity === 'claude-w')?.action).toBe('alive') // NOT reaped
       expect(hasEphemeralArmed(cfg, 'claude-w')).toBe(true) // session lives on, still armed
@@ -882,7 +881,7 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
     }
   })
 
-  test('armed + transcript AND pane-log both quiet (truly idle at the prompt) → reaped (conveyor drains)', () => {
+  test('armed + last-turn QUIET past the quiet window (idle at the prompt) → reaped (conveyor drains)', () => {
     const { env, cfg, root, laDir } = ephemeralLiveEnv('i')
     try {
       const now = Date.now()
@@ -890,8 +889,7 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 120_000,
-        paneLogMtime: () => now - 120_000, // pane-log also quiet → the turn ended
+        lastTurnMtime: () => now - 120_000, // no transcript entry for 2 min → the turn ended, idle
       })
       expect(out.find(x => x.identity === 'claude-i')?.action).toBe('reaped-ephemeral')
       expect(hasEphemeralArmed(cfg, 'claude-i')).toBe(false)
@@ -901,16 +899,15 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
     }
   })
 
-  test('a MISSING pane-log (no file) falls back to the transcript proxy → idle still reaps', () => {
-    const { env, cfg, root, laDir } = ephemeralLiveEnv('m')
+  test('no readable transcript (null last-turn) → the wokeAt floor governs the quiet age → reaped', () => {
+    const { env, cfg, root, laDir } = ephemeralLiveEnv('m') // wokeAt = now - 600_000 (10 min)
     try {
       const now = Date.now()
       const out = superviseTick(cfg, {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 120_000,
-        paneLogMtime: () => null, // no pane-log → fold-in is a no-op, transcript governs
+        lastTurnMtime: () => null, // unreadable/absent transcript → age from wokeAt (10 min ≫ quiet)
       })
       expect(out.find(x => x.identity === 'claude-m')?.action).toBe('reaped-ephemeral')
     } finally {
@@ -921,15 +918,16 @@ describe('ephemeral armed quiet-reap — pane-log render-liveness', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// generic idle-reap — pane-log is the idle proxy, NOT the transcript file mtime
-//  The fleet-reap incident: claude re-touches its session .jsonl ~every 30-45min
-//  WITHOUT a real turn, so the transcript proxy stays < idleSecs forever and a claude
-//  peer never idle-reaps. The pane-log (TUI render-stream) goes truly quiet at the
-//  prompt → it is the reliable idle signal. pane-log PRIMARY; transcript only as a
-//  fallback when the pane-log is missing (legacy supervisor); never wokeAt-as-activity.
+// generic idle-reap — content-time (last meaningful transcript ENTRY) is the idle
+//  proxy, NOT the transcript FILE mtime and NOT the pane-log mtime. BOTH raw mtimes
+//  report false freshness for an idle session: claude re-saves its .jsonl without a
+//  new entry (file-mtime fresh), and a statusline / footer re-render ticks the pane-log
+//  at the prompt (incident 23.06 — real peers lived idle 3-5h unreaped). The transcript
+//  ENTRY stream only advances on real turn activity → adapter.lastTurnMtime governs.
+//  Floored at wokeAt so a freshly-woken session (old prior-session last-turn) is safe.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
+describe('generic idle-reap — content-time idle proxy (statusline-tick fix)', () => {
   function liveEnv(personality: string, wokeMsAgo: number): { env: NodeJS.ProcessEnv; cfg: LifecycleConfig; root: string; laDir: string } {
     const root = mkdtempSync(join(tmpdir(), 'iapeer-idle-pl-root-'))
     const laDir = mkdtempSync(join(tmpdir(), 'iapeer-idle-pl-la-')) // empty → not launchd-managed
@@ -949,7 +947,7 @@ describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
     return { env, cfg, root, laDir }
   }
 
-  test('THE FIX: stale pane-log + FALSELY-fresh transcript → reaped-idle (pane-log governs)', () => {
+  test('THE FIX: last real turn stale (file-mtime + pane-log would be falsely fresh) → reaped-idle', () => {
     const { env, cfg, root, laDir } = liveEnv('w', 7_200_000) // woke 2h ago
     try {
       const now = Date.now()
@@ -957,8 +955,7 @@ describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 60_000, // transcript FALSELY fresh (claude re-touch)
-        paneLogMtime: () => now - 7_200_000, // pane-log truly stale 2h → idle
+        lastTurnMtime: () => now - 7_200_000, // last meaningful transcript entry 2h ago → genuinely idle
       })
       expect(out.find(x => x.identity === 'claude-w')?.action).toBe('reaped-idle')
       expect(hasIdleReaped(cfg, 'claude-w')).toBe(true) // daemon-initiated park → resume-eligible
@@ -968,7 +965,7 @@ describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
     }
   })
 
-  test('active: fresh pane-log + stale transcript → alive (pane-log keeps it warm)', () => {
+  test('active: a recent real turn → alive (content-time keeps it warm)', () => {
     const { env, cfg, root, laDir } = liveEnv('a', 7_200_000)
     try {
       const now = Date.now()
@@ -976,8 +973,7 @@ describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 7_200_000, // transcript stale
-        paneLogMtime: () => now - 30_000, // pane-log fresh (active turn) → NOT idle
+        lastTurnMtime: () => now - 30_000, // a transcript entry 30s ago → active, not idle
       })
       expect(out.find(x => x.identity === 'claude-a')?.action).toBe('alive')
       expect(hasIdleReaped(cfg, 'claude-a')).toBe(false)
@@ -987,19 +983,35 @@ describe('generic idle-reap — pane-log idle proxy (fleet-reap fix)', () => {
     }
   })
 
-  test('missing pane-log (legacy) → transcript fallback: fresh transcript PROTECTS an active legacy session', () => {
-    const { env, cfg, root, laDir } = liveEnv('x', 100_000_000) // woke ~28h ago (legacy)
+  test('a recent turn protects a session woken long ago (content-time, not wokeAt, governs)', () => {
+    const { env, cfg, root, laDir } = liveEnv('x', 100_000_000) // woke ~28h ago
     try {
       const now = Date.now()
       const out = superviseTick(cfg, {
         env,
         nowMs: now,
         sessionAlive: () => true,
-        newestActivityMtime: () => now - 60_000, // genuinely active (real fresh transcript)
-        paneLogMtime: () => null, // legacy supervisor: no pane-log
+        lastTurnMtime: () => now - 60_000, // genuinely active (a real turn 1 min ago)
       })
-      // never reaped from the hours-old wokeAt — the transcript fallback protects it (no self-reap)
       expect(out.find(x => x.identity === 'claude-x')?.action).toBe('alive')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('wokeAt FLOOR: a freshly-woken session with no NEW turn (stale prior last-turn) is NOT reaped', () => {
+    const { env, cfg, root, laDir } = liveEnv('f', 30_000) // woke 30s ago
+    try {
+      const now = Date.now()
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        lastTurnMtime: () => now - 7_200_000, // a PRIOR session's last turn (2h old, resumed)
+      })
+      // the wokeAt floor (30s) governs → a just-woken peer is not reaped out from under itself
+      expect(out.find(x => x.identity === 'claude-f')?.action).toBe('alive')
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(laDir, { recursive: true, force: true })
@@ -1053,8 +1065,8 @@ describe('superviseTick idle-age floor (freshly-woken session)', () => {
         JSON.stringify({ identity, runtime: 'claude', personality: 'floor', cwd: '/tmp/floor', wokeAt }),
       )
     }
-    // Seam liveness TRUE + a STALE activity proxy → exercise the idle branch hermetically.
-    const deps = { env, sessionAlive: () => true, newestActivityMtime: () => STALE }
+    // Seam liveness TRUE + a STALE last-turn proxy → exercise the idle branch hermetically.
+    const deps = { env, sessionAlive: () => true, lastTurnMtime: () => STALE }
     try {
       // 1) Freshly woken (wokeAt = now) but the proxy is STALE (pre-wake): idle-age MUST
       //    floor at wokeAt → age ~0 → NOT reaped. (Old `?? wokeAt` used the stale proxy

@@ -68,6 +68,10 @@ export const notifierAdapter: RuntimeAdapter = {
     return null
   },
 
+  lastTurnMtime(_cwd: string): number | null {
+    return null // router — no transcript
+  },
+
   /** Nothing to resume: a router does not replay a transcript. */
   resolveResume(_cwd: string): { ok: boolean; ref?: string; reason?: string } {
     return { ok: true }

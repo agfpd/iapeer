@@ -98,6 +98,10 @@ export const telegramAdapter: RuntimeAdapter = {
     return null
   },
 
+  lastTurnMtime(_cwd: string): number | null {
+    return null // router — no transcript
+  },
+
   /**
    * Nothing to resume: a router does not replay a transcript, so resume cannot
    * fail-loud the way claude/codex do — there is no prior session ref to resolve
