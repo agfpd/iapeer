@@ -319,6 +319,23 @@ describe('claudeAdapter', () => {
     // and it holds the readiness gate shut until cleared
     expect(claudeAdapter.isInputReady(`${mcpDialog}\n❯ x\nbypass permissions on`)).toBe(false)
   })
+
+  test('nagDismissKeys: mid-session fullscreen-renderer upsell → decline with [2, Enter]', () => {
+    // The live modal (linus ground-truth) — default cursor on "1. Yes, try it", so a bare Enter
+    // ENABLES fullscreen. The watcher must DECLINE: '2' then Enter. Match needs the FULL signature.
+    const modal =
+      'Try the new fullscreen renderer?\n· Flicker-free output …\n❯ 1. Yes, try it\n  2. Not now\nEnter to confirm · Esc to cancel'
+    expect(claudeAdapter.nagDismissKeys!(modal)).toEqual(['2', 'Enter'])
+    // prose mentioning the feature WITHOUT the decision row → no keystroke (stray-send guard)
+    expect(claudeAdapter.nagDismissKeys!('switched to the new fullscreen renderer last week')).toBeNull()
+    expect(claudeAdapter.nagDismissKeys!('Try the new fullscreen renderer? we discussed it')).toBeNull()
+    // a normal ready composer is never a nag
+    expect(claudeAdapter.nagDismissKeys!('❯ \nbypass permissions on')).toBeNull()
+  })
+
+  test('nagDismissKeys: codex declares no mid-session nags (optional predicate absent)', () => {
+    expect(codexAdapter.nagDismissKeys).toBeUndefined()
+  })
 })
 
 // ─── exit-cause observability: the pane-died hook builder (pure string) ──────

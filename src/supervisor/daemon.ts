@@ -25,7 +25,7 @@ import {
   stripQueries,
 } from './protocol.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry } from './paths.ts'
-import { nextBootAction, type BootPredicates } from './boot.ts'
+import { nextBootAction, nextNagAction, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
@@ -80,6 +80,12 @@ const BOOT_POLL_MS = 2000
 // Stop driving after this long even if readiness is never observed (a hung/unknown startup); the
 // driver is best-effort and never blocks the conduit, which keeps serving regardless.
 const BOOT_DRIVE_MS = 120_000
+// MID-SESSION nag-watcher cadence: same 2 s model poll as the boot-driver. After answering a nag, hold
+// this long before the next check so a just-dismissed modal (claude repaints it away within a frame) is
+// never re-answered — a stray keystroke would land in the now-visible composer. If the modal genuinely
+// survives the hold (our key did not take), the next tick re-fires, so retries stay bounded, not lost.
+const NAG_POLL_MS = 2000
+const NAG_COOLDOWN_MS = 4000
 
 // Bun-native PTY (Bun ≥1.3.5) is not yet in @types/bun — type the slice we use.
 interface PtyChild {
@@ -540,5 +546,39 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       else if (action.kind === 'ready' || Date.now() > driveDeadline) clearInterval(driver)
     }, BOOT_POLL_MS)
     ;(driver as { unref?: () => void }).unref?.()
+  }
+
+  // ── mid-session nag-watcher (livability) ────────────────────────────────────────
+  // The boot-driver above STOPS at ready. But claude/codex can pop a ONE-TIME upsell modal
+  // MID-SESSION (e.g. "Try the new fullscreen renderer?", which appears on the return-to-prompt
+  // boundary after a tool result) that BLOCKS the pty on a keypress no headless peer answers — it
+  // froze live fleet peers (boris, doc) until a human cleared it by hand. A PERSISTENT watcher answers
+  // the curated, verified-safe DECLINE for that class off the SAME authoritative @xterm model, for the
+  // WHOLE session lifetime, exactly like the boot-driver answers startup dialogs — model-read
+  // (modelToPlainText) + raw pty-byte-write (keysToBytes). Cooldown-guarded: after firing, hold
+  // NAG_COOLDOWN_MS so a just-dismissed modal is never double-answered (a stray keystroke would land in
+  // the now-visible composer). Only runs for a runtime whose adapter declares nagDismissKeys.
+  const nagAdapter = BOOT_ADAPTERS[runtime] as NagPredicate | undefined
+  if (nagAdapter?.nagDismissKeys) {
+    let nagFiredMs = 0
+    const nagWatch = setInterval(() => {
+      if (down) {
+        clearInterval(nagWatch)
+        return
+      }
+      if (Date.now() - nagFiredMs < NAG_COOLDOWN_MS) return // let a just-answered modal repaint away first
+      let action
+      try {
+        const enc = { appCursorKeys: xterm.modes.applicationCursorKeysMode }
+        action = nextNagAction(nagAdapter, modelToPlainText(xterm, cols, rows), enc)
+      } catch {
+        return // transient model read — retry next tick
+      }
+      if (action.kind === 'dismiss') {
+        child.terminal.write(action.bytes)
+        nagFiredMs = Date.now()
+      }
+    }, NAG_POLL_MS)
+    ;(nagWatch as { unref?: () => void }).unref?.()
   }
 }

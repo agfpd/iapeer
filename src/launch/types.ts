@@ -259,6 +259,20 @@ export interface RuntimeAdapter {
    */
   bootDialogKeys(pane: string): string[] | null
 
+  /**
+   * MID-SESSION nag/upsell auto-dismiss (livability). Distinct from bootDialogKeys:
+   * the boot-driver stops at ready, but claude/codex can pop a ONE-TIME interactive
+   * upsell modal AFTER the session is live (e.g. "Try the new fullscreen renderer?")
+   * that BLOCKS the pty waiting for a keypress no headless peer answers — it froze the
+   * live fleet until a human cleared it. A persistent supervisor watcher (daemon.ts)
+   * runs THIS off the authoritative model for the whole session and writes the keys.
+   * Return the send-keys args that dismiss with the VERIFIED-SAFE default (decline),
+   * else null. Match the FULL modal signature so ordinary content mentioning the
+   * feature can never trigger a stray keystroke into the composer. Optional — a runtime
+   * with no known mid-session nags (codex/router) omits it. tui only.
+   */
+  nagDismissKeys?(pane: string): string[] | null
+
   /** Is the input surface ready for the first message? (tui: ready marker present
    *  AND startup dialogs gone). Router runtimes return true (no input surface). */
   isInputReady(pane: string): boolean

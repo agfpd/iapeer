@@ -241,6 +241,38 @@ export const claudeAdapter: RuntimeAdapter = {
   },
 
   /**
+   * MID-SESSION nag/upsell auto-dismiss (livability — distinct from bootDialogKeys,
+   * which the supervisor drives only until ready). claude pops a ONE-TIME interactive
+   * upsell modal AFTER the session is live that BLOCKS a headless peer (no human to
+   * answer):
+   *
+   *     Try the new fullscreen renderer?
+   *     · Flicker-free output …
+   *     ❯ 1. Yes, try it
+   *       2. Not now
+   *     Enter to confirm · Esc to cancel
+   *
+   * The default cursor sits on "1. Yes, try it", so a BARE Enter would ENABLE the
+   * fullscreen renderer — which switches claude to the alt-screen TUI and changes the
+   * surface the pane-log model + composer-occupancy + ready-gate all read off. We must
+   * DECLINE: type the literal '2' then Enter ('2','Enter' → "2\r"; '2' is not a named/
+   * cursor key, so it is emitted verbatim without a `-l` literal switch — and `-l`
+   * would wrongly make the following 'Enter' literal too). VERIFIED-SAFE on the live
+   * fleet: '2'+Enter cleared the modal on boris and doc and returned them to the
+   * composer; an arrow-step+Enter MIS-FIRED into "tui":"fullscreen" on scriber, and Esc/
+   * 'n' are unverified — so this is the ONLY accepted sequence. Match the FULL signature
+   * (title AND the "2. Not now" decline row) so a transcript merely DISCUSSING the
+   * fullscreen renderer can never trigger a stray keystroke. Future one-time CC upsells
+   * of this class extend the match here (each with its own verified-safe decline key).
+   */
+  nagDismissKeys(pane: string): string[] | null {
+    if (pane.includes('Try the new fullscreen renderer?') && pane.includes('2. Not now')) {
+      return ['2', 'Enter']
+    }
+    return null
+  },
+
+  /**
    * Ready for the first message iff the input surface is rendered AND no startup
    * dialog is still up (lifecycle.claudeInputReady, index.ts:272-279;
    * claude-start.sh:365-366):
