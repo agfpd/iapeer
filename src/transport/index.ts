@@ -152,28 +152,25 @@ export function resolvePeerDeliveryTarget(
   return resolveDeliveryTarget({ personality })
 }
 
-// Ф-B liveness: how long to keep polling the activity proxy for a transcript
-// advance when the submit did NOT clear the input (a busy session whose input row
-// is not rendered). Env-tunable for LIVE calibration (busy/idle/cold). Conservative
-// default — long enough that a busy-but-alive session reliably shows an advance,
-// short enough that a genuinely dead session is failed promptly. Prefer a false-
-// FAIL (sender retries) over a false-OK (silent loss, which the contract forbids).
+// Confirm poll interval — how often deliverViaHost re-reads the transcript for a NEW record carrying
+// our envelope while waiting out the grace.
 const LIVENESS_POLL_MS = 100
-function livenessGraceMs(): number {
-  const raw = process.env.IAP_LIVENESS_GRACE_MS
-  const n = raw === undefined ? NaN : Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : 3000
-}
 
-// Host (spawn-flip Ф0b-2) liveness grace — DECOUPLED from the tmux grace by design. The hosted path
-// has no input-clear fast confirm (no capture-pane), so a transcript advance is its SOLE landed-proof
-// and may need its own calibration. `IAP_HOST_LIVENESS_GRACE_MS` tunes ONLY the hosted path; when
-// unset it falls back to the shared `livenessGraceMs()` — so calibrating hosted NEVER loosens the
-// tmux/fleet grace (a global bump there would be a fleet regression).
-function hostLivenessGraceMs(): number {
+// Confirm grace — how long deliverViaHost polls for a transcript record CARRYING our envelope before
+// declaring a false-FAIL. Per-RUNTIME because the runtimes log an accepted injection at different
+// times: claude writes the queue-operation (busy) / user-turn (idle) record PROMPTLY (sub-second), so
+// a short grace suffices; codex writes its session-jsonl user-input only at model-turn-START (TTFT
+// measured ~4-6s after submit), so it needs a longer window or every codex delivery would false-FAIL
+// before the first write. `IAP_HOST_LIVENESS_GRACE_MS` overrides BOTH (operator calibration; tests set
+// 0 for an immediate deterministic fail). Prefer a false-FAIL (sender retries) over a false-OK (silent
+// loss, which the contract forbids).
+const CONFIRM_GRACE_CLAUDE_MS = 4000
+const CONFIRM_GRACE_CODEX_MS = 8000
+function confirmGraceMs(runtime: string): number {
   const raw = process.env.IAP_HOST_LIVENESS_GRACE_MS
   const n = raw === undefined ? NaN : Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : livenessGraceMs()
+  if (Number.isFinite(n) && n >= 0) return n
+  return runtime === 'codex' ? CONFIRM_GRACE_CODEX_MS : CONFIRM_GRACE_CLAUDE_MS
 }
 
 // Launchd-revive retry — a MISS on a launchd-managed target the daemon can't wake (H4)
@@ -189,28 +186,31 @@ function launchdReviveGraceMs(): number {
 
 // ─── Warm delivery (pty-only — supervisor socket) ────────────────────────────────────────────────
 
-/** Test seam for `deliverWarm`. Production defaults route on the real supervisor; tests inject a
- *  fake host-deliver + a temp transcript proxy, so the deliver path is covered with no live daemon.
- *  Omitting all fields = pure production behaviour. */
+/** Test seam for `deliverWarm`. Production defaults route on the real supervisor + the real
+ *  message-specific transcript confirm; tests inject a fake host-deliver + a synthetic landed-confirm,
+ *  so the deliver path is covered with no live daemon. Omitting all fields = pure production. */
 export interface WarmDeliverSeam {
   /** Deliver to the hosted session over its socket. Default: the real `deliverHosted` (Ф0a leaf). */
   deliverHosted?: (identity: string, envelope: string) => Promise<DeliverResult>
-  /** Activity proxy for the landed-confirm. Default: the target runtime adapter's transcript mtime. */
-  newestActivityMtime?: (cwd: string) => number | null
-  /** SECOND landed-confirm proxy: the pane-log (TUI render-stream) mtime, keyed by process
-   *  ADDRESS. Default: the real `<root>/logs/lifecycle/<address>.log` mtime. The pane-log ticks
-   *  ~1s as the session renders its working state on submit — for codex it advances ~1s while the
-   *  session-jsonl only advances at model-turn-start (~4-6s, past the grace), so this is the signal
-   *  that gives codex delivery parity. See `deliverViaHost`. */
-  paneLogMtime?: (address: string) => number | null
+  /** MESSAGE-SPECIFIC landed-confirm: did a NEW transcript/session-jsonl record CARRYING this envelope
+   *  appear since the pre-deliver baseline? Default: `transcriptCarriesEnvelope` over a file-size
+   *  baseline captured before the send. A bare mtime bump (the receiver's OWN turn) is NOT a confirm —
+   *  that was the false-OK class this replaces. */
+  confirmLanded?: (envelope: string) => boolean
+  /** Injectable async sleep for the confirm poll (tests). Default: setTimeout — it YIELDS the event
+   *  loop (the grace is up to several seconds for codex, so a sync block would stall the whole router
+   *  daemon for the duration of one delivery). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /**
  * Warm-deliver `envelope` to a LIVE local target over its supervisor socket (pty-only). Landing is
- * CONFIRMED by a transcript-mtime advance past the pre-deliver baseline, NOT the socket-ack (a flushed
- * CR proves the bytes left us, NOT that the session accepted them; trusting the ack would re-open the
- * silent-loss class the contract forbids). A router (telegram/notifier) has no transcript proxy → it is
- * confirmed by the socket-ack (its liveness is structural via launchd KeepAlive). See `deliverViaHost`.
+ * CONFIRMED MESSAGE-SPECIFICALLY — by a NEW transcript record CARRYING this envelope appearing past the
+ * pre-deliver baseline, NOT the socket-ack (a flushed CR proves the bytes left us, not that the session
+ * accepted them) and NOT a bare mtime advance (the receiver's OWN concurrent turn bumps mtime even when
+ * our paste was swallowed — the false-OK class the contract forbids). A router (telegram/notifier) has
+ * no transcript → confirmed by the socket-ack (liveness is structural via launchd KeepAlive). See
+ * `deliverViaHost`.
  */
 export async function deliverWarm(
   target: DeliveryTarget,
@@ -228,13 +228,10 @@ async function deliverViaHost(
   seam: WarmDeliverSeam,
 ): Promise<Result<void>> {
   const adapter = getAdapter(target.runtime)
-  const mtimeOf = seam.newestActivityMtime ?? ((c: string) => adapter.newestActivityMtime(c))
-  const paneMtimeOf = seam.paneLogMtime ?? ((addr: string) => defaultPaneLogMtime(addr))
-  // Baseline BOTH landed-proxies BEFORE delivery (a paste/CR does not move the transcript — only a
-  // model turn does; the pane-log moves as the session renders), so an advance in EITHER afterwards
-  // proves the session is alive and took our message.
-  const baseline = cwd ? mtimeOf(cwd) ?? 0 : 0
-  const paneBaseline = paneMtimeOf(target.address) ?? 0
+  // Baseline the transcript/session-jsonl file SIZES BEFORE delivery (per-runtime candidate files).
+  // The landed-confirm reads ONLY the bytes appended past this baseline, so a record carrying our
+  // envelope can only be one written in RESPONSE to this delivery — never a pre-existing copy.
+  const baseline = cwd ? compactDoneBaseline(target.runtime, cwd) : null
   const send = seam.deliverHosted ?? deliverHosted
   const sent = await send(target.address, envelope)
   if (!sent.ok) {
@@ -243,45 +240,42 @@ async function deliverViaHost(
         `message NOT delivered`,
     )
   }
-  // Router (telegram/notifier): no transcript proxy (adapter.newestActivityMtime=null) → the
-  // mtime-advance confirm below can NEVER be satisfied and would false-FAIL every router delivery.
-  // Confirm by the socket-ack just obtained — PARITY with deliverViaTmux's router path (C-j success =
-  // delivery-level confirm; a router's liveness is structural via launchd KeepAlive, not a model
-  // turn). See deliverViaTmux router branch (paste-buffer -r + C-j, no transcript confirm) + its
-  // header note "router … liveness is structural".
+  // Router (telegram/notifier): no transcript proxy → confirmed by the socket-ack just obtained. A
+  // router's liveness is structural via launchd KeepAlive (not a model turn), so the ack IS the
+  // delivery-level confirm (parity with the legacy tmux router C-j path).
   if (adapter.kind === 'router') return ok(undefined)
-  // socket-ack ≠ landed. With no activity proxy (direct callers/tests without a cwd) we can only
-  // trust the flushed submit — confirmed-only, mirroring deliverViaTmux's legacy-caller path.
-  if (!cwd) return ok(undefined)
-  // Confirm landing by EITHER of two proxies within the grace:
-  //  (a) transcript/session-jsonl mtime advance — the strong "model wrote a turn" signal. claude
-  //      writes the user turn to its transcript promptly (sub-second); CODEX writes its session
-  //      jsonl only at model-turn-START (gated by TTFT, measured ~4-6s after submit), so on the
-  //      transcript-ONLY confirm every codex delivery STRUCTURALLY false-FAILED (the 3000ms grace
-  //      expires before the first session write — proven in delivery.log).
-  //  (b) PANE-LOG (TUI render-stream) mtime advance — the SAME true active-turn signal the 0.4.16
-  //      idle-reap fix uses: it ticks ~1s as the session renders the working state on submit, so it
-  //      catches codex in ~1s, giving codex delivery parity with claude WITHOUT lengthening the
-  //      (synchronous) grace. NOT a false-OK: an advance proves the session is alive and rendered
-  //      output in response to our just-flushed bytes (a wedged/dead pty renders nothing → no
-  //      advance → correct fail); the bytes are then in the session's input (codex queues input
-  //      during a turn). Prefer a false-FAIL (sender retries) over a false-OK (silent loss).
-  const graceMs = hostLivenessGraceMs()
+  // socket-ack ≠ landed. With no transcript (direct callers/tests without a cwd) we can only trust the
+  // flushed submit — confirmed-only.
+  if (!cwd || !baseline) return ok(undefined)
+  // MESSAGE-SPECIFIC landed-confirm — the false-OK killer. A bare transcript/pane-log mtime BUMP is
+  // NOT proof the session took THIS message: a receiver in an active turn advances both mtimes with
+  // its OWN rendering even when our paste was swallowed at the turn boundary (incident 2026-06-23:
+  // ok=true, message gone). The ONLY proof is a NEW transcript record CARRYING our envelope —
+  //   claude: a queue-operation `content` (busy → enqueued) or the user-turn message (idle),
+  //   codex:  a user-input response_item (written at model-turn-start, ~4-6s — hence the codex grace).
+  // The receiver's own assistant/tool turn never reproduces the `<iap from-personality=…>` wrapper, so
+  // it cannot forge a confirm. No such record within the grace → false-FAIL (the sender retries) — NOT
+  // a false-OK (silent loss the contract forbids).
+  const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload))
+  const sleep = seam.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  const graceMs = confirmGraceMs(target.runtime)
   const graceDeadline = monotonicMs() + graceMs
-  do {
-    if ((mtimeOf(cwd) ?? 0) > baseline) return ok(undefined)
-    if ((paneMtimeOf(target.address) ?? 0) > paneBaseline) return ok(undefined)
-    sleepSync(LIVENESS_POLL_MS)
-  } while (monotonicMs() < graceDeadline)
+  while (true) {
+    if (confirm(envelope)) return ok(undefined)
+    if (monotonicMs() >= graceDeadline) break
+    await sleep(LIVENESS_POLL_MS)
+  }
   return err(
     `hosted peer "${target.personality}" (${target.runtime}) is listed live but did not accept the message ` +
-      `(no transcript or pane-log advance within ${graceMs}ms) — live but unresponsive to this delivery (not dead); message NOT delivered`,
+      `(no transcript record carrying the message within ${graceMs}ms) — live but unresponsive to this delivery (not dead); message NOT delivered`,
   )
 }
 
 /** Pane-log (TUI render-stream) mtime for a process address, or null when absent/unreadable.
  *  The pane-log is the canonical `<root>/logs/lifecycle/<address>.log` the supervisor appends raw
- *  pty bytes to (§1 contract). Used as the SECOND landed-confirm proxy in deliverViaHost. */
+ *  pty bytes to (§1 contract). Used by `resolveLiveRuntime` (freshest-pane-log among alive sessions).
+ *  NB: deliberately NOT used to confirm delivery — a pane-log mtime bump is not message-specific (the
+ *  receiver's own turn bumps it too), which was exactly the false-OK class deliverViaHost now avoids. */
 function defaultPaneLogMtime(address: string): number | null {
   try {
     return statSync(join(resolveGlobalRoot(), 'logs', 'lifecycle', `${address}.log`)).mtimeMs
@@ -487,6 +481,65 @@ export function compactTranscriptHasDone(
         continue
       }
       if (isStructuredCompactDone(baseline.runtime, obj)) return true
+    }
+  }
+  return false
+}
+
+/** Deep-search every string value of a parsed JSON record for `needle` (CR-stripped on the haystack
+ *  side; the needle is pre-stripped by the caller). */
+function jsonStringValuesContain(value: unknown, needle: string): boolean {
+  if (typeof value === 'string') return value.replace(/\r/g, '').includes(needle)
+  if (Array.isArray(value)) return value.some(v => jsonStringValuesContain(v, needle))
+  if (value && typeof value === 'object') return Object.values(value).some(v => jsonStringValuesContain(v, needle))
+  return false
+}
+
+/**
+ * Did a NEW transcript/session-jsonl record CARRYING `envelope` appear since `baseline` (the
+ * per-runtime absolute file paths + SIZES captured immediately before delivery)? This is the
+ * MESSAGE-SPECIFIC landed-confirm `deliverViaHost` uses to kill the false-OK class — a bare mtime
+ * advance from the receiver's OWN turn is NOT a confirm; only a record echoing our envelope is.
+ *
+ * Reads ONLY the bytes appended past each baseline offset, JSON-parses each new jsonl line, and
+ * deep-searches its string values for the envelope (CR-normalized on both sides — a stored line may
+ * carry CR the envelope never had; CR is never semantically meaningful inside an IAP envelope). A
+ * match means the SESSION recorded our injection:
+ *   claude — busy: a `queue-operation` whose `content` is the pasted envelope verbatim; idle: the
+ *            user-turn message.
+ *   codex  — a user-input `response_item` (written at model-turn-start).
+ * The receiver's own assistant/tool records never reproduce the `<iap from-personality=…>` wrapper, so
+ * the full envelope is UNFORGEABLE by a concurrent turn — no false-OK. Because only bytes PAST the
+ * baseline offset are read, a pre-existing copy of an identical earlier message cannot pass either.
+ *
+ * Iterates the baseline file LIST verbatim — it does NOT re-scan the runtime's session dir each poll
+ * (unlike the minutes-long compact-done gate). A delivery's confirm window is seconds, so a brand-new
+ * session file appearing mid-delivery (a resume mid-flight) is negligible, and missing it fails in the
+ * SAFE direction (false-FAIL → the sender retries, never a silent loss). For codex this also avoids a
+ * full recursive `~/.codex/sessions` re-scan on every ~100ms poll (the active session file is already
+ * in the baseline), keeping the hot delivery path cheap.
+ */
+export function transcriptCarriesEnvelope(baseline: CompactDoneBaseline, envelope: string): boolean {
+  const needle = envelope.replace(/\r/g, '')
+  if (!needle) return false
+  for (const { path, size: offset } of baseline.files) {
+    let buf: Buffer
+    try {
+      buf = readFileSync(path)
+    } catch {
+      continue
+    }
+    const start = Math.min(Math.max(0, offset), buf.length)
+    const tail = buf.subarray(start).toString('utf8')
+    for (const line of tail.split(/\r?\n/)) {
+      if (!line.trim()) continue
+      let obj: unknown
+      try {
+        obj = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (jsonStringValuesContain(obj, needle)) return true
     }
   }
   return false

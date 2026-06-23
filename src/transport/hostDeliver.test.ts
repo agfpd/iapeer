@@ -1,17 +1,29 @@
 // Spawn-flip cutover Block 2, Ф0b-2 — host-aware warm delivery (`deliverWarm`).
 //
 // The warm-deliver path is host-aware: a supervisor-HOSTED target is delivered over its socket
-// (Ф0a leaf) and CONFIRMED by a landed-proxy advance, NOT the socket-ack. The landed-confirm accepts
-// EITHER of two proxies: the transcript/session-jsonl mtime (the strong "model wrote a turn" signal)
-// OR the PANE-LOG (TUI render-stream) mtime (ticks ~1s as the session renders the working state on
-// submit). The second proxy gives CODEX delivery parity: codex writes its session jsonl only at
-// model-turn-start (~4-6s, past the grace), so the transcript-ONLY confirm structurally false-FAILED
-// every codex delivery; the pane-log catches it in ~1s.
+// (Ф0a leaf) and CONFIRMED MESSAGE-SPECIFICALLY — by a NEW transcript record CARRYING this envelope,
+// NOT the socket-ack and NOT a bare mtime advance. The mtime confirm (transcript OR pane-log) was a
+// false-OK: a receiver in an active turn bumps both mtimes with its OWN rendering even when our paste
+// was swallowed at the turn boundary (incident 2026-06-23 — ok=true, message gone). The replacement
+// reads only the transcript bytes appended past a pre-deliver baseline and looks for a record that
+// echoes our envelope (claude queue-operation/user-turn; codex user-input response_item).
 //
-// Hermetic: both proxies are injected seams (no live supervisor, no host fs). Routers (no transcript
-// proxy) confirm by the socket-ack.
-import { describe, expect, test } from 'bun:test'
-import { deliverWarm, resolveLiveRuntime, type DeliveryTarget, type WarmDeliverSeam } from './index.ts'
+// Hermetic: the confirm is an injected seam (no live supervisor, no host fs). Routers (no transcript)
+// confirm by the socket-ack. The transcriptCarriesEnvelope repro at the bottom exercises the REAL
+// confirm over a temp transcript dir.
+import { afterAll, describe, expect, test } from 'bun:test'
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { buildEnvelope } from '../codec/index.ts'
+import {
+  compactDoneBaseline,
+  deliverWarm,
+  resolveLiveRuntime,
+  transcriptCarriesEnvelope,
+  type DeliveryTarget,
+  type WarmDeliverSeam,
+} from './index.ts'
 
 const hostedTarget: DeliveryTarget = {
   runtime: 'codex',
@@ -20,61 +32,58 @@ const hostedTarget: DeliveryTarget = {
   socketPath: '/tmp/nonexistent-iap-test.sock',
 }
 
-describe('deliverWarm — hosted target confirms by EITHER transcript OR pane-log advance', () => {
-  test('socket deliver ok AND transcript advances → ok', async () => {
-    let mtime = 100
+describe('deliverWarm — hosted target confirms by a NEW transcript record CARRYING the envelope', () => {
+  test('socket deliver ok AND a record carrying the envelope appears → ok', async () => {
+    let landed = false
     const seam: WarmDeliverSeam = {
       deliverHosted: async () => {
-        mtime = 200 // the session took our message and started a model turn → transcript moved
+        landed = true // the session recorded our envelope (queue-op / user-turn)
         return { ok: true }
       },
-      newestActivityMtime: () => mtime,
-      paneLogMtime: () => 100, // pane-log flat — the transcript advance alone confirms
+      confirmLanded: () => landed,
     }
     const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
     expect(r.ok).toBe(true)
   })
 
-  test('CODEX PARITY: transcript NEVER advances but the pane-log DOES → ok (the codex fix)', async () => {
-    // The exact codex shape: the session jsonl does not advance within the grace (model-turn-start
-    // latency), but the pane-log ticks ~1s as codex renders the working state on submit.
-    let pane = 100
+  test('FALSE-OK KILLER: session is ACTIVE (mtime would bump) but NO record carries our envelope → loud false-FAIL, not ok', async () => {
+    // The incident shape: the receiver is mid-turn (its own rendering would advance transcript+pane
+    // mtimes), but our paste was swallowed at the turn boundary → no envelope-carrying record. The OLD
+    // mtime confirm returned ok=true here (silent loss); the message-specific confirm correctly FAILS.
     const seam: WarmDeliverSeam = {
-      deliverHosted: async () => {
-        pane = 200 // codex rendered the working state in response to our bytes
-        return { ok: true }
-      },
-      newestActivityMtime: () => 100, // session jsonl flat within the grace (codex TTFT > grace)
-      paneLogMtime: () => pane,
+      deliverHosted: async () => ({ ok: true }), // CR flushed — bytes left us
+      confirmLanded: () => false, // active session, but no record carries THIS envelope
+      sleep: async () => {}, // never actually wait
     }
-    const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
-    expect(r.ok).toBe(true)
-  })
-
-  test('NEITHER proxy advances → loud fail (live but unresponsive); message NOT delivered', async () => {
-    const seam: WarmDeliverSeam = {
-      deliverHosted: async () => ({ ok: true }), // CR flushed — but the session never reacted
-      newestActivityMtime: () => 100, // constant
-      paneLogMtime: () => 100, // constant — neither advances past baseline
-    }
-    // grace via the seam-driven loop: with both proxies flat the loop runs to the grace deadline.
     const prev = process.env.IAP_HOST_LIVENESS_GRACE_MS
     process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // expire immediately — deterministic fail
     try {
       const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
       expect(r.ok).toBe(false)
-      if (!r.ok) expect(r.error.message).toContain('no transcript or pane-log advance')
+      if (!r.ok) expect(r.error.message).toContain('no transcript record carrying the message')
     } finally {
       if (prev === undefined) delete process.env.IAP_HOST_LIVENESS_GRACE_MS
       else process.env.IAP_HOST_LIVENESS_GRACE_MS = prev
     }
   })
 
-  test('socket deliver fails (socket dead/stalled) → loud fail, no false ok', async () => {
+  test('the carrying record appears only after a couple of polls (busy enqueues, then logs) → ok', async () => {
+    let polls = 0
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async () => ({ ok: true }),
+      confirmLanded: () => ++polls >= 3, // lands on the 3rd poll
+      sleep: async () => {}, // poll fast, no real delay
+    }
+    const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+    expect(r.ok).toBe(true)
+    expect(polls).toBeGreaterThanOrEqual(3)
+  })
+
+  test('socket deliver fails (socket dead/stalled) → loud fail, confirm never consulted', async () => {
+    let confirmProbes = 0
     const seam: WarmDeliverSeam = {
       deliverHosted: async () => ({ ok: false, error: 'socket dead during submit' }),
-      newestActivityMtime: () => 100,
-      paneLogMtime: () => 100,
+      confirmLanded: () => (confirmProbes++, true),
     }
     const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
     expect(r.ok).toBe(false)
@@ -82,29 +91,25 @@ describe('deliverWarm — hosted target confirms by EITHER transcript OR pane-lo
       expect(r.error.message).toContain('deliver failed')
       expect(r.error.message).toContain('socket dead')
     }
+    expect(confirmProbes).toBe(0) // a failed submit never reaches the landed-confirm
   })
 
-  test('no cwd (direct caller, no activity proxy) → confirmed-only (socket-ack), no transcript probe', async () => {
-    let mtimeProbes = 0
+  test('no cwd (direct caller, no transcript) → confirmed-only (socket-ack), confirm never consulted', async () => {
+    let confirmProbes = 0
     const seam: WarmDeliverSeam = {
       deliverHosted: async () => ({ ok: true }),
-      newestActivityMtime: () => {
-        mtimeProbes++
-        return 100
-      },
-      paneLogMtime: () => 100,
+      confirmLanded: () => (confirmProbes++, false),
     }
     const r = await deliverWarm(hostedTarget, 'task', undefined, seam)
     expect(r.ok).toBe(true)
-    expect(mtimeProbes).toBe(0) // no cwd → the transcript proxy is never consulted
+    expect(confirmProbes).toBe(0) // no cwd → the transcript confirm is never consulted
   })
 })
 
-// Cutover infra-track — a hosted ROUTER (telegram/notifier) has NO transcript proxy
-// (adapter.newestActivityMtime=null), so the mtime-advance confirm a TUI uses can never be satisfied
-// and would false-FAIL every router delivery. The host path confirms a router by the socket-ack —
-// PARITY with deliverViaTmux's router C-j path (delivery-level confirm; router liveness is structural
-// via launchd, not a model turn). These cases pin that behavior.
+// Cutover infra-track — a hosted ROUTER (telegram/notifier) has NO transcript, so the message-specific
+// transcript confirm a TUI uses can never apply and would false-FAIL every router delivery. The host
+// path confirms a router by the socket-ack — PARITY with the legacy tmux router C-j path (delivery-level
+// confirm; router liveness is structural via launchd, not a model turn). These cases pin that behavior.
 const routerTarget: DeliveryTarget = {
   runtime: 'notifier', // notifierAdapter.kind === 'router'
   personality: 'timer',
@@ -112,18 +117,17 @@ const routerTarget: DeliveryTarget = {
   socketPath: '/tmp/nonexistent-iap-test.sock',
 }
 
-describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript/pane-log proxy)', () => {
-  test('router deliver ok → ok EVEN THOUGH neither proxy advances (the exact scenario a TUI fails on)', async () => {
+describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript confirm)', () => {
+  test('router deliver ok → ok EVEN with no envelope-carrying record (the exact scenario a TUI fails on)', async () => {
     const prev = process.env.IAP_HOST_LIVENESS_GRACE_MS
-    process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // a proxy-gated path would fail at once here
+    process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // a confirm-gated path would fail at once here
     try {
       const seam: WarmDeliverSeam = {
         deliverHosted: async () => ({ ok: true }),
-        newestActivityMtime: () => 100, // constant — a router writes no transcript
-        paneLogMtime: () => 100, // constant — irrelevant for a router (socket-ack confirms)
+        confirmLanded: () => false, // a router writes no transcript — the path must NOT gate on this
       }
       const r = await deliverWarm(routerTarget, '<iap>x</iap>', '/peer/cwd', seam)
-      expect(r.ok).toBe(true) // socket-ack IS the confirm for a router; non-advancing proxies irrelevant
+      expect(r.ok).toBe(true) // socket-ack IS the confirm for a router; the missing record is irrelevant
     } finally {
       if (prev === undefined) delete process.env.IAP_HOST_LIVENESS_GRACE_MS
       else process.env.IAP_HOST_LIVENESS_GRACE_MS = prev
@@ -137,6 +141,93 @@ describe('deliverWarm — hosted ROUTER confirms by socket-ack (no transcript/pa
     const r = await deliverWarm(routerTarget, '<iap>x</iap>', '/peer/cwd', seam)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error.message).toContain('deliver failed')
+  })
+})
+
+// ─── transcriptCarriesEnvelope — the REAL message-specific confirm over a temp transcript dir ──
+// This is the hermetic falling-before / passing-after repro for the false-OK fix: a session whose OWN
+// turn writes records (assistant/tool — no envelope) does NOT confirm (the old mtime proxy WOULD have);
+// only a NEW record CARRYING our envelope confirms. Covers both runtime shapes (claude slug-dir +
+// codex sessions-by-cwd) with real fs reads under a temp HOME.
+const tmpRoots: string[] = []
+afterAll(() => {
+  for (const d of tmpRoots) rmSync(d, { recursive: true, force: true })
+})
+function tmpHomeAndCwd(): { env: NodeJS.ProcessEnv; home: string; cwd: string } {
+  const home = mkdtempSync(join(tmpdir(), 'iap-home-'))
+  const cwd = mkdtempSync(join(tmpdir(), 'iap-cwd-'))
+  tmpRoots.push(home, cwd)
+  return { env: { ...process.env, HOME: home }, home, cwd }
+}
+const sampleEnvelope = buildEnvelope({
+  fromPersonality: 'arthur',
+  fromRuntime: 'telegram',
+  fromIntelligence: 'natural',
+  message: 'привет boris — это сообщение должно дойти',
+})
+
+describe('transcriptCarriesEnvelope — message-specific landed-confirm (real fs)', () => {
+  test('claude: own-turn records do NOT confirm; a queue-operation carrying the envelope DOES', () => {
+    const { env, home, cwd } = tmpHomeAndCwd()
+    const slug = realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, '-')
+    const dir = join(home, '.claude', 'projects', slug)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'session.jsonl')
+    writeFileSync(file, '') // baseline: empty transcript
+    const baseline = compactDoneBaseline('claude', cwd, { env })
+
+    // nothing new yet → not carried
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+
+    // the receiver's OWN turn writes (no envelope) → STILL not carried (this is the false-OK case the
+    // old mtime proxy got wrong: mtime moved, but the message was NOT accepted)
+    appendFileSync(file, JSON.stringify({ type: 'assistant', message: { content: 'working on it…' } }) + '\n')
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+
+    // the session enqueues OUR paste → queue-operation content = envelope verbatim → carried
+    appendFileSync(file, JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: sampleEnvelope }) + '\n')
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
+  })
+
+  test('claude idle: a user-turn record carrying the envelope confirms', () => {
+    const { env, home, cwd } = tmpHomeAndCwd()
+    const slug = realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, '-')
+    const dir = join(home, '.claude', 'projects', slug)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'session.jsonl')
+    writeFileSync(file, '')
+    const baseline = compactDoneBaseline('claude', cwd, { env })
+    appendFileSync(file, JSON.stringify({ type: 'user', message: { role: 'user', content: sampleEnvelope } }) + '\n')
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
+  })
+
+  test('a pre-baseline copy of the same envelope does NOT confirm (only bytes past the offset count)', () => {
+    const { env, home, cwd } = tmpHomeAndCwd()
+    const slug = realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, '-')
+    const dir = join(home, '.claude', 'projects', slug)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'session.jsonl')
+    // an EARLIER identical message already in the transcript before we baseline
+    writeFileSync(file, JSON.stringify({ type: 'user', message: { content: sampleEnvelope } }) + '\n')
+    const baseline = compactDoneBaseline('claude', cwd, { env })
+    // no NEW record → must not confirm off the stale copy
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+  })
+
+  test('codex: a user-input response_item (nested) carrying the envelope confirms; the session is found by cwd', () => {
+    const { env, home, cwd } = tmpHomeAndCwd()
+    const root = join(home, '.codex', 'sessions', '2026', '06', '23')
+    mkdirSync(root, { recursive: true })
+    const file = join(root, 'rollout-sess.jsonl')
+    // session_meta with payload.cwd === the peer cwd → compactCandidateFiles picks this file
+    writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { cwd: realpathSync(cwd) } }) + '\n')
+    const baseline = compactDoneBaseline('codex', cwd, { env })
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+    appendFileSync(
+      file,
+      JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: sampleEnvelope }] } }) + '\n',
+    )
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
   })
 })
 
