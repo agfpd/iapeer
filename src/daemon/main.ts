@@ -355,6 +355,15 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         // head). Identities without a queue or with a live session are no-ops.
         await drainAllEphemeralQueues(cfg, { env })
       },
+      // Surface a supervise-tick throw that the daemon timer would otherwise SWALLOW (the class that
+      // hid a stuck reaper for hours): record ev=supervise-error in lifecycle.log, flattened to one
+      // logfmt line. Best-effort — a reporter must never fail the daemon.
+      onError: (err: unknown) => {
+        try {
+          const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
+          appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
+        } catch { /* best-effort */ }
+      },
     },
     bearerToken,
     port: opts.port ?? DEFAULT_DAEMON_PORT,

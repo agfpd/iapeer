@@ -1144,7 +1144,7 @@ export function killSession(_sock: string, identity: string): void {
 
 export interface SuperviseOutcome {
   identity: string
-  action: 'reaped-idle' | 'reaped-gone' | 'reaped-ephemeral' | 'skipped-launchd' | 'skipped-stopped' | 'alive' | 'needs-eager-fresh'
+  action: 'reaped-idle' | 'reaped-gone' | 'reaped-ephemeral' | 'skipped-launchd' | 'skipped-stopped' | 'alive' | 'needs-eager-fresh' | 'skipped-error'
   reason?: string
   /** For 'needs-eager-fresh': the peer to EAGERLY re-launch fresh (its session died
    *  carrying a .new-eager mark). The daemon timer drives the async relaunch.
@@ -1166,6 +1166,172 @@ export interface SuperviseDeps {
   /** Pane-log mtime seam (default: the real pane-log file mtime). Tests inject a controlled value to
    *  exercise the ephemeral active-turn vs idle distinction without a real pane-log on disk. */
   paneLogMtime?: (identity: string) => number | null
+}
+
+/** Resolved per-tick context threaded into superviseOnePeer (deps already defaulted by superviseTick). */
+interface SuperviseCtx {
+  cfg: LifecycleConfig
+  env: NodeJS.ProcessEnv
+  nowMs: number
+  activityMtime: (runtime: string, cwd: string) => number | null
+  isAlive: (sock: string, identity: string) => boolean
+  paneLogMt: (identity: string) => number | null
+  verbose: boolean
+  trace: (fields: Record<string, string | number | undefined>) => void
+}
+
+/**
+ * Evaluate ONE daemon-owned session and take its at-most-one reap action, returning the outcome.
+ * Extracted from superviseTick so a throw on a SINGLE peer can be ISOLATED by the caller: a malformed
+ * peer-state must never abort the whole sweep (that is the silent fleet-wide reap-outage class — one bad
+ * peer and NO peer gets reaped, the error swallowed by the daemon's supervise-tick catch). Every branch
+ * returns exactly one outcome; the trace side-effects mirror the prior inline behaviour.
+ */
+function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
+  const { cfg, env, nowMs, activityMtime, isAlive, paneLogMt, verbose, trace } = ctx
+  // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
+  if (isLaunchdManaged(s.personality, env)) {
+    if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
+    return { identity: s.identity, action: 'skipped-launchd' }
+  }
+  const sock = buildSocketPath(s.runtime, s.personality, cfg.sockDir)
+  if (!isAlive(sock, s.identity)) {
+    // A DELIBERATE stop is not a death: the stop verb parks clean
+    // (.stopped + .idle-reaped) and kills the session itself. Catch-up branch for
+    // a stop that raced this tick (or a pre-fix stop): drop the state quietly —
+    // no crash-loop entry, no death class — and ensure the clean-park marker so
+    // the post-`start` wake RESUMES (stop→start must survive ≥ idle-reap).
+    if (isStopped(cfg, s.identity)) {
+      removeSessionState(cfg, s.identity)
+      clearEphemeralArmed(cfg, s.identity)
+      setIdleReaped(cfg, s.identity) // idempotent with the stop verb's own park
+      trace({ identity: s.identity, action: 'skipped-stopped', outcome: 'resume-on-start' })
+      return { identity: s.identity, action: 'skipped-stopped', reason: 'deliberate stop — parked clean, resumes on start' }
+    }
+    // A dead session: record a death for crash-loop accounting, then branch on the
+    // .new-eager mark. This death was NOT daemon-initiated (the daemon only initiates
+    // the idle-reap below) → it died on its own → do NOT write .idle-reaped here.
+    recordDeath(cfg, s.identity, nowMs)
+    removeSessionState(cfg, s.identity)
+    // The .ephemeral-armed mark belongs to THIS (now dead) session — it armed on its
+    // outbound reply. Clear it with the session, so a successor session can never be
+    // quiet-reaped on a stale mark before answering its own task. No-op otherwise.
+    clearEphemeralArmed(cfg, s.identity)
+    // A session that died carrying a .new-eager mark is an owner /new: re-launch
+    // EAGERLY as fresh (not lazily on the next message). The mark is LEFT for the
+    // eager relaunch (processEagerRelaunches) to consume; the daemon timer drives it.
+    if (hasNewEager(cfg, s.identity)) {
+      trace({ identity: s.identity, action: 'needs-eager-fresh', reason: '/new eager mark', outcome: 'eager-fresh' })
+      return {
+        identity: s.identity,
+        action: 'needs-eager-fresh',
+        reason: '/new eager mark — eager fresh re-launch',
+        personality: s.personality,
+        runtime: s.runtime,
+      }
+    }
+    // Crash / self-close: NO marker written, NO eager relaunch — the peer stays
+    // asleep and wakes FRESH lazily on the next message (resolveWakeMode branch 3a).
+    // The death-class tag (classifyGoneSession) makes the two gone-classes
+    // distinguishable in lifecycle.log: `session-gone` (pane died, server alive →
+    // exits.log should have the cause) vs `server-dead` (whole tmux server died →
+    // exits.log structurally empty; this line is the only durable trace).
+    const gone = classifyGoneSession(sock)
+    trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
+    return { identity: s.identity, action: 'reaped-gone', reason: gone.reason }
+  }
+  // Idle accounting via the PANE-LOG (TUI render-stream) mtime — the RELIABLE idle
+  // signal: it advances ~1s while the TUI renders ANY turn (model generation OR a tool
+  // run — the "esc to interrupt" elapsed counter ticks) and goes quiet ONLY at the
+  // prompt. NOT the transcript file mtime: a live claude session RE-TOUCHES its session
+  // .jsonl ~every 30-45min WITHOUT a real turn (a system/bridge re-save), so the
+  // transcript proxy is perpetually < idleSecs and a claude peer NEVER idle-reaps — the
+  // fleet-reap incident: a warm claude pile, last real turn hours ago, never reaped;
+  // codex's session file is NOT re-touched, so codex reaps (the claude-vs-codex split).
+  // The transcript stays the launch ready-gate's signal (it needs "a real turn produced
+  // output"); only this idle proxy moves to the pane-log. FLOORED at wokeAt: a session
+  // cannot be idle longer than it has been awake (a wake that produced no turn →
+  // mt=wokeAt → reaped idleSecs after the wake, never out from under an attaching op).
+  const ephemeral = isEphemeralPeer(s.cwd)
+  const plMt = paneLogMt(s.identity)
+  let mt: number
+  if (plMt !== null) {
+    mt = Math.max(plMt, s.wokeAt)
+  } else {
+    // Pane-log MISSING (a legacy pre-pane-log supervisor) → fall back to the transcript
+    // proxy, NEVER to wokeAt-as-activity: a wokeAt-only age would read an ACTIVE legacy
+    // session's idle from its hours-old wokeAt and reap it MID-WORK. The transcript is
+    // false-fresh at idle (so an IDLE legacy peer lingers warm until its next respawn
+    // earns a pane-log — bounded, self-heals), but an ACTIVE legacy peer keeps a
+    // genuinely-fresh transcript and is correctly protected. Safe direction preserved.
+    let tx = 0
+    try { tx = activityMtime(s.runtime, s.cwd) ?? 0 } catch { /* no adapter → wokeAt */ }
+    mt = Math.max(tx, s.wokeAt)
+  }
+  const ageSecs = Math.floor((nowMs - mt) / 1000)
+  // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
+  // daemon routed its outbound reply) is reaped after a QUIET window, checked
+  // BEFORE the idle branch (quiet ≪ idle). Quiet = the pane-log silent for
+  // ephemeralQuietSecs (the reliable render signal above) — a still-rendering turn
+  // keeps it fresh, so the worker finishes its turn first; post-reply housekeeping
+  // (operative-note writes) also advances it.
+  // NOT armed (still mid-task) → the ordinary idle bound below is its only reaper.
+  // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
+  // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).
+  if (ephemeral && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
+    killSession(sock, s.identity)
+    clearEphemeralArmed(cfg, s.identity)
+    removeSessionState(cfg, s.identity)
+    trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-done' })
+    return {
+      identity: s.identity,
+      action: 'reaped-ephemeral',
+      reason: `armed, quiet ${ageSecs}s`,
+      personality: s.personality,
+      runtime: s.runtime,
+    }
+  }
+  // UNARMED ephemeral idle bound (live case): a worker that ended
+  // SILENTLY (no final outbound → never armed; or its arm was lost to a CLI/
+  // daemon-restart window) used to wait out the FULL generic idleSecs (1 h) —
+  // and the M3 serial drain waits for the session's death, so ONE silent worker
+  // stalled its whole conveyor. This bound is the defense-in-depth backstop:
+  // ≫ the legitimate silent-tool case (sleep-180), ≪ idleSecs. The ШТАТНЫЙ
+  // silent-finish path is `iapeer self-done` (arm without waking anyone —
+  // the invariant «нет пустых пробуждений» stays intact); this branch only
+  // bounds the damage when a worker does neither. Policy reap: NO .idle-reaped
+  // (ephemeral never resumes), NO recordDeath (the ring counts faults). The pane-log
+  // fold-in above also covers this branch: a STILL-WORKING unarmed worker (a silent
+  // tool, no reply yet) keeps the pane-log fresh via the TUI render, so it is no longer
+  // reaped mid-task — only a genuinely idle/wedged unarmed session crosses this bound.
+  if (ephemeral && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
+    killSession(sock, s.identity)
+    clearEphemeralArmed(cfg, s.identity)
+    removeSessionState(cfg, s.identity)
+    trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-unarmed-bound' })
+    return {
+      identity: s.identity,
+      action: 'reaped-ephemeral',
+      reason: `unarmed idle ${ageSecs}s (silent-finish backstop; штатный путь — iapeer self-done)`,
+      personality: s.personality,
+      runtime: s.runtime,
+    }
+  }
+  if (ageSecs > cfg.idleSecs) {
+    // THE ONLY place .idle-reaped is written: this is the one death the daemon
+    // INITIATES. Its presence on the next wake = the session was parked cleanly =
+    // RESUME-eligible (resolveWakeMode branch 3b). A crash/self-close (the dead
+    // branch above) never writes it → that wakes FRESH (branch 3a).
+    killSession(sock, s.identity)
+    setIdleReaped(cfg, s.identity)
+    removeSessionState(cfg, s.identity)
+    trace({ identity: s.identity, action: 'reaped-idle', age: `${ageSecs}s`, outcome: 'resume-eligible' })
+    return { identity: s.identity, action: 'reaped-idle', reason: `idle ${ageSecs}s` }
+  }
+  // ALIVE and not idle. (pty-only: no tmux server-death canary — a hosted death is recorded by the
+  // supervisor's exits.log and classified by classifyGoneSession on the next sweep.)
+  if (verbose) trace({ identity: s.identity, action: 'alive', age: `${ageSecs}s` })
+  return { identity: s.identity, action: 'alive' }
 }
 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
@@ -1190,160 +1356,18 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const trace = (fields: Record<string, string | number | undefined>): void =>
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise', ...fields }, { env, nowMs })
   const out: SuperviseOutcome[] = []
+  const ctx: SuperviseCtx = { cfg, env, nowMs, activityMtime, isAlive, paneLogMt, verbose, trace }
   for (const s of readSessionStates(cfg)) {
-    // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
-    if (isLaunchdManaged(s.personality, env)) {
-      out.push({ identity: s.identity, action: 'skipped-launchd' })
-      if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
-      continue
-    }
-    const sock = buildSocketPath(s.runtime, s.personality, cfg.sockDir)
-    if (!isAlive(sock, s.identity)) {
-      // A DELIBERATE stop is not a death: the stop verb parks clean
-      // (.stopped + .idle-reaped) and kills the session itself. Catch-up branch for
-      // a stop that raced this tick (or a pre-fix stop): drop the state quietly —
-      // no crash-loop entry, no death class — and ensure the clean-park marker so
-      // the post-`start` wake RESUMES (stop→start must survive ≥ idle-reap).
-      if (isStopped(cfg, s.identity)) {
-        removeSessionState(cfg, s.identity)
-        clearEphemeralArmed(cfg, s.identity)
-        setIdleReaped(cfg, s.identity) // idempotent with the stop verb's own park
-        out.push({ identity: s.identity, action: 'skipped-stopped', reason: 'deliberate stop — parked clean, resumes on start' })
-        trace({ identity: s.identity, action: 'skipped-stopped', outcome: 'resume-on-start' })
-        continue
-      }
-      // A dead session: record a death for crash-loop accounting, then branch on the
-      // .new-eager mark. This death was NOT daemon-initiated (the daemon only initiates
-      // the idle-reap below) → it died on its own → do NOT write .idle-reaped here.
-      recordDeath(cfg, s.identity, nowMs)
-      removeSessionState(cfg, s.identity)
-      // The .ephemeral-armed mark belongs to THIS (now dead) session — it armed on its
-      // outbound reply. Clear it with the session, so a successor session can never be
-      // quiet-reaped on a stale mark before answering its own task. No-op otherwise.
-      clearEphemeralArmed(cfg, s.identity)
-      // A session that died carrying a .new-eager mark is an owner /new: re-launch
-      // EAGERLY as fresh (not lazily on the next message). The mark is LEFT for the
-      // eager relaunch (processEagerRelaunches) to consume; the daemon timer drives it.
-      if (hasNewEager(cfg, s.identity)) {
-        out.push({
-          identity: s.identity,
-          action: 'needs-eager-fresh',
-          reason: '/new eager mark — eager fresh re-launch',
-          personality: s.personality,
-          runtime: s.runtime,
-        })
-        trace({ identity: s.identity, action: 'needs-eager-fresh', reason: '/new eager mark', outcome: 'eager-fresh' })
-        continue
-      }
-      // Crash / self-close: NO marker written, NO eager relaunch — the peer stays
-      // asleep and wakes FRESH lazily on the next message (resolveWakeMode branch 3a).
-      // The death-class tag (classifyGoneSession) makes the two gone-classes
-      // distinguishable in lifecycle.log: `session-gone` (pane died, server alive →
-      // exits.log should have the cause) vs `server-dead` (whole tmux server died →
-      // exits.log structurally empty; this line is the only durable trace).
-      const gone = classifyGoneSession(sock)
-      out.push({ identity: s.identity, action: 'reaped-gone', reason: gone.reason })
-      trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
-      continue
-    }
-    // Idle accounting via the PANE-LOG (TUI render-stream) mtime — the RELIABLE idle
-    // signal: it advances ~1s while the TUI renders ANY turn (model generation OR a tool
-    // run — the "esc to interrupt" elapsed counter ticks) and goes quiet ONLY at the
-    // prompt. NOT the transcript file mtime: a live claude session RE-TOUCHES its session
-    // .jsonl ~every 30-45min WITHOUT a real turn (a system/bridge re-save), so the
-    // transcript proxy is perpetually < idleSecs and a claude peer NEVER idle-reaps — the
-    // fleet-reap incident: a warm claude pile, last real turn hours ago, never reaped;
-    // codex's session file is NOT re-touched, so codex reaps (the claude-vs-codex split).
-    // The transcript stays the launch ready-gate's signal (it needs "a real turn produced
-    // output"); only this idle proxy moves to the pane-log. FLOORED at wokeAt: a session
-    // cannot be idle longer than it has been awake (a wake that produced no turn →
-    // mt=wokeAt → reaped idleSecs after the wake, never out from under an attaching op).
-    const ephemeral = isEphemeralPeer(s.cwd)
-    const plMt = paneLogMt(s.identity)
-    let mt: number
-    if (plMt !== null) {
-      mt = Math.max(plMt, s.wokeAt)
-    } else {
-      // Pane-log MISSING (a legacy pre-pane-log supervisor) → fall back to the transcript
-      // proxy, NEVER to wokeAt-as-activity: a wokeAt-only age would read an ACTIVE legacy
-      // session's idle from its hours-old wokeAt and reap it MID-WORK. The transcript is
-      // false-fresh at idle (so an IDLE legacy peer lingers warm until its next respawn
-      // earns a pane-log — bounded, self-heals), but an ACTIVE legacy peer keeps a
-      // genuinely-fresh transcript and is correctly protected. Safe direction preserved.
-      let tx = 0
-      try { tx = activityMtime(s.runtime, s.cwd) ?? 0 } catch { /* no adapter → wokeAt */ }
-      mt = Math.max(tx, s.wokeAt)
-    }
-    const ageSecs = Math.floor((nowMs - mt) / 1000)
-    // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
-    // daemon routed its outbound reply) is reaped after a QUIET window, checked
-    // BEFORE the idle branch (quiet ≪ idle). Quiet = the pane-log silent for
-    // ephemeralQuietSecs (the reliable render signal above) — a still-rendering turn
-    // keeps it fresh, so the worker finishes its turn first; post-reply housekeeping
-    // (operative-note writes) also advances it.
-    // NOT armed (still mid-task) → the ordinary idle bound below is its only reaper.
-    // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
-    // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).
-    if (ephemeral && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
-      killSession(sock, s.identity)
-      clearEphemeralArmed(cfg, s.identity)
-      removeSessionState(cfg, s.identity)
-      out.push({
-        identity: s.identity,
-        action: 'reaped-ephemeral',
-        reason: `armed, quiet ${ageSecs}s`,
-        personality: s.personality,
-        runtime: s.runtime,
-      })
-      trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-done' })
-      continue
-    }
-    // UNARMED ephemeral idle bound (live case): a worker that ended
-    // SILENTLY (no final outbound → never armed; or its arm was lost to a CLI/
-    // daemon-restart window) used to wait out the FULL generic idleSecs (1 h) —
-    // and the M3 serial drain waits for the session's death, so ONE silent worker
-    // stalled its whole conveyor. This bound is the defense-in-depth backstop:
-    // ≫ the legitimate silent-tool case (sleep-180), ≪ idleSecs. The ШТАТНЫЙ
-    // silent-finish path is `iapeer self-done` (arm without waking anyone —
-    // the invariant «нет пустых пробуждений» stays intact); this branch only
-    // bounds the damage when a worker does neither. Policy reap: NO .idle-reaped
-    // (ephemeral never resumes), NO recordDeath (the ring counts faults). The pane-log
-    // fold-in above also covers this branch: a STILL-WORKING unarmed worker (a silent
-    // tool, no reply yet) keeps the pane-log fresh via the TUI render, so it is no longer
-    // reaped mid-task — only a genuinely idle/wedged unarmed session crosses this bound.
-    if (ephemeral && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
-      killSession(sock, s.identity)
-      clearEphemeralArmed(cfg, s.identity)
-      removeSessionState(cfg, s.identity)
-      out.push({
-        identity: s.identity,
-        action: 'reaped-ephemeral',
-        reason: `unarmed idle ${ageSecs}s (silent-finish backstop; штатный путь — iapeer self-done)`,
-        personality: s.personality,
-        runtime: s.runtime,
-      })
-      trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-unarmed-bound' })
-      continue
-    }
-    if (ageSecs > cfg.idleSecs) {
-      // THE ONLY place .idle-reaped is written: this is the one death the daemon
-      // INITIATES. Its presence on the next wake = the session was parked cleanly =
-      // RESUME-eligible (resolveWakeMode branch 3b). A crash/self-close (the dead
-      // branch above) never writes it → that wakes FRESH (branch 3a).
-      killSession(sock, s.identity)
-      setIdleReaped(cfg, s.identity)
-      removeSessionState(cfg, s.identity)
-      out.push({ identity: s.identity, action: 'reaped-idle', reason: `idle ${ageSecs}s` })
-      trace({ identity: s.identity, action: 'reaped-idle', age: `${ageSecs}s`, outcome: 'resume-eligible' })
-    } else {
-      // Server-death canary retrofit (canary.ts): ensure a canary is watching
-      // every ALIVE daemon-owned server — covers a fleet launched by older code
-      // within one tick of a deploy, no session restarts. Idempotent (pgrep on
-      // the per-identity wait-for channel), best-effort, pure observability.
-      // pty-only: no tmux server-death canary — a hosted death is recorded by the supervisor's
-      // exits.log (host=supervisor, resilience-b), classified by classifyGoneSession on the next sweep.
-      out.push({ identity: s.identity, action: 'alive' })
-      if (verbose) trace({ identity: s.identity, action: 'alive', age: `${ageSecs}s` })
+    // Per-peer ISOLATION: a throw while evaluating ONE peer must NOT abort the whole sweep — that is
+    // the silent fleet-wide reap-outage class (one malformed peer-state and NO peer gets reaped, the
+    // error swallowed by the daemon's supervise-tick catch). Catch it, log it loudly to lifecycle.log,
+    // and continue to the next peer — the rest of the fleet is still swept.
+    try {
+      out.push(superviseOnePeer(s, ctx))
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      out.push({ identity: s.identity, action: 'skipped-error', reason })
+      trace({ identity: s.identity, action: 'skipped-error', reason, outcome: 'peer-error-isolated' })
     }
   }
   return out

@@ -353,7 +353,7 @@ export interface StartDaemonOptions extends StorageOptions {
    * owns fleet supervision (idle-reap / zombie-sweep) instead of launchd. The
    * caller wires `tick: () => superviseTick(cfg)` (H4-guarded inside).
    */
-  supervise?: { intervalMs: number; tick: () => void | Promise<void> }
+  supervise?: { intervalMs: number; tick: () => void | Promise<void>; onError?: (err: unknown) => void }
   /**
    * Optional bearer token (H8). When set, EVERY request must carry
    * `Authorization: Bearer <token>` or it is rejected 401 BEFORE any MCP dispatch.
@@ -456,12 +456,20 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
   // timer regardless of how many listeners are bound).
   let supervisor: ReturnType<typeof setInterval> | undefined
   if (opts.supervise) {
-    const { intervalMs, tick } = opts.supervise
+    const { intervalMs, tick, onError } = opts.supervise
+    // A supervise tick must NEVER crash the daemon — but its error must NOT be SWALLOWED either: a
+    // silently-swallowed throw is a sweep that stops reaping INVISIBLY (no log, no stderr — the class
+    // that made a stuck reaper undiagnosable for hours). Route BOTH an async rejection and a sync throw
+    // to onError (the production main records ev=supervise-error in lifecycle.log); reporting itself
+    // never throws.
+    const report = (err: unknown): void => {
+      try { onError?.(err) } catch { /* a reporter must never crash the daemon */ }
+    }
     supervisor = setInterval(() => {
       try {
-        void Promise.resolve(tick()).catch(() => {})
-      } catch {
-        /* a supervise tick must never crash the daemon */
+        void Promise.resolve(tick()).catch(report)
+      } catch (err) {
+        report(err)
       }
     }, intervalMs)
     supervisor.unref?.()

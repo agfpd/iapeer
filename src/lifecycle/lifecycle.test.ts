@@ -263,6 +263,75 @@ describe('superviseTick H4 guard', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// superviseTick — per-peer ISOLATION (one throwing peer must not abort the sweep)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('superviseTick per-peer isolation', () => {
+  let stateDir: string
+  let laDir: string
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'iapeer-sup-iso-state-'))
+    laDir = mkdtempSync(join(tmpdir(), 'iapeer-sup-iso-la-'))
+  })
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true })
+    rmSync(laDir, { recursive: true, force: true })
+  })
+  const cfg = (): LifecycleConfig =>
+    ({
+      claudeBin: 'claude',
+      codexBin: 'codex',
+      sockDir: '/tmp',
+      stateDir,
+      logDir: stateDir,
+      eventLogDir: stateDir,
+      bootDeadlineSecs: 1,
+      readyGateSecs: 1,
+      idleSecs: 1,
+    }) as LifecycleConfig
+  function writeState(personality: string): string {
+    const identity = `claude-${personality}`
+    writeFileSync(
+      join(stateDir, `${identity}.session`),
+      JSON.stringify({ identity, runtime: 'claude', personality, cwd: '/tmp/none', wokeAt: 0 }),
+    )
+    return identity
+  }
+  const env = () => ({ ...process.env, IAPEER_LAUNCHAGENTS_DIR: laDir })
+
+  test('a peer whose evaluation THROWS is isolated (skipped-error, logged loudly) — the rest are still swept', () => {
+    // The fleet-wide-reap-outage class: before per-peer isolation, ONE peer whose evaluation threw
+    // aborted the ENTIRE sweep (and the daemon timer swallowed the error → no reap for ANYONE, silently
+    // for hours). Now the throw is caught per-peer: the bad peer becomes skipped-error and the sweep
+    // continues. Order-independent (readdirSync order is unspecified) — we assert on identities.
+    const c = cfg()
+    const bad = writeState('iapeer-isobad')
+    const g1 = writeState('iapeer-isogone1')
+    const g2 = writeState('iapeer-isogone2')
+    const out = superviseTick(c, {
+      env: env(),
+      nowMs: Date.now(),
+      // sessionAlive throws ONLY for the bad peer; the others read dead → reaped-gone.
+      sessionAlive: (_sock, identity) => {
+        if (identity === bad) throw new Error('synthetic per-peer fault')
+        return false
+      },
+    })
+    const byId = (id: string) => out.find(x => x.identity === id)
+    expect(byId(bad)?.action).toBe('skipped-error')
+    expect(byId(bad)?.reason).toContain('synthetic per-peer fault')
+    // the OTHER peers were STILL processed — the sweep did not abort on the bad one
+    expect(byId(g1)?.action).toBe('reaped-gone')
+    expect(byId(g2)?.action).toBe('reaped-gone')
+    expect(out.length).toBe(3)
+    // the isolated fault is LOUD in lifecycle.log (no longer silently swallowed)
+    const logged = readFileSync(join(c.eventLogDir, 'lifecycle.log'), 'utf8')
+    expect(logged).toContain(`identity=${bad} action=skipped-error`)
+    expect(logged).toContain('outcome=peer-error-isolated')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // wakeOrSpawn H4 — REFUSES to wake a launchd-managed peer (no spawn at all)
 // ─────────────────────────────────────────────────────────────────────────────
 
