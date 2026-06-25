@@ -8,9 +8,11 @@
 // reads only the transcript bytes appended past a pre-deliver baseline and looks for a record that
 // echoes our envelope (claude queue-operation/user-turn; codex user-input response_item).
 //
-// Hermetic: the confirm is an injected seam (no live supervisor, no host fs). Routers (no transcript)
-// confirm by the socket-ack. The transcriptCarriesEnvelope repro at the bottom exercises the REAL
-// confirm over a temp transcript dir.
+// Hermetic: the confirm is an injected seam (no live supervisor, no host fs). The transcript confirm
+// is for 'transcript'-confirm runtimes (claude — it logs an accepted paste sub-second). codex is
+// 'socket-ack' (durable input queue, no prompt-acceptance record) and ROUTERS (no transcript) confirm
+// by the socket-ack alone. The transcriptCarriesEnvelope repro at the bottom exercises the REAL confirm
+// over a temp transcript dir.
 import { afterAll, describe, expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -25,14 +27,16 @@ import {
   type WarmDeliverSeam,
 } from './index.ts'
 
+// claude is the 'transcript'-confirm runtime — it logs an accepted paste sub-second, so the
+// message-specific transcript confirm is its delivery gate (and its swallow-guard).
 const hostedTarget: DeliveryTarget = {
-  runtime: 'codex',
+  runtime: 'claude',
   personality: 'ptyx',
-  address: 'codex-ptyx',
+  address: 'claude-ptyx',
   socketPath: '/tmp/nonexistent-iap-test.sock',
 }
 
-describe('deliverWarm — hosted target confirms by a NEW transcript record CARRYING the envelope', () => {
+describe('deliverWarm — hosted CLAUDE (transcript-confirm) confirms by a NEW record CARRYING the envelope', () => {
   test('socket deliver ok AND a record carrying the envelope appears → ok', async () => {
     let landed = false
     const seam: WarmDeliverSeam = {
@@ -103,6 +107,49 @@ describe('deliverWarm — hosted target confirms by a NEW transcript record CARR
     const r = await deliverWarm(hostedTarget, 'task', undefined, seam)
     expect(r.ok).toBe(true)
     expect(confirmProbes).toBe(0) // no cwd → the transcript confirm is never consulted
+  })
+})
+
+// CODEX — a 'socket-ack' TUI runtime: its input queue is DURABLE (a mid-turn submit is held + processed
+// at the next turn boundary, never lost — verified live 2026-06-25: an 80s turn still ingested + replied
+// with the exact probe token even though the send false-FAILed at the 8s grace), and it logs NO
+// prompt-acceptance record, so a transcript grace only ever false-FAILs a message that WILL be processed
+// and wrongly escalates to a fallback peer. deliverViaHost confirms codex by the socket-ack alone; a
+// genuinely dead session still fails at deliverHosted. These cases pin that behavior (the regression the
+// fix kills: a busy codex's PRL alert false-FAILing → fallback-escalating onto another peer).
+const codexTarget: DeliveryTarget = {
+  runtime: 'codex',
+  personality: 'cxx',
+  address: 'codex-cxx',
+  socketPath: '/tmp/nonexistent-iap-test.sock',
+}
+
+describe('deliverWarm — hosted CODEX confirms by socket-ack (durable queue, no prompt-acceptance record)', () => {
+  test('codex deliver ok → ok EVEN with no envelope-carrying record (a transcript grace would false-FAIL a busy codex)', async () => {
+    const prev = process.env.IAP_HOST_LIVENESS_GRACE_MS
+    process.env.IAP_HOST_LIVENESS_GRACE_MS = '0' // a confirm-gated path would fail at once here
+    try {
+      let confirmProbes = 0
+      const seam: WarmDeliverSeam = {
+        deliverHosted: async () => ({ ok: true }), // bracketed-paste + CR flushed to the pty
+        confirmLanded: () => (confirmProbes++, false), // busy codex: no record appears within any grace
+      }
+      const r = await deliverWarm(codexTarget, '<iap>майнинг PRL</iap>', '/peer/cwd', seam)
+      expect(r.ok).toBe(true) // socket-ack IS the confirm for codex; the missing record is irrelevant
+      expect(confirmProbes).toBe(0) // codex never consults the transcript confirm — no false-FAIL, no escalation
+    } finally {
+      if (prev === undefined) delete process.env.IAP_HOST_LIVENESS_GRACE_MS
+      else process.env.IAP_HOST_LIVENESS_GRACE_MS = prev
+    }
+  })
+
+  test('codex socket deliver fails (dead/stalled) → loud fail (a genuinely dead codex STILL escalates)', async () => {
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async () => ({ ok: false, error: 'socket dead during submit' }),
+    }
+    const r = await deliverWarm(codexTarget, '<iap>x</iap>', '/peer/cwd', seam)
+    expect(r.ok).toBe(false) // really-dead is still caught at the socket-ack → fallback still fires
+    if (!r.ok) expect(r.error.message).toContain('deliver failed')
   })
 })
 

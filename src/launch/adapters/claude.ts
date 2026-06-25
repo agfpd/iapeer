@@ -136,6 +136,11 @@ export const claudeAdapter: RuntimeAdapter = {
     ghostTextSgr: ['2', '38;5;246'],
   },
 
+  // claude logs an accepted paste PROMPTLY (sub-second: a queue-operation when busy,
+  // the user-turn when idle), so the message-specific transcript confirm is both cheap
+  // and a swallow-guard (the false-OK class). Keep it. (See RuntimeAdapter.deliveryConfirm.)
+  deliveryConfirm: 'transcript',
+
   /**
    * argv = claudeBin + headless flags + (system-prompt-file when set) +
    * (--continue when resuming) + extraArgs.

@@ -236,6 +236,32 @@ export interface RuntimeAdapter {
   deliveryMarkers: DeliveryMarkers
 
   /**
+   * How a delivered envelope's LANDING is confirmed AFTER the socket-ack, in
+   * deliverViaHost (transport). Owned by the adapter because it is a property of
+   * HOW the runtime logs an accepted message, not transport policy. A router
+   * (kind:'router') is always socket-ack by structure and short-circuits before
+   * this field is read; it refines the TUI runtimes. Absent → 'transcript' (the
+   * strict default: a new/unknown runtime gets the swallow-guarding confirm, never
+   * a weaker one).
+   *   - 'transcript' (claude): the runtime writes an acceptance record CARRYING the
+   *     envelope PROMPTLY — sub-second: a queue-operation when busy, the user-turn
+   *     when idle. So a message-specific transcript-carries-envelope check within a
+   *     short grace BOTH proves landing AND catches a paste swallowed at a turn
+   *     boundary (the false-OK class, incident 2026-06-23). Cheap and safe → keep it.
+   *   - 'socket-ack' (codex): the runtime writes NO acceptance record — its
+   *     session-jsonl user-input appears only when the model TURN INGESTS the
+   *     message, which during a long turn is many tens of seconds away (measured ~80s
+   *     live, 2026-06-25). But its input queue is DURABLE: a mid-turn submit is HELD
+   *     and processed at the next turn boundary, never lost (verified live — an 80s
+   *     turn still ingested + replied with the exact probe token). So the flushed
+   *     socket-ack (bytes left us AND drained to the pty) IS the delivery confirm; a
+   *     transcript grace here only ever FALSE-FAILs a message that WILL be processed,
+   *     wrongly escalating to a fallback peer. A genuinely dead session still fails
+   *     at the socket-ack (no socket / stalled flush) → really-dead still escalates.
+   */
+  deliveryConfirm?: 'transcript' | 'socket-ack'
+
+  /**
    * If set, launch REFUSES unless the peer's intelligence equals this value
    * (fail-loud). telegram → 'natural' — it is a human channel; launching an
    * artificial/absent peer on it is a category error (the persistent-peer path held
