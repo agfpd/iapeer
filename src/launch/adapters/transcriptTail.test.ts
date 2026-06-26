@@ -60,4 +60,35 @@ describe('lastTimestampedEntryMs — last meaningful transcript entry content-ti
     // tiny tail window starts mid-first-line → that fragment must be skipped, the complete last line wins
     expect(lastTimestampedEntryMs(f, 80)).toBe(Date.parse('2026-06-23T09:00:00.000Z'))
   })
+
+  test('THE GIANT-TAIL FIX: a tail record LARGER than the window grows the window, never returns null', () => {
+    // A browser peer appends base64-screenshot records that dwarf the tail window (observed 368 KB,
+    // 5.6× the 64 KB default). When such a record is the TAIL, a fixed window holds only a fragment of
+    // ONE line → no complete JSON → the old reader returned null, the supervisor floored at wokeAt and
+    // idle-reaped the LIVE session. The adaptive window must grow and surface the giant record's real ts.
+    const huge = 'A'.repeat(200_000) // a single record well beyond the small window below
+    const f = tmpFile(
+      [
+        JSON.stringify({ type: 'user', timestamp: '2026-06-26T18:00:00.000Z' }),
+        JSON.stringify({ type: 'assistant', payload: huge, timestamp: '2026-06-26T18:21:14.634Z' }),
+      ].join('\n') + '\n',
+    )
+    // window = 1 KB ≪ the 200 KB tail record → without growth this is null (the bug); with growth → real ts
+    expect(lastTimestampedEntryMs(f, 1024)).toBe(Date.parse('2026-06-26T18:21:14.634Z'))
+    expect(lastTimestampedEntryMs(f, 1024)).not.toBeNull()
+  })
+
+  test('giant tail record followed by metadata WITHOUT a timestamp still reports the giant turn', () => {
+    // The real last TIMESTAMPED turn is the oversized record; trailing metadata (no timestamp) sits after
+    // it. The window must grow past the giant record and return ITS timestamp, not null.
+    const huge = 'B'.repeat(200_000)
+    const f = tmpFile(
+      [
+        JSON.stringify({ type: 'assistant', payload: huge, timestamp: '2026-06-26T18:21:14.634Z' }),
+        JSON.stringify({ type: 'mode' }), // no timestamp
+        JSON.stringify({ type: 'ai-title' }), // no timestamp
+      ].join('\n') + '\n',
+    )
+    expect(lastTimestampedEntryMs(f, 1024)).toBe(Date.parse('2026-06-26T18:21:14.634Z'))
+  })
 })
