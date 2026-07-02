@@ -33,6 +33,7 @@ import {
   setFreshNext,
   setEphemeralArmed,
   setIdleReaped,
+  setLastDelivered,
   setNewEager,
   setStopped,
   superviseTick,
@@ -1425,6 +1426,25 @@ describe('Б2 reap/wake hardening', () => {
       expect(readSessionStates(cfg).some(s => s.identity === 'claude-s')).toBe(false) // state dropped
     } finally {
       cleanup()
+    }
+  })
+
+  test('В7: a fresh lastDelivered floors the idle proxy — a just-delivered message is NOT reaped away', () => {
+    const now = Date.now()
+    // an otherwise-idle session (woke 2h ago, last turn 2h ago) — would be reaped WITHOUT the marker
+    const a = setup('nd', { wakeMsAgo: 7_200_000 })
+    const b = setup('yd', { wakeMsAgo: 7_200_000 })
+    try {
+      // control: no lastDelivered → reaped-idle
+      const outNo = superviseTick(a.cfg, { env: a.env, nowMs: now, sessionAlive: () => true, lastTurnMtime: () => now - 7_200_000, killSession: () => {} })
+      expect(outNo.find(x => x.identity === 'claude-nd')?.action).toBe('reaped-idle')
+      // with a delivery stamped just now → the proxy floors on it → NOT reaped
+      setLastDelivered(b.cfg, 'claude-yd', now)
+      const outYes = superviseTick(b.cfg, { env: b.env, nowMs: now, sessionAlive: () => true, lastTurnMtime: () => now - 7_200_000, killSession: () => {} })
+      expect(outYes.find(x => x.identity === 'claude-yd')?.action).toBe('alive')
+    } finally {
+      a.cleanup()
+      b.cleanup()
     }
   })
 

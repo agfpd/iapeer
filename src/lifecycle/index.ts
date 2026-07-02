@@ -292,6 +292,34 @@ export function clearIdleReaped(cfg: LifecycleConfig, identity: string): void {
   }
 }
 
+function lastDeliveredPath(cfg: LifecycleConfig, identity: string): string {
+  return join(cfg.stateDir, `${identity}.last-delivered`)
+}
+
+/** Stamp the moment a live delivery to this session was CONFIRMED (В7). superviseTick folds this into
+ *  the idle proxy so a message delivered just as the session crosses idleSecs cannot be reaped out from
+ *  under the just-delivered message before the runtime writes its turn record — the receiver's own
+ *  process may not have appended the user-turn yet (codex socket-ack lands ok BEFORE ingest), so the
+ *  transcript proxy alone would miss it and the reap would silently drop the message behind ok:true. */
+export function setLastDelivered(cfg: LifecycleConfig, identity: string, nowMs: number = Date.now()): void {
+  mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 })
+  try {
+    writeFileSync(lastDeliveredPath(cfg, identity), String(nowMs), { mode: 0o600 })
+  } catch {
+    /* best-effort — the transcript proxy still governs; this only ADDS a floor, never removes one */
+  }
+}
+
+/** Epoch-ms of the last confirmed live delivery to this session, or 0 when none/unreadable. */
+export function readLastDelivered(cfg: LifecycleConfig, identity: string): number {
+  try {
+    const n = parseInt(readFileSync(lastDeliveredPath(cfg, identity), 'utf8').trim(), 10)
+    return Number.isFinite(n) && n > 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
 function newEagerPath(cfg: LifecycleConfig, identity: string): string {
   return join(cfg.stateDir, `${identity}.new-eager`)
 }
@@ -1328,7 +1356,11 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   const ephemeral = isEphemeralPeer(s.cwd)
   let lt = 0
   try { lt = lastTurnMt(s.runtime, s.cwd) ?? 0 } catch { /* unreadable → wokeAt floor */ }
-  const mt = Math.max(lt, s.wokeAt)
+  // В7 — fold in the last CONFIRMED live delivery. A message delivered just as the session crosses
+  // idleSecs (codex acks BEFORE it writes the turn record) would otherwise be reaped out from under the
+  // just-delivered message before lt catches up — a silent loss behind ok:true. lastDelivered only ever
+  // RAISES the floor (a delivery is activity), so it can never keep a genuinely idle session alive.
+  const mt = Math.max(lt, s.wokeAt, readLastDelivered(cfg, s.identity))
   const ageSecs = Math.floor((nowMs - mt) / 1000)
   // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
   // daemon routed its outbound reply) is reaped after a QUIET window, checked

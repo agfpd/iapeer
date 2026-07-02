@@ -217,13 +217,37 @@ export interface WarmDeliverSeam {
  *     via launchd KeepAlive).
  * See `deliverViaHost`.
  */
+// В6 — per-target delivery serialization. deliverToHost is paste → 300ms settle → CR over the pty; two
+// CONCURRENT deliveries to the SAME hosted session interleave their frames (paste2 lands inside paste1's
+// settle window → CR1 submits the SPLICED "envelope1envelope2" as one turn, CR2 submits an empty
+// composer; for a router target the splice breaks the mate's per-envelope framing). Chain deliveries per
+// address so each paste+settle+CR (and its confirm) completes as a UNIT before the next to that address
+// starts. Different addresses stay parallel. Covers the DOMINANT path — every agent send_to_peer routes
+// through the SINGLE daemon process; a rare CLI in-process `iapeer send` is a separate process this chain
+// does not span (fully hermetic serialization would live in the supervisor as a per-session transaction).
+const deliverTails = new Map<string, Promise<unknown>>()
+
 export async function deliverWarm(
   target: DeliveryTarget,
   envelope: string,
   cwd?: string,
   seam: WarmDeliverSeam = {},
 ): Promise<Result<void>> {
-  return deliverViaHost(target, envelope, cwd, seam)
+  const address = target.address
+  const prev = deliverTails.get(address) ?? Promise.resolve()
+  // run AFTER prev settles (success or failure) — a prior delivery's error must not stall the chain
+  const run = prev.then(
+    () => deliverViaHost(target, envelope, cwd, seam),
+    () => deliverViaHost(target, envelope, cwd, seam),
+  )
+  deliverTails.set(
+    address,
+    run.then(
+      () => {},
+      () => {},
+    ),
+  )
+  return run
 }
 
 async function deliverViaHost(
@@ -890,6 +914,10 @@ export interface RouteDeps {
    *  imports lifecycle (layering — main.ts is where the two meet); call sites
    *  swallow hook errors (a hook must never fail a delivered message). */
   noteLiveTopic?: (identity: string, topic: string) => void
+  /** В7 — stamp a CONFIRMED live delivery (target identity) so superviseTick's idle proxy floors on it
+   *  and cannot reap the session before the just-delivered message's turn record lands. Injected (same
+   *  layering as noteLiveTopic — lifecycle.setLastDelivered wired in main.ts). */
+  noteDelivered?: (identity: string) => void
   /** H4 launchd-managed detector (injected so transport never imports lifecycle —
    *  main.ts wires the real `isLaunchdManaged`). A MISS on a launchd-managed target is
    *  almost always a TRANSIENT restart window (router restart on connect / `iapeer
@@ -908,6 +936,16 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   if (!topic) return
   try {
     deps.noteLiveTopic?.(identity, topic)
+  } catch {
+    /* a post-delivery hook must never fail the delivery */
+  }
+}
+
+/** Best-effort lastDelivered stamp (В7) — records a CONFIRMED live delivery so the idle-reap proxy
+ *  cannot reap the session out from under a just-delivered message before its turn record lands. */
+function noteDelivered(deps: RouteDeps, identity: string): void {
+  try {
+    deps.noteDelivered?.(identity)
   } catch {
     /* a post-delivery hook must never fail the delivery */
   }
@@ -938,6 +976,8 @@ export interface ComposerDeliveryQueueOptions {
   deliver?: (target: DeliveryTarget, envelope: string, cwd?: string) => Result<void> | Promise<Result<void>>
   notifyFailed: (job: ComposerQueuedDelivery, reason: string) => void | Promise<void>
   noteLiveTopic?: (identity: string, topic: string) => void
+  /** В7 — stamp a confirmed queued delivery (same seam as RouteDeps.noteDelivered). */
+  noteDelivered?: (identity: string) => void
   onDelivered?: (caller: ResolvedCaller) => void
 }
 
@@ -1078,6 +1118,11 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         await notifyFailed(job, `queued delivery to ${job.target.personality} (${job.target.runtime}) failed: ${delivered.error.message}`)
       } else {
         noteTopic({ noteLiveTopic: opts.noteLiveTopic }, job.target.address, job.topic)
+        try {
+          opts.noteDelivered?.(job.target.address) // В7 — floor the idle proxy for the queued delivery too
+        } catch {
+          /* best-effort */
+        }
         try {
           opts.onDelivered?.(job.caller)
         } catch {
@@ -1279,6 +1324,7 @@ export async function routeSend(
     const delivered = await deliverWarm(target.value, envelope, peer.cwd)
     if (!delivered.ok) return delivered
     noteTopic(deps, target.value.address, topic)
+    noteDelivered(deps, target.value.address) // В7 — floor the idle proxy so this delivery isn't reaped away
     return ok({
       ok: true,
       delivered_to: { personality: target.value.personality, runtime: target.value.runtime },

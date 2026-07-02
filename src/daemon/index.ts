@@ -192,6 +192,8 @@ export interface CallToolDeps {
    *  see transport.RouteDeps.noteLiveTopic. Injected so the daemon never imports
    *  lifecycle; the production main wires makeNoteLiveTopic. */
   noteLiveTopic?: (identity: string, topic: string) => void
+  /** В7 — confirmed-delivery stamp → the target's idle-proxy floor (see transport.RouteDeps.noteDelivered). */
+  noteDelivered?: (identity: string) => void
   /** Busy-human-composer queue — see transport.createComposerDeliveryQueue. */
   composerQueue?: ComposerQueueRouteDeps
   /** H4 launchd-managed detector — see transport.RouteDeps.isLaunchdManaged (the
@@ -219,6 +221,7 @@ export async function callTool(
       wake: deps.wake,
       ephemeral: deps.ephemeral,
       noteLiveTopic: deps.noteLiveTopic,
+      noteDelivered: deps.noteDelivered,
       composerQueue: deps.composerQueue,
       isLaunchdManaged: deps.isLaunchdManaged,
     })
@@ -390,6 +393,9 @@ export interface StartDaemonOptions extends StorageOptions {
    * main wires the lifecycle marker write (makeNoteLiveTopic).
    */
   noteLiveTopic?: (identity: string, topic: string) => void
+  /** В7 — confirmed-delivery stamp → the target's idle-proxy floor (setLastDelivered). OFF by default;
+   *  the production main wires it. */
+  noteDelivered?: (identity: string) => void
   /**
    * Busy-human-composer queue — async acceptance for live local TUI delivery when
    * an attached operator has non-dim text in the target composer. OFF by default
@@ -433,6 +439,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
       onDelivered: opts.onDelivered,
       ephemeral: opts.ephemeral,
       noteLiveTopic: opts.noteLiveTopic,
+      noteDelivered: opts.noteDelivered,
       composerQueue: opts.composerQueue,
       isLaunchdManaged: opts.isLaunchdManaged,
     })

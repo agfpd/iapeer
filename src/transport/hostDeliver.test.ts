@@ -308,3 +308,48 @@ describe('resolveLiveRuntime — freshest pane-log among pid-alive sessions', ()
     expect(resolveLiveRuntime('p', { aliveRuntimes: () => ['claude'], paneLogMtime: a => mt[a] ?? 0 })).toBe('claude')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// В6 — per-target delivery serialization (concurrent sends to one pty must not splice)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('В6 per-target delivery serialization', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+  // codex = socket-ack → deliverViaHost returns right after deliverHosted (timing = the seam)
+  const codexT = (n: string): DeliveryTarget => ({ personality: n, runtime: 'codex', address: `codex-${n}`, socketPath: '/x' })
+
+  test('two deliveries to the SAME address serialize (no frame interleave)', async () => {
+    const events: string[] = []
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async (_id, msg) => {
+        events.push(`start:${msg}`)
+        await sleep(30)
+        events.push(`end:${msg}`)
+        return { ok: true }
+      },
+    }
+    const A = codexT('ser-uniq') // unique address — the module-level chain persists across tests
+    const p1 = deliverWarm(A, 'm1', undefined, seam)
+    const p2 = deliverWarm(A, 'm2', undefined, seam)
+    await Promise.all([p1, p2])
+    // m1 fully completes (paste→settle→CR unit) BEFORE m2 begins — never start:m1,start:m2
+    expect(events).toEqual(['start:m1', 'end:m1', 'start:m2', 'end:m2'])
+  })
+
+  test('deliveries to DIFFERENT addresses run in parallel', async () => {
+    const events: string[] = []
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async (id, _msg) => {
+        events.push(`start:${id}`)
+        await sleep(30)
+        events.push(`end:${id}`)
+        return { ok: true }
+      },
+    }
+    const p1 = deliverWarm(codexT('par-a'), 'x', undefined, seam)
+    const p2 = deliverWarm(codexT('par-b'), 'y', undefined, seam)
+    await Promise.all([p1, p2])
+    // both start before either ends → they overlapped (not serialized across addresses)
+    expect(events.slice(0, 2).sort()).toEqual(['start:codex-par-a', 'start:codex-par-b'])
+  })
+})

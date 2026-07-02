@@ -42,6 +42,7 @@ import {
   readTopic,
   resolveWakeRuntime,
   setEphemeralArmed,
+  setLastDelivered,
   superviseTick,
   wakeOrSpawn,
   type LifecycleConfig,
@@ -222,6 +223,7 @@ export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.Pro
     // flip + the shadow observer. tmux targets ignore it.
     logDir: cfg.logDir,
     noteLiveTopic,
+    noteDelivered: identity => setLastDelivered(cfg, identity),
     onDelivered,
     notifyFailed: async (job, reason) => {
       const index = readPeersIndex({ env })
@@ -330,6 +332,9 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // the wake resolver's executor discriminator then compares against the topic
     // the session last WORKED ON, not the one it woke with.
     noteLiveTopic,
+    // В7 — a confirmed live delivery floors the target's idle proxy (setLastDelivered), so a
+    // just-delivered message is never reaped away before its turn record lands.
+    noteDelivered: identity => setLastDelivered(cfg, identity),
     // Busy-human-composer queue: fast queued ack, async drain, fail all pending
     // on daemon close/update so a queued envelope is never silently lost.
     composerQueue,
