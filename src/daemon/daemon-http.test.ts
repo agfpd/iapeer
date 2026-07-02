@@ -111,4 +111,33 @@ describe('daemon over unix socket (H8 base)', () => {
       rmSync(sockRoot, { recursive: true, force: true })
     }
   })
+
+  test('В28: a second daemon REFUSES to start on a live socket (does not unlink it out from under the first)', async () => {
+    const sockRoot = mkdtempSync(join(tmpdir(), 'iapeer-sock2-'))
+    const sockPath = join(sockRoot, 'router.sock')
+    const first = await startDaemon({ socketPath: sockPath })
+    try {
+      // a second instance on the SAME live socket must refuse, NOT unlink+rebind (which would break the
+      // first daemon's unix callers).
+      await expect(startDaemon({ socketPath: sockPath })).rejects.toThrow(/already listening/i)
+      // the first daemon's socket is intact and still serving
+      expect(statSync(sockPath).isSocket()).toBe(true)
+    } finally {
+      await first.close()
+      rmSync(sockRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('В28: a STALE socket file (no live listener) is removed and the daemon starts', async () => {
+    const sockRoot = mkdtempSync(join(tmpdir(), 'iapeer-sock3-'))
+    const sockPath = join(sockRoot, 'router.sock')
+    writeFileSync(sockPath, '') // a leftover file from a crashed predecessor — not a live listener
+    const h = await startDaemon({ socketPath: sockPath })
+    try {
+      expect(statSync(sockPath).isSocket()).toBe(true) // the stale file was replaced by a real socket
+    } finally {
+      await h.close()
+      rmSync(sockRoot, { recursive: true, force: true })
+    }
+  })
 })

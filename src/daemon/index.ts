@@ -21,6 +21,7 @@
 // same-uid and should add a bearer token before production exposure — OPEN.
 
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'http'
+import { createConnection } from 'net'
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { dirname, join } from 'path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -48,6 +49,30 @@ import { appendDeliveryEvent } from './deliverylog.ts'
 
 export const CALLER_HEADER = 'x-iapeer-identity'
 const SERVER_INFO = { name: 'iapeer', version: '0.0.0' }
+
+/** Does a LIVE listener answer on this unix socket path? (В28) A successful connect ⇒ a daemon is
+ *  running; ECONNREFUSED ⇒ a stale socket file (safe to unlink). Bounded by a short timeout so a wedged
+ *  socket never hangs startup. */
+function socketIsLive(socketPath: string, timeoutMs = 500): Promise<boolean> {
+  return new Promise<boolean>(resolve => {
+    let settled = false
+    const finish = (live: boolean): void => {
+      if (settled) return
+      settled = true
+      try {
+        c.destroy()
+      } catch {
+        /* */
+      }
+      resolve(live)
+    }
+    const c = createConnection(socketPath)
+    c.once('connect', () => finish(true))
+    c.once('error', () => finish(false))
+    const t = setTimeout(() => finish(false), timeoutMs)
+    if (typeof t.unref === 'function') t.unref()
+  })
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Caller identity from the request header
@@ -487,7 +512,16 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
   // Unix-socket listener (H8 same-uid base, 0600).
   if (socketPath) {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 })
-    if (existsSync(socketPath)) unlinkSync(socketPath)
+    if (existsSync(socketPath)) {
+      // В28 — a LIVE daemon may already own this socket. Unlinking it out from under a live listener
+      // silently breaks every unix-socket caller (CLI/notifier/telegram) until a restart. Probe first:
+      // if a daemon answers, REFUSE to start (touch nothing). Only a STALE socket file (no listener,
+      // ECONNREFUSED) is removed. Guards the documented `iapeer daemon` foreground acceptance mode.
+      if (await socketIsLive(socketPath)) {
+        throw new Error(`a daemon is already listening on ${socketPath} — refusing to start a second instance`)
+      }
+      unlinkSync(socketPath)
+    }
     const s = createHttpServer(handle)
     await new Promise<void>((resolve, reject) => {
       s.once('error', reject)

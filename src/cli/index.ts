@@ -64,7 +64,7 @@ import {
   validateProfileStandard,
 } from '../identity/profileStandard.ts'
 import { runAlwaysOn } from '../launch/launchdRun.ts'
-import { ensureDaemonStarted, installDaemonPlist, startConfiguredDaemon } from '../daemon/main.ts'
+import { ensureDaemonStarted, installDaemonPlist, parseDaemonPort, startConfiguredDaemon } from '../daemon/main.ts'
 import { MARKETPLACE_NAME, onboardHost, runtimeAuthNote, tccFullDiskAccessNote } from '../onboard/index.ts'
 import { probeFullDiskAccess, readMemoryProvider } from '../status/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
@@ -2242,7 +2242,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           return 0
         }
         const handle = await startConfiguredDaemon({
-          port: env.IAPEER_PORT?.trim() ? Number(env.IAPEER_PORT) : undefined,
+          port: parseDaemonPort(env.IAPEER_PORT), // В29 — strict: NaN/out-of-range → default, never an ephemeral port
           socketPath: env.IAPEER_DAEMON_SOCKET?.trim() || undefined,
           env,
         })

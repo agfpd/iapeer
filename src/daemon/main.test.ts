@@ -17,6 +17,7 @@ import {
   makeArmEphemeralOnDelivered,
   makeEphemeralRouteDeps,
   makeNoteLiveTopic,
+  parseDaemonPort,
   startConfiguredDaemon,
   DEFAULT_DAEMON_PORT,
 } from './main.ts'
@@ -48,6 +49,28 @@ afterEach(() => {
 function plutilLint(path: string): boolean {
   return spawnSync('plutil', ['-lint', path], { encoding: 'utf8' }).status === 0
 }
+
+describe('В29 parseDaemonPort (strict — no silent ephemeral port)', () => {
+  test('unset / empty → the default', () => {
+    expect(parseDaemonPort(undefined)).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('')).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('   ')).toBe(DEFAULT_DAEMON_PORT)
+  })
+  test('a valid port passes through', () => {
+    expect(parseDaemonPort('9000')).toBe(9000)
+    expect(parseDaemonPort(' 8765 ')).toBe(8765)
+    expect(parseDaemonPort('1')).toBe(1)
+    expect(parseDaemonPort('65535')).toBe(65535)
+  })
+  test('NaN / out-of-range / non-integer → the default (never NaN→ephemeral or 0)', () => {
+    expect(parseDaemonPort('abc')).toBe(DEFAULT_DAEMON_PORT) // Number('abc')=NaN — the exact bug
+    expect(parseDaemonPort('0')).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('70000')).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('-1')).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('8765.5')).toBe(DEFAULT_DAEMON_PORT)
+    expect(parseDaemonPort('8080abc')).toBe(DEFAULT_DAEMON_PORT)
+  })
+})
 
 describe('buildDaemonPlistSpec / installDaemonPlist (com.agfpd.iapeer)', () => {
   test('spec carries the daemon label, default port env, and the INSTALLED iapeer entrypoint (Ф-F)', () => {

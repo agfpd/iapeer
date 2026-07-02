@@ -72,6 +72,19 @@ import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index
  *  a STABLE port, not an ephemeral one. Override with IAPEER_PORT. */
 export const DEFAULT_DAEMON_PORT = 8765
 
+/** Parse IAPEER_PORT STRICTLY (В29). `Number('abc')` = NaN passes `?? DEFAULT` (NaN is not nullish) →
+ *  listen(NaN) binds an EPHEMERAL port while the fleet's .mcp.json points at the fixed 8765 → the whole
+ *  TCP-MCP surface is silently offline yet the daemon reads "healthy" (health probes only the unix
+ *  socket). Unset/empty → the default; anything not an integer in 1–65535 → a LOUD warn + the default. */
+export function parseDaemonPort(raw: string | undefined, dflt: number = DEFAULT_DAEMON_PORT): number {
+  const t = raw?.trim()
+  if (!t) return dflt
+  const n = Number(t)
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n
+  process.stderr.write(`[iapeer-daemon] WARN invalid IAPEER_PORT=${JSON.stringify(raw)} — falling back to ${dflt}\n`)
+  return dflt
+}
+
 /** Default supervise-tick cadence (idle-reap / zombie-sweep). idleSecs (1h default)
  *  is the reap threshold; this is just how often the timer checks. */
 export const DEFAULT_SUPERVISE_INTERVAL_MS = 60_000
@@ -213,7 +226,8 @@ function queuedFailureMessage(job: ComposerQueuedDelivery, reason: string): stri
 export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): ComposerQueueRouteDeps {
   const noteLiveTopic = makeNoteLiveTopic(cfg, env)
   const onDelivered = makeArmEphemeralOnDelivered(cfg)
-  const wake = makeWakeFn(cfg, env)
+  // NB: no `wake` here — the composer-queue failure outlet (notifyFailed) deliberately does NOT wake an
+  // offline sender (В30); it fires on failAll during shutdown/update.
   const ephemeral = makeEphemeralRouteDeps(cfg, env)
 
   return createComposerDeliveryQueue({
@@ -269,7 +283,12 @@ export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.Pro
         // Do not pass composerQueue here: this path is the queue's failure outlet
         // (including SIGTERM/update). Recursively queueing a failure notification
         // could turn shutdown re-fail into another queued item.
-        { wake, ephemeral, noteLiveTopic },
+        // В30 — NO wake dep either: this outlet fires on failAll (SIGTERM/update). Waking an offline
+        // sender to notify it takes 30-60s (ready-gate), blowing past launchd's ExitTimeOut → SIGKILL
+        // drops the remaining notifications (the very silent loss failAll exists to prevent) and stalls
+        // the restart. An ephemeral sender still gets a DURABLE-queued notification (ephemeral dep); a
+        // non-ephemeral offline sender degrades to a delivery.log record (best-effort) — never a wake.
+        { ephemeral, noteLiveTopic },
       )
       appendDeliveryEvent(cfg.eventLogDir, {
         ev: 'composer-queue-failed-notify',
@@ -542,7 +561,7 @@ if (import.meta.main) {
   } else {
     const env = process.env
     const handle = await startConfiguredDaemon({
-      port: Number(env.IAPEER_PORT ?? DEFAULT_DAEMON_PORT),
+      port: parseDaemonPort(env.IAPEER_PORT),
       socketPath: env.IAPEER_DAEMON_SOCKET?.trim() || undefined,
       env,
     })
