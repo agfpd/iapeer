@@ -1025,7 +1025,17 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
   function kick(identity: string): void {
     if (draining.has(identity)) return
     draining.add(identity)
-    void drain(identity).finally(() => draining.delete(identity))
+    void drain(identity)
+      .catch(() => {
+        /* drain is internally best-effort; a stray throw must not surface as an unhandled rejection */
+      })
+      .finally(() => {
+        draining.delete(identity)
+        // В9 — close the enqueue-during-teardown race: a job pushed AFTER drain's empty-return but
+        // BEFORE this finally cleared `draining` saw kick() no-op (draining still held), leaving it
+        // undrained until some unrelated later enqueue. Re-kick if work remains so it drains promptly.
+        if (queues.get(identity)?.length) kick(identity)
+      })
   }
 
   async function drain(identity: string): Promise<void> {
@@ -1050,8 +1060,20 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         continue
       }
 
-      const delivered = await deliver(job.target, job.envelope, job.peer.cwd)
+      // В8 — take the head OUT of the queue BEFORE committing to deliver. A concurrent failAll snapshots
+      // only what remains queued, so an IN-FLIGHT job is never both delivered AND failed (the dup / false-
+      // failure the exactly-once contract forbids). The head stayed queued during the composer poll-wait
+      // above (still undelivered → failAll correctly fails it); it leaves the queue only at this commit.
       q.shift()
+      let delivered: Result<void>
+      try {
+        delivered = await deliver(job.target, job.envelope, job.peer.cwd)
+      } catch (e) {
+        // deliverWarm normally returns a Result, but a defensive catch keeps drain from throwing (which,
+        // with the В9 re-kick, could otherwise spin) — an unexpected throw is a delivery failure.
+        await notifyFailed(job, `queued delivery to ${job.target.personality} (${job.target.runtime}) failed: ${e instanceof Error ? e.message : String(e)}`)
+        continue
+      }
       if (!delivered.ok) {
         await notifyFailed(job, `queued delivery to ${job.target.personality} (${job.target.runtime}) failed: ${delivered.error.message}`)
       } else {

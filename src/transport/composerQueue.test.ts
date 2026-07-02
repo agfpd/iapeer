@@ -182,4 +182,60 @@ describe('createComposerDeliveryQueue', () => {
       'daemon shutting down/restarting before queued delivery completed',
     ])
   })
+
+  test('В8: failAll during an IN-FLIGHT deliver does NOT double-handle (no deliver+fail dup)', async () => {
+    const delivered: string[] = []
+    const failed: string[] = []
+    let releaseDeliver!: () => void
+    const gate = new Promise<void>(r => { releaseDeliver = r })
+    const q = createComposerDeliveryQueue({
+      pollMs: 5,
+      forceTimeoutMs: 1000,
+      shouldQueue: () => true,
+      hasHumanInput: () => false, // composer clear → drain goes straight to deliver
+      sessionToken: () => 'session-1:pane-1',
+      sessionAlive: () => true,
+      deliver: async (_t, envelope) => {
+        await gate // hold the job IN-FLIGHT while failAll runs
+        delivered.push(envelope)
+        return ok(undefined)
+      },
+      notifyFailed: (_job, reason) => { failed.push(reason) },
+    })
+
+    await q.tryEnqueue(args('in-flight'))
+    await sleep(20) // drain has shifted the head out and is awaiting deliver
+    const failAllP = q.failAll?.('daemon shutting down') // snapshot must NOT include the in-flight job
+    releaseDeliver() // deliver now completes
+    await failAllP
+    await sleep(20)
+    expect(delivered).toEqual(['in-flight']) // delivered exactly ONCE
+    expect(failed).toEqual([]) // and NOT also failed — no dup, no false failure
+  })
+
+  test('В9: back-to-back enqueues all drain — no job stranded by the kick/drain teardown window', async () => {
+    const delivered: string[] = []
+    const q = createComposerDeliveryQueue({
+      pollMs: 5,
+      forceTimeoutMs: 1000,
+      shouldQueue: () => true,
+      hasHumanInput: () => false, // each drains immediately, emptying the queue between enqueues
+      sessionToken: () => 'session-1:pane-1',
+      sessionAlive: () => true,
+      deliver: async (_t, envelope) => {
+        delivered.push(envelope)
+        return ok(undefined)
+      },
+      notifyFailed: () => {},
+    })
+
+    // enqueue with tiny gaps so some land in the drain-return→finally window (kick would no-op there
+    // without the re-kick); every one must still be delivered.
+    for (let i = 0; i < 6; i++) {
+      await q.tryEnqueue(args(`m${i}`))
+      await sleep(1)
+    }
+    await sleep(60)
+    expect([...delivered].sort()).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5'])
+  })
 })

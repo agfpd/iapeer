@@ -297,6 +297,13 @@ export async function withPeersLock<T>(
     stale: 10_000,
     update: 1_000,
     retries: { retries: 13, factor: 1.4, minTimeout: 50, maxTimeout: 500 },
+    // В5 — a compromised lock (e.g. the mtime-refresh timer fired late after system sleep, so the lock
+    // read as stale) MUST NOT rethrow from proper-lockfile's timer: unhandled, it would crash the whole
+    // router process and silently drop the in-memory composer queue. Log loudly and let the current
+    // (near-done) critical section finish — a controlled degrade beats taking the daemon down.
+    onCompromised: (err: Error) => {
+      process.stderr.write(`[iapeer] WARN peers-lock compromised (continuing, not crashing): ${err.message}\n`)
+    },
   })
   try {
     return await fn(paths)

@@ -727,6 +727,12 @@ export async function withWakeLock<T>(
     stale: 60_000,
     update: 5_000,
     retries: { retries: cfg.wakeLockRetries, factor: 1.3, minTimeout: 100, maxTimeout: 1_000 },
+    // В5 — a compromised wake-lock (mtime-refresh timer fired late, e.g. after system sleep >60s) MUST
+    // NOT rethrow from proper-lockfile's timer: unhandled it crashes the whole router and silently drops
+    // the in-memory composer queue. Log and continue — a controlled degrade beats killing the daemon.
+    onCompromised: (err: Error) => {
+      process.stderr.write(`[iapeer] WARN wake-lock compromised for ${identity} (continuing, not crashing): ${err.message}\n`)
+    },
   })
   try {
     return await fn()

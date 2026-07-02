@@ -547,6 +547,25 @@ if (import.meta.main) {
     }
     process.on('SIGTERM', shutdown)
     process.on('SIGINT', shutdown)
+    // В5 — a NON-signal crash (an unhandledRejection, or any uncaught error) would otherwise kill the
+    // daemon WITHOUT running handle.close() → failAll, so in-memory composer-queued messages (the sender
+    // already got queued:true) would vanish SILENTLY — the forbidden loss class. Run failAll on these
+    // paths too so senders are notified, then exit(1) so launchd KeepAlive respawns a clean daemon. A
+    // bounded timeout guarantees the exit even if close() hangs. (Hard SIGKILL/OOM cannot be caught — a
+    // durable on-disk composer queue would be needed for that, a deliberate follow-up.)
+    let crashing = false
+    const crashExit = (kind: string) => (errObj: unknown) => {
+      if (crashing) return
+      crashing = true
+      const detail = errObj instanceof Error ? (errObj.stack ?? errObj.message) : String(errObj)
+      process.stderr.write(`[iapeer-daemon] ${kind} — failing pending queued deliveries then exiting: ${detail}\n`)
+      const done = (): never => process.exit(1)
+      const t = setTimeout(done, 3000)
+      if (typeof t.unref === 'function') t.unref()
+      void handle.close().then(done, done)
+    }
+    process.on('uncaughtException', crashExit('uncaughtException'))
+    process.on('unhandledRejection', crashExit('unhandledRejection'))
     await new Promise(() => {}) // launchd KeepAlive holds this process; block forever
   }
 }
