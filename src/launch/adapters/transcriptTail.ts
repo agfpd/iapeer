@@ -30,6 +30,73 @@ import { openSync, readSync, closeSync, statSync } from 'fs'
  * the newline-bounded segments after it. Reaching byte 0 makes every segment complete, including the
  * first — and terminates the growth.
  */
+/**
+ * The FIRST newline-terminated line of a file, read with an ADAPTIVE growing window — NEVER the whole
+ * file. A codex `session_meta` first line carries the full instruction payload (measured 29–73 KB on the
+ * live host), so a fixed small chunk would miss the terminating `\n` and return a truncated line; the
+ * window doubles (capped at file size) until a `\n` is seen or the whole file is read. Returns null when
+ * the file is unreadable/empty. Cheap for the common case (one read covers it), bounded otherwise.
+ */
+export function readFirstLine(path: string, chunkBytes = 65536): string | null {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return null
+  }
+  try {
+    const size = statSync(path).size
+    if (size <= 0) return null
+    let window = Math.max(chunkBytes, 1)
+    for (;;) {
+      const len = Math.min(window, size)
+      const buf = Buffer.allocUnsafe(len)
+      let read = 0
+      while (read < len) {
+        const n = readSync(fd, buf, read, len - read, read)
+        if (n <= 0) break
+        read += n
+      }
+      const text = buf.subarray(0, read).toString('utf8')
+      const nl = text.indexOf('\n')
+      if (nl >= 0) return text.slice(0, nl).replace(/\r$/, '')
+      if (len >= size) return text.replace(/\r$/, '') // whole file, no trailing newline → the single line
+      window *= 2
+    }
+  } catch {
+    return null
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Memoized path→cwd. session_meta is written ONCE at session start (immutable) and session-file paths
+ *  are unique, so caching a DEFINITIVE parse is sound. Only the unreadable/empty case (readFirstLine
+ *  null) is NOT cached — that can become readable. */
+const codexCwdCache = new Map<string, string | null>()
+
+/**
+ * The cwd a codex session was opened in — the `session_meta.payload.cwd` of the FIRST jsonl line — read
+ * via the bounded readFirstLine and memoized by path. Replaces the old full-file readFileSync that ran
+ * per-file on every hot-path scan (superviseTick, ready-gate, delivery baseline). Returns null when the
+ * file is missing/unreadable or carries no session_meta cwd.
+ */
+export function codexSessionCwd(file: string): string | null {
+  const cached = codexCwdCache.get(file)
+  if (cached !== undefined) return cached
+  const firstLine = readFirstLine(file)
+  if (firstLine === null) return null // unreadable/empty — do NOT cache (may become readable)
+  let cwd: string | null = null
+  try {
+    const entry = JSON.parse(firstLine) as { type?: unknown; payload?: { cwd?: unknown } }
+    if (entry.type === 'session_meta' && typeof entry.payload?.cwd === 'string') cwd = entry.payload.cwd
+  } catch {
+    cwd = null
+  }
+  codexCwdCache.set(file, cwd)
+  return cwd
+}
+
 export function lastTimestampedEntryMs(path: string, tailBytes = 65536): number | null {
   let fd: number
   try {

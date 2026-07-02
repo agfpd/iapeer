@@ -37,8 +37,8 @@
 
 import { homedir } from 'os'
 import { join } from 'path'
-import { readFileSync, readdirSync, realpathSync, statSync } from 'fs'
-import { lastTimestampedEntryMs } from './transcriptTail.ts'
+import { readdirSync, realpathSync, statSync } from 'fs'
+import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
 import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,26 +75,8 @@ function codexHooksReviewActive(pane: string): boolean {
 // Session activity proxy + resume preflight (watcher / spawner port)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The cwd a codex session was opened in, read from the first jsonl line's
- * `session_meta.payload.cwd` (watcher.codexSessionCwd, 200-212). null when the
- * file is missing, unreadable, not a session_meta record, or carries no cwd.
- */
-function codexSessionCwd(file: string): string | null {
-  try {
-    const firstLine = readFileSync(file, 'utf8').split(/\r?\n/, 1)[0]
-    if (!firstLine) return null
-    const entry = JSON.parse(firstLine) as {
-      type?: unknown
-      payload?: { cwd?: unknown }
-    }
-    return entry.type === 'session_meta' && typeof entry.payload?.cwd === 'string'
-      ? entry.payload.cwd
-      : null
-  } catch {
-    return null
-  }
-}
+// codexSessionCwd (bounded first-line read + path-memoized) is shared from transcriptTail.ts —
+// the old full-file readFileSync here read tens of MB per session file on every hot-path scan.
 
 /** realpath a path so a symlinked cwd compares equal to the dir codex recorded;
  *  a stale/missing path falls through to the original string (the canonicalPath

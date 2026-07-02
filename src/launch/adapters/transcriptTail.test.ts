@@ -3,7 +3,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { lastTimestampedEntryMs } from './transcriptTail.ts'
+import { codexSessionCwd, lastTimestampedEntryMs, readFirstLine } from './transcriptTail.ts'
 
 const tmps: string[] = []
 afterAll(() => {
@@ -90,5 +90,37 @@ describe('lastTimestampedEntryMs — last meaningful transcript entry content-ti
       ].join('\n') + '\n',
     )
     expect(lastTimestampedEntryMs(f, 1024)).toBe(Date.parse('2026-06-26T18:21:14.634Z'))
+  })
+})
+
+describe('readFirstLine — bounded first-line read (V3: no full-file read for line 1)', () => {
+  test('returns the first line even when it dwarfs the initial window', () => {
+    // A codex session_meta first line carries a large instruction payload — the window must GROW.
+    const big = JSON.stringify({ type: 'session_meta', payload: { cwd: '/Users/macmini/Peers/x', pad: 'z'.repeat(200_000) } })
+    const f = tmpFile(big + '\n' + JSON.stringify({ type: 'event' }) + '\n')
+    // small starting chunk (256 B) forces the adaptive doubling to kick in
+    expect(readFirstLine(f, 256)).toBe(big)
+  })
+  test('a single-line file with no trailing newline returns that line', () => {
+    const only = JSON.stringify({ type: 'session_meta', payload: { cwd: '/a' } })
+    expect(readFirstLine(tmpFile(only), 8)).toBe(only)
+  })
+  test('missing / empty file → null', () => {
+    expect(readFirstLine(join(tmpdir(), 'iap-nope-does-not-exist.jsonl'))).toBeNull()
+    expect(readFirstLine(tmpFile(''))).toBeNull()
+  })
+})
+
+describe('codexSessionCwd — parses + memoizes session cwd', () => {
+  test('reads session_meta cwd; non-session_meta / no-cwd → null', () => {
+    const f = tmpFile(JSON.stringify({ type: 'session_meta', payload: { cwd: '/Users/macmini/Peers/boris' } }) + '\n')
+    expect(codexSessionCwd(f)).toBe('/Users/macmini/Peers/boris')
+    expect(codexSessionCwd(tmpFile(JSON.stringify({ type: 'event' }) + '\n'))).toBeNull()
+  })
+  test('caches a definitive parse (immutable session_meta) — a later overwrite is not re-read', () => {
+    const f = tmpFile(JSON.stringify({ type: 'session_meta', payload: { cwd: '/first' } }) + '\n')
+    expect(codexSessionCwd(f)).toBe('/first')
+    writeFileSync(f, JSON.stringify({ type: 'session_meta', payload: { cwd: '/second' } }) + '\n')
+    expect(codexSessionCwd(f)).toBe('/first') // memoized — path→cwd is stable by contract
   })
 })

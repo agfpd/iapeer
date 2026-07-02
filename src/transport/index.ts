@@ -13,7 +13,7 @@
 // runtime's adapter.deliveryMarkers. The poll/re-press logic is untouched; only the
 // marker SOURCE moved, so the timing behaviour is identical.
 
-import { readFileSync, readdirSync, realpathSync, statSync } from 'fs'
+import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import {
@@ -40,6 +40,7 @@ import type { ResolvedCaller } from '../identity/index.ts'
 // reads them from getAdapter(target.runtime) for the tui submit path. One-way
 // dependency: launch does NOT import transport, so no cycle.
 import { getAdapter } from '../launch/index.ts'
+import { codexSessionCwd } from '../launch/adapters/transcriptTail.ts'
 import type { ControlCommand } from '../launch/types.ts'
 // Spawn-flip Ф0b-2: warm-deliver is HOST-AWARE. hostSessionAlive (runtime-state host detect, an
 // @xterm-free pid-file check) + deliverHosted (the pure-protocol socket leaf, Ф0a) come from
@@ -234,7 +235,11 @@ async function deliverViaHost(
   // Baseline the transcript/session-jsonl file SIZES BEFORE delivery (per-runtime candidate files).
   // The landed-confirm reads ONLY the bytes appended past this baseline, so a record carrying our
   // envelope can only be one written in RESPONSE to this delivery — never a pre-existing copy.
-  const baseline = cwd ? compactDoneBaseline(target.runtime, cwd) : null
+  // LAZY: only 'transcript'-confirm runtimes (claude) use the baseline; router (socket-ack) and
+  // socket-ack runtimes (codex) return before it — computing it for them recursively scanned all of
+  // ~/.codex/sessions (full-file read per session) on every delivery for nothing.
+  const usesBaseline = adapter.kind !== 'router' && adapter.deliveryConfirm !== 'socket-ack'
+  const baseline = cwd && usesBaseline ? compactDoneBaseline(target.runtime, cwd) : null
   const send = seam.deliverHosted ?? deliverHosted
   const sent = await send(target.address, envelope)
   if (!sent.ok) {
@@ -374,14 +379,36 @@ function claudeTranscriptDirForCwd(cwd: string, env?: NodeJS.ProcessEnv): string
   return join(envHome(env), '.claude', 'projects', slug)
 }
 
-function codexSessionCwd(file: string): string | null {
+// codexSessionCwd (bounded first-line read + path-memoized) is shared from launch/adapters/transcriptTail.ts —
+// the old full-file readFileSync here scanned tens of MB per session file on every warm delivery baseline.
+
+/** Read ONLY the bytes of `path` past `offset` (the appended tail), without loading the whole file.
+ *  O(added bytes) instead of O(entire history) — the transcript files this scans grow to hundreds of MB.
+ *  Returns '' on any fs error / empty tail. */
+function readFileTailFrom(path: string, offset: number): string {
+  let fd: number
   try {
-    const firstLine = readFileSync(file, 'utf8').split(/\r?\n/, 1)[0]
-    if (!firstLine) return null
-    const entry = JSON.parse(firstLine) as { type?: unknown; payload?: { cwd?: unknown } }
-    return entry.type === 'session_meta' && typeof entry.payload?.cwd === 'string' ? entry.payload.cwd : null
+    fd = openSync(path, 'r')
   } catch {
-    return null
+    return ''
+  }
+  try {
+    const size = fstatSync(fd).size
+    const start = Math.min(Math.max(0, offset), size)
+    const len = size - start
+    if (len <= 0) return ''
+    const buf = Buffer.allocUnsafe(len)
+    let read = 0
+    while (read < len) {
+      const n = readSync(fd, buf, read, len - read, start + read)
+      if (n <= 0) break
+      read += n
+    }
+    return buf.subarray(0, read).toString('utf8')
+  } catch {
+    return ''
+  } finally {
+    closeSync(fd)
   }
 }
 
@@ -478,14 +505,8 @@ export function compactTranscriptHasDone(
   }
 
   for (const [path, offset] of offsets) {
-    let buf: Buffer
-    try {
-      buf = readFileSync(path)
-    } catch {
-      continue
-    }
-    const start = Math.min(Math.max(0, offset), buf.length)
-    const tail = buf.subarray(start).toString('utf8')
+    const tail = readFileTailFrom(path, offset) // tail-only read (see transcriptCarriesEnvelope)
+    if (!tail) continue
     for (const line of tail.split(/\r?\n/)) {
       if (!line.trim()) continue
       let obj: unknown
@@ -537,14 +558,11 @@ export function transcriptCarriesEnvelope(baseline: CompactDoneBaseline, envelop
   const needle = envelope.replace(/\r/g, '')
   if (!needle) return false
   for (const { path, size: offset } of baseline.files) {
-    let buf: Buffer
-    try {
-      buf = readFileSync(path)
-    } catch {
-      continue
-    }
-    const start = Math.min(Math.max(0, offset), buf.length)
-    const tail = buf.subarray(start).toString('utf8')
+    // Read ONLY the tail past the baseline offset — a full readFileSync here re-read the ENTIRE
+    // transcript (hundreds of MB for a long-running peer) on every ~100ms confirm-poll, stalling the
+    // single-threaded router event loop for the whole fleet.
+    const tail = readFileTailFrom(path, offset)
+    if (!tail) continue
     for (const line of tail.split(/\r?\n/)) {
       if (!line.trim()) continue
       let obj: unknown
