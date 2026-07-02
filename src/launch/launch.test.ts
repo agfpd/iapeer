@@ -120,6 +120,37 @@ describe('codexAdapter.isInputReady', () => {
 })
 
 
+describe('Б8 claude boot-predicate tightening (В39 mcp-approval / В40 fullscreen-nag position)', () => {
+  const READY = ['some transcript output', '❯ ', 'bypass permissions on'].join('\n')
+  test('В39: isInputReady is NOT gated by a conversational mention of the mcp-approval topic', () => {
+    // a resumed session replays a tail that MENTIONS the topic phrase (agents discuss MCP servers) →
+    // must stay ready; only the real dialog ("… found in this project") gates.
+    const mention = READY + '\nwe should add a new MCP server for X'
+    expect(claudeAdapter.isInputReady(mention)).toBe(true)
+    const realDialog = '2 new MCP servers found in this project\n[✔] fooServer\n❯ 1. Yes'
+    expect(claudeAdapter.isInputReady(realDialog)).toBe(false)
+    expect(claudeAdapter.bootDialogKeys(realDialog)).toEqual(['Enter'])
+    expect(claudeAdapter.bootDialogKeys(READY + '\nnew MCP server idea')).toBeNull() // mention → no key
+  })
+
+  // The fullscreen-nag needles are BUILT from fragments so this test file never carries the verbatim
+  // modal text (which would self-trigger a nag-watcher reading it — the live incident this fixes).
+  const T = 'Try the new fullscreen render' + 'er?'
+  const YES = 'Yes, ' + 'try it'
+  const NOTNOW = '2. Not ' + 'now'
+  test('В40: fires ONLY when the modal is the LIVE bottom surface (cursor on its option)', () => {
+    // live modal: composer is REPLACED, the bottom-most cursor row is the modal option
+    const live = [T, '· Flicker-free output', '❯ 1. ' + YES, '  ' + NOTNOW, 'Enter to confirm · Esc to cancel'].join('\n')
+    expect(claudeAdapter.nagDismissKeys!(live)).toEqual(['2', 'Enter'])
+    // a QUOTE of the modal with the ready composer BELOW it (peer editing/reviewing, or a forwarded
+    // message) → the bottom-most cursor is the empty composer, NOT the option → must NOT fire
+    const quoted = [T, '❯ 1. ' + YES, '  ' + NOTNOW, 'Enter to confirm', 'discussing the incident…', '❯ '].join('\n')
+    expect(claudeAdapter.nagDismissKeys!(quoted)).toBeNull()
+    // no modal at all → null
+    expect(claudeAdapter.nagDismissKeys!(READY)).toBeNull()
+  })
+})
+
 describe('В58 claudeAdapter.childActivityMtime (idle-proxy sees a running workflow)', () => {
   // NB the real-file scan cannot be exercised hermetically here: transcriptDir resolves the home via
   // os.homedir() (which ignores $HOME on POSIX), so a temp-HOME slug is unreachable. The scan is

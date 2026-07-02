@@ -66,16 +66,38 @@ const CLAUDE_BOOT_DIALOG_MARKERS = [
   // lowercase "bypass permissions on" (a DISTINCT string), so this marker vanishes —
   // it never falsely traps isInputReady, and a re-launch is dialog-free (verified).
   'Bypass Permissions mode',
-  // Project MCP-server approval ("N new MCP servers found in this project", servers
-  // pre-checked [✔]) — shown when cwd carries a .mcp.json the config has not yet
-  // approved. Suppressed at the source by enableAllProjectMcpServers in
-  // <cwd>/.claude/settings.json (init writes it); bootDialogKeys Enter-confirms it as
-  // a backstop. Substring matches both "1 new MCP server" and "N new MCP servers".
-  'new MCP server',
 ] as const
 
+// В39 — Project MCP-server approval ("N new MCP servers found in this project", servers pre-checked
+// [✔]). This one is NOT a plain substring marker: agents on this fleet mention "new MCP server" in
+// NORMAL conversation, and a resumed session replays that tail into the viewport → the old substring
+// gated isInputReady forever, the wake failed 'never-became-ready', the message was lost (live
+// incident). Require the dialog's DISTINGUISHING context ("found in this project") too — a
+// conversational mention of the topic phrase does not carry it. Suppressed at the source by
+// enableAllProjectMcpServers (init); Enter-confirmed here as a backstop.
+function mcpApprovalActive(pane: string): boolean {
+  return pane.includes('new MCP server') && pane.includes('found in')
+}
+
 function anyBootDialog(pane: string): boolean {
-  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m))
+  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m)) || mcpApprovalActive(pane)
+}
+
+// В40 — the fullscreen-renderer nag needles are BUILT from fragments so this SOURCE FILE never contains
+// the verbatim modal text. A nag-watcher reads a peer's live VIEWPORT; if this file's text (a peer
+// editing/reviewing it) carried the contiguous phrase, viewing it would self-trigger the very bug — which
+// is exactly what happened live while this fix was being written. Split literals keep the match working at
+// runtime while making the source inert.
+const NAG_TITLE = 'Try the new fullscreen render' + 'er?'
+const NAG_OPTION_YES = 'Yes, ' + 'try it'
+/** Does the pane carry the fullscreen-renderer nag at all (cheap gate)? */
+function isFullscreenNagText(pane: string): boolean {
+  return pane.includes(NAG_TITLE)
+}
+/** Is THIS row the modal's LIVE selected option (cursor `❯` on "1. Yes, try it")? The bottom-most `❯`
+ *  row of a live modal is this; a mere quote of the modal has the ready composer `❯` below it instead. */
+function isFullscreenNagOptionRow(row: string): boolean {
+  return row.includes('❯') && (row.includes(NAG_OPTION_YES) || /❯\s*1\.\s*Yes/.test(row))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,10 +248,10 @@ export const claudeAdapter: RuntimeAdapter = {
       pane.includes('trust this folder') ||
       pane.includes('Allow external CLAUDE.md file imports?') ||
       pane.includes('I am using this for local development') ||
-      // Project MCP-server approval (servers pre-checked [✔]; Enter confirms, Esc
-      // rejects all). enableAllProjectMcpServers normally suppresses it; this is the
-      // backstop. Matches both "1 new MCP server" and "N new MCP servers".
-      pane.includes('new MCP server') ||
+      // Project MCP-server approval (servers pre-checked [✔]; Enter confirms, Esc rejects all).
+      // enableAllProjectMcpServers normally suppresses it; this is the backstop. В39: full-signature
+      // (topic + "found in") so a conversational mention never triggers a stray Enter.
+      mcpApprovalActive(pane) ||
       // First-run theme picker (clean host): the default-highlighted row is always a
       // valid theme (any choice is harmless for a headless peer), so a bare Enter
       // accepts it. Without this the picker blocks the boot forever on a fresh host.
@@ -246,35 +268,35 @@ export const claudeAdapter: RuntimeAdapter = {
   },
 
   /**
-   * MID-SESSION nag/upsell auto-dismiss (livability — distinct from bootDialogKeys,
-   * which the supervisor drives only until ready). claude pops a ONE-TIME interactive
-   * upsell modal AFTER the session is live that BLOCKS a headless peer (no human to
-   * answer):
+   * MID-SESSION nag/upsell auto-dismiss (livability — distinct from bootDialogKeys, which the supervisor
+   * drives only until ready). claude pops a ONE-TIME interactive upsell modal AFTER the session is live —
+   * the fullscreen-renderer offer — that BLOCKS a headless peer (no human to answer). Its default cursor
+   * is on the ACCEPT option, so a bare Enter would enable the alt-screen renderer and change the surface
+   * the pane-log model / composer-occupancy / ready-gate all read off. We DECLINE by selecting the "not
+   * now" option ('2' then Enter — '2' is emitted verbatim, not a named key). VERIFIED-SAFE on the live
+   * fleet ('2'+Enter cleared it on boris/doc; an arrow-step+Enter mis-fired into fullscreen on scriber; Esc/
+   * 'n' unverified) — so this is the ONLY accepted sequence.
    *
-   *     Try the new fullscreen renderer?
-   *     · Flicker-free output …
-   *     ❯ 1. Yes, try it
-   *       2. Not now
-   *     Enter to confirm · Esc to cancel
-   *
-   * The default cursor sits on "1. Yes, try it", so a BARE Enter would ENABLE the
-   * fullscreen renderer — which switches claude to the alt-screen TUI and changes the
-   * surface the pane-log model + composer-occupancy + ready-gate all read off. We must
-   * DECLINE: type the literal '2' then Enter ('2','Enter' → "2\r"; '2' is not a named/
-   * cursor key, so it is emitted verbatim without a `-l` literal switch — and `-l`
-   * would wrongly make the following 'Enter' literal too). VERIFIED-SAFE on the live
-   * fleet: '2'+Enter cleared the modal on boris and doc and returned them to the
-   * composer; an arrow-step+Enter MIS-FIRED into "tui":"fullscreen" on scriber, and Esc/
-   * 'n' are unverified — so this is the ONLY accepted sequence. Match the FULL signature
-   * (title AND the "2. Not now" decline row) so a transcript merely DISCUSSING the
-   * fullscreen renderer can never trigger a stray keystroke. Future one-time CC upsells
-   * of this class extend the match here (each with its own verified-safe decline key).
+   * В40 — the match is POSITION-based, NOT phrase-based: the needles are built from fragments (this file
+   * never carries the verbatim modal text, or a peer editing/reviewing it would self-trigger — observed
+   * live), and it fires ONLY when the BOTTOM-MOST cursor row is the modal's live option (a mere quote of
+   * the modal has the ready composer below it). NB text-matching still cannot fully distinguish a live
+   * claude modal from an agent RENDERING the modal glyphs at its viewport bottom — the correct fix is a
+   * rendering-level signal (the alt-screen switch), tracked as a HIGH-priority follow-up (В59).
    */
   nagDismissKeys(pane: string): string[] | null {
-    if (pane.includes('Try the new fullscreen renderer?') && pane.includes('2. Not now')) {
-      return ['2', 'Enter']
-    }
-    return null
+    // В40 — a text-only match fired '2'+Enter into a LIVE composer whenever the peer merely displayed the
+    // modal text (a code review of this file, a forwarded bug report — or, live-observed, the peer editing
+    // THIS adapter). Discriminate by POSITION, not phrases: claude's live modal REPLACES the composer, so
+    // the BOTTOM-MOST cursor row (`❯`) sits on the modal's option. A mere quote of the modal has the READY
+    // composer `❯` rendered BELOW it as the bottom-most cursor row. So: fire only when the last `❯`-bearing
+    // row is the modal's selected option — a displayed quote never is.
+    if (!isFullscreenNagText(pane)) return null
+    let lastCursorRow = ''
+    for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
+    // the live modal's bottom-most cursor sits on option 1 ("Yes, try it"); the ready composer's `❯` does
+    // not carry the option text, so a quote (composer below) fails this.
+    return isFullscreenNagOptionRow(lastCursorRow) ? ['2', 'Enter'] : null
   },
 
   /**
