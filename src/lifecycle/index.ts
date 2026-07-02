@@ -12,7 +12,7 @@
 // before any wake or reap. wakeOrSpawn refuses a launchd peer; superviseTick and
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -90,6 +90,10 @@ export interface LifecycleConfig {
    *  A still-WORKING silent-tool worker keeps the pane-log fresh via the TUI render, so it
    *  is no longer reaped mid-task — only a genuinely idle/wedged session crosses this. */
   ephemeralUnarmedIdleSecs: number
+  /** Wake-lock acquisition retries (proper-lockfile). The budget is intentionally MODEST (a full
+   *  boot can exceed it) — an exhausted budget surfaces as a RETRYABLE FAILED, not a raw ELOCKED, so
+   *  the sender retries and routeSend logs the outcome. Tunable via IAPEER_WAKE_LOCK_RETRIES. */
+  wakeLockRetries: number
 }
 
 export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): LifecycleConfig {
@@ -113,6 +117,10 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
     crashLoopWindowSecs: num(env.IAPEER_CRASHLOOP_WINDOW_SECS, 300),
     ephemeralQuietSecs: num(env.IAPEER_EPHEMERAL_QUIET_SECS, 20),
     ephemeralUnarmedIdleSecs: num(env.IAPEER_EPHEMERAL_UNARMED_IDLE_SECS, 600),
+    wakeLockRetries: (() => {
+      const n = parseInt(env.IAPEER_WAKE_LOCK_RETRIES ?? '', 10)
+      return Number.isFinite(n) && n >= 0 ? n : 30
+    })(),
   }
 }
 
@@ -168,6 +176,22 @@ export function removeSessionState(cfg: LifecycleConfig, identity: string): void
     rmSync(sessionStatePath(cfg, identity), { force: true })
   } catch {
     /* already gone */
+  }
+}
+
+/** Atomically CLAIM a dead session for reaping: rename `.session` → `.session.reaping`. Returns true
+ *  iff THIS caller won the rename. superviseTick runs from BOTH the daemon timer AND the prelude of
+ *  every wakeOrSpawn (in whatever process called it), so two passes can see the same dead `.session`
+ *  in the same sub-second window; without a claim BOTH would recordDeath, and TWO deaths for ONE real
+ *  death can trip the crash-loop guard prematurely (a peer refused to wake for the whole window). The
+ *  rename is atomic on a single filesystem — the loser gets ENOENT → false and skips recordDeath/eager.
+ *  A leftover `.reaping` (crash mid-reap) is ignored by readSessionStates (it filters `.session`). */
+function claimDeadSession(cfg: LifecycleConfig, identity: string): boolean {
+  try {
+    renameSync(sessionStatePath(cfg, identity), `${sessionStatePath(cfg, identity)}.reaping`)
+    return true
+  } catch {
+    return false // ENOENT — another pass already claimed this death (or the file vanished)
   }
 }
 
@@ -702,7 +726,7 @@ export async function withWakeLock<T>(
     realpath: false,
     stale: 60_000,
     update: 5_000,
-    retries: { retries: 30, factor: 1.3, minTimeout: 100, maxTimeout: 1_000 },
+    retries: { retries: cfg.wakeLockRetries, factor: 1.3, minTimeout: 100, maxTimeout: 1_000 },
   })
   try {
     return await fn()
@@ -953,7 +977,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     }
   }
 
-  return withWakeLock(cfg, identity, async () => {
+  const runWake = async (): Promise<WakeResult> => {
     // Re-check the refusal gates INSIDE the lock (audit #3/#11): a `stop` (C1 flag) or a
     // plist install that completed AFTER the pre-lock check but before the lock was
     // acquired must still be honored — else a concurrently stopped / launchd-claimed peer
@@ -1074,6 +1098,14 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
         try {
           writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
         } catch { /* keep the original FAILED reason — enroll is best-effort */ }
+      } else {
+        // В14 — the launch FAILED and left NO live remnant → a genuine boot-crash (broken binary /
+        // doctrine, process died before READY). It writes NO .session, so superviseTick never sees it
+        // and never records the death → countRecentDeaths stays 0 and the crash-loop guard NEVER fires.
+        // Every next message / ephemeral-drain then re-runs the doomed launch (up to bootDeadline each)
+        // forever. Count the fault here so the guard bounds the loop after crashLoopMax in the window.
+        // (No claim needed — there is no .session for a concurrent pass to race on.)
+        recordDeath(cfg, identity, Date.now())
       }
       return { status: 'FAILED', woke: false, runtime, reason: result.reason }
     }
@@ -1102,7 +1134,29 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     addTopic(cfg, identity, args.topic?.trim() ?? '')
     trimDeaths(cfg, identity, cfg.crashLoopWindowSecs, Date.now())
     return { status: 'READY', woke: true, runtime, process_address: identity, taskDelivered: true }
-  })
+  }
+
+  try {
+    return await withWakeLock(cfg, identity, runWake)
+  } catch (e) {
+    // В15 — the wake-lock retry budget (~25s) is shorter than a legitimate boot (bootDeadline +
+    // readyGate, up to minutes). A concurrent send to a WAKING peer can exhaust it → proper-lockfile
+    // throws ELOCKED, which otherwise escaped through routeSend as a raw protocol error with NO
+    // delivery.log line (a hole in the very log that reconstructs a suspected loss). Convert it to a
+    // RETRYABLE FAILED: the sender retries, the fast path then finds the now-live session, and routeSend
+    // records the outcome. re-resolving each retry = verify-before-act (no false-OK).
+    const msg = e instanceof Error ? e.message : String(e)
+    if ((e as NodeJS.ErrnoException).code === 'ELOCKED' || /\bELOCKED\b|lock.*already.*held/i.test(msg)) {
+      logWake({ identity, runtime, mode: 'refused', cause: 'wake-lock-held' })
+      return {
+        status: 'FAILED',
+        woke: false,
+        runtime,
+        reason: `"${args.personality}" (${runtime}) wake already in progress (another wake holds the lock) — retry shortly`,
+      }
+    }
+    throw e
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1200,8 +1254,15 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     // A dead session: record a death for crash-loop accounting, then branch on the
     // .new-eager mark. This death was NOT daemon-initiated (the daemon only initiates
     // the idle-reap below) → it died on its own → do NOT write .idle-reaped here.
+    // ATOMIC CLAIM (В16): a concurrent supervise pass (daemon timer + a CLI-process
+    // wakeOrSpawn prelude) must not BOTH recordDeath — two deaths for one real death can
+    // trip the crash-loop guard prematurely. The rename-claim makes recordDeath + eager
+    // happen exactly once; the loser reports a benign concurrently-reaped outcome.
+    if (!claimDeadSession(cfg, s.identity)) {
+      return { identity: s.identity, action: 'reaped-gone', reason: 'concurrently reaped by another supervise pass' }
+    }
     recordDeath(cfg, s.identity, nowMs)
-    removeSessionState(cfg, s.identity)
+    rmSync(`${sessionStatePath(cfg, s.identity)}.reaping`, { force: true }) // claim token consumed
     // The .ephemeral-armed mark belongs to THIS (now dead) session — it armed on its
     // outbound reply. Clear it with the session, so a successor session can never be
     // quiet-reaped on a stale mark before answering its own task. No-op otherwise.
@@ -1228,6 +1289,21 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     const gone = classifyGoneSession(sock)
     trace({ identity: s.identity, action: 'reaped-gone', death: gone.death, reason: gone.reason, outcome: 'fresh-next-msg' })
     return { identity: s.identity, action: 'reaped-gone', reason: gone.reason }
+  }
+  // В17 — a LIVE session carrying the .stopped flag is an illegitimate state: `stop` takes no wake-lock,
+  // so a stop that raced an in-flight wake killed the pre-pidfile session as a no-op and the wake then
+  // drove a NEW session to READY → alive + .stopped. The live path (routeSend) does not re-check
+  // .stopped, so this peer keeps accepting messages until idle-reap (up to 1h) — the operator halt
+  // silently failed. Reap it now (catch-up for the window the wake-lock cannot cover). H4 is already
+  // cleared above; no legitimate alive+stopped state exists. Park like the stop verb (.idle-reaped is
+  // idempotent with it) — .stopped keeps the peer down until `start`, .idle-reaped makes it resume-clean.
+  if (isStopped(cfg, s.identity)) {
+    kill(sock, s.identity)
+    setIdleReaped(cfg, s.identity)
+    clearEphemeralArmed(cfg, s.identity)
+    removeSessionState(cfg, s.identity)
+    trace({ identity: s.identity, action: 'reaped-idle', reason: 'alive-but-stopped', outcome: 'operator-halt-enforced' })
+    return { identity: s.identity, action: 'reaped-idle', reason: 'live session carried .stopped — operator halt enforced (stop-vs-wake race)' }
   }
   // Idle accounting via the LAST MEANINGFUL TRANSCRIPT ENTRY's content-timestamp (adapter.lastTurnMtime)
   // — the only RELIABLE idle signal. The two raw mtimes both report FALSE freshness for an idle session:

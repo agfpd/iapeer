@@ -39,9 +39,11 @@ import {
   wakeOrSpawn,
   withWakeLock,
   addTopic,
+  readSessionStates,
   type LifecycleConfig,
 } from './index.ts'
 import { spawnSync } from 'child_process'
+import * as lockfile from 'proper-lockfile'
 import { upsertPeer, type PeerRecord } from '../registry/index.ts'
 
 function peer(over: Partial<PeerRecord>): PeerRecord {
@@ -136,6 +138,7 @@ describe('withWakeLock', () => {
       bootDeadlineSecs: 1,
       readyGateSecs: 1,
       idleSecs: 1,
+      wakeLockRetries: 30, // the second lock WAITS for the first (serialization contract)
     }) as LifecycleConfig
 
   test('two concurrent locks on the same identity run strictly serialized', async () => {
@@ -1358,6 +1361,95 @@ describe('folderLaunch (error path)', () => {
       await expect(folderLaunch({ cwd, env: { ...process.env } })).rejects.toThrow()
     } finally {
       rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Б2 — lifecycle reap/wake hardening (В14 boot-crash death, В16 single-death claim,
+// В17 alive+stopped heal, В15 wake-lock ELOCKED → retryable FAILED)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Б2 reap/wake hardening', () => {
+  function setup(personality: string, opts: { wakeMsAgo?: number } = {}): {
+    env: NodeJS.ProcessEnv
+    cfg: LifecycleConfig
+    cwd: string
+    cleanup: () => void
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-b2-root-'))
+    const laDir = mkdtempSync(join(tmpdir(), 'iapeer-b2-la-')) // empty → not launchd-managed
+    const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_SOCK_DIR: join(root, 'socks') }
+    const cfg = loadLifecycleConfig(env)
+    mkdirSync(cfg.stateDir, { recursive: true })
+    const cwd = join(root, 'peers', personality)
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality, default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' }),
+    )
+    writeFileSync(
+      join(cfg.stateDir, `claude-${personality}.session`),
+      JSON.stringify({ identity: `claude-${personality}`, runtime: 'claude', personality, cwd, wokeAt: Date.now() - (opts.wakeMsAgo ?? 0) }),
+    )
+    return { env, cfg, cwd, cleanup: () => { rmSync(root, { recursive: true, force: true }); rmSync(laDir, { recursive: true, force: true }) } }
+  }
+
+  test('В16: a dead session records EXACTLY ONE death; a second pass does not double-count', () => {
+    const { cfg, env, cleanup } = setup('d')
+    try {
+      // pass 1: dead session → recordDeath + claim-consume the .session
+      superviseTick(cfg, { env, sessionAlive: () => false, killSession: () => {} })
+      expect(countRecentDeaths(cfg, 'claude-d', cfg.crashLoopWindowSecs, Date.now())).toBe(1)
+      // pass 2: the .session was consumed by the claim → not swept → NO second death
+      superviseTick(cfg, { env, sessionAlive: () => false, killSession: () => {} })
+      expect(countRecentDeaths(cfg, 'claude-d', cfg.crashLoopWindowSecs, Date.now())).toBe(1)
+      // no .reaping token left behind
+      expect(existsSync(join(cfg.stateDir, 'claude-d.session.reaping'))).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('В17: a LIVE session carrying .stopped is reaped (operator halt enforced, stop-vs-wake race)', () => {
+    const { cfg, env, cleanup } = setup('s')
+    try {
+      setStopped(cfg, 'claude-s') // an in-flight wake left it alive+stopped
+      const killed: string[] = []
+      const out = superviseTick(cfg, { env, sessionAlive: () => true, killSession: (_sock, id) => killed.push(id) })
+      const o = out.find(x => x.identity === 'claude-s')
+      expect(o?.action).toBe('reaped-idle')
+      expect(killed).toEqual(['claude-s']) // the live session was actually killed
+      expect(isStopped(cfg, 'claude-s')).toBe(true) // stays down until `start`
+      expect(hasIdleReaped(cfg, 'claude-s')).toBe(true) // parked resume-clean
+      expect(readSessionStates(cfg).some(s => s.identity === 'claude-s')).toBe(false) // state dropped
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('В15: a held wake-lock with an exhausted retry budget → RETRYABLE FAILED, not a thrown ELOCKED', async () => {
+    const { cfg, env, cwd, cleanup } = setup('wl')
+    try {
+      // register the peer so wakeOrSpawn passes the pre-lock gates and reaches withWakeLock
+      await upsertPeer({ personality: 'wl', runtime: 'claude', cwd, intelligence: 'artificial' }, { rootDir: env.IAPEER_ROOT })
+      // hold the identity's wake-lock from THIS process
+      const lockTarget = join(cfg.stateDir, 'claude-wl.wake.lock')
+      writeFileSync(lockTarget, '', { flag: 'a', mode: 0o600 })
+      const release = await lockfile.lock(lockTarget, { realpath: false, stale: 60_000 })
+      try {
+        // retries:0 → the second acquirer gets ELOCKED immediately (no 25s wait)
+        const r = await wakeOrSpawn(
+          { personality: 'wl', runtime: 'claude', task: 'concurrent send' },
+          { env: { ...env, IAPEER_WAKE_LOCK_RETRIES: '0' } },
+        )
+        expect(r.status).toBe('FAILED')
+        expect(r.reason).toContain('wake already in progress')
+      } finally {
+        await release()
+      }
+    } finally {
+      cleanup()
     }
   })
 })
