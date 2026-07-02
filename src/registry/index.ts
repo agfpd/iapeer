@@ -490,7 +490,13 @@ export async function upsertPeer(
 
     const record: PeerRecord = {
       personality: args.personality,
-      runtime, // args.runtime wins — caller knows the current runtime
+      // В34 — default_runtime is an H1 field: it INHERITS from existing, it does NOT flip to args.runtime.
+      // A re-provision / `init --runtime codex` on an existing claude-default peer ADDS codex to runtimes
+      // (below) but must NOT silently make codex the default — that mis-wakes the peer on the wrong
+      // runtime until the next reindex heals it (which never runs when addRuntime returns 'already'). The
+      // default changes ONLY via the explicit `default-runtime` verb (writes the local profile +
+      // reindexFromLocals). A brand-new peer (no existing) naturally takes args.runtime as its default.
+      runtime: existing ? existing.runtime : runtime,
       runtimes,
       description,
       intelligence,

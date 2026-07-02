@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -90,6 +90,16 @@ describe('writePeerProfileAtomic H1 preserve', () => {
     expect(disk.interfaces).toEqual({ telegram: { user_id: '100000001' } })
     // empty description not written over the existing one
     expect(disk.description).toBe('Owner peer (test fixture).')
+  })
+
+  test('В31: a STALE profile lock is reclaimed — the write still lands and the lock is released', () => {
+    const lockDir = join(cwd, '.iapeer', '.peer-profile.lock')
+    mkdirSync(lockDir, { recursive: true }) // a crashed writer left this behind
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(lockDir, old, old) // stale (past the 10s reclaim threshold)
+    writePeerProfileAtomic(cwd, { personality: 'p', runtime: 'claude', runtimes: ['claude'], intelligence: 'artificial' })
+    expect(readDisk().default_runtime).toBe('claude') // the write reclaimed the stale lock and landed
+    expect(existsSync(lockDir)).toBe(false) // released after the write
   })
 
   test('explicit intelligence in write IS applied', () => {

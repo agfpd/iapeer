@@ -480,3 +480,28 @@ describe('В33 updatePeersIndex refuses to publish an unreadable index', () => {
     expect(readPeersIndex(opts()).peers[0]!.cwd).toBe('/tmp/iapeer-peers/q') // unchanged
   })
 })
+
+describe('В34 default_runtime is an H1 field — inherits from existing, does NOT flip to args.runtime', () => {
+  test('re-provision with a different runtime ADDS it to runtimes but keeps the existing default', async () => {
+    await upsertPeer(
+      { personality: 'flip', runtime: 'claude', intelligence: 'artificial', cwd: '/tmp/iapeer-peers/flip' },
+      opts(),
+    )
+    // `init --runtime codex` on the existing claude-default peer: codex is added, default STAYS claude
+    await upsertPeer(
+      { personality: 'flip', runtime: 'codex', intelligence: 'artificial', cwd: '/tmp/iapeer-peers/flip' },
+      opts(),
+    )
+    const rec = findPeer(readPeersIndex(opts()), 'flip')!
+    expect(rec.runtime).toBe('claude') // default NOT flipped to codex
+    expect(rec.runtimes).toContain('codex') // but codex is now a declared runtime
+    expect(rec.runtimes).toContain('claude')
+  })
+  test('a BRAND-NEW peer takes args.runtime as its default', async () => {
+    await upsertPeer(
+      { personality: 'fresh', runtime: 'codex', intelligence: 'artificial', cwd: '/tmp/iapeer-peers/fresh' },
+      opts(),
+    )
+    expect(findPeer(readPeersIndex(opts()), 'fresh')!.runtime).toBe('codex')
+  })
+})

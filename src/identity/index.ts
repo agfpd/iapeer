@@ -6,7 +6,7 @@
 // wipe description without an explicit new value). Path helpers moved to storage.
 
 import { basename, join, resolve } from 'path'
-import { existsSync, readFileSync, realpathSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, statSync } from 'fs'
 import {
   IAPEER_DIR,
   PEER_PROFILE_FILE,
@@ -251,10 +251,64 @@ export function readPeerProfile(cwd: string = process.cwd()): PeerProfile | null
  * The profile file (basename peer-profile.json) is allowed through
  * storage.writeFileAtomic; only peers-profiles.json is guarded there.
  */
+const PROFILE_LOCK_WAIT_MS = 2000
+const PROFILE_LOCK_STALE_MS = 10_000
+
+/** В31 — serialize the read-merge-write of a peer's local profile so concurrent FOUNDATION writers
+ *  (verify --fix, the `default-runtime` verb, ensurePeerProfile at re-provision) don't lose each other's
+ *  owner sections via a read-modify-write race. A sync mkdir-lock: writePeerProfileAtomic is sync and off
+ *  the delivery hot path (rare operator calls). Best-effort — a stale lock is reclaimed, and on timeout it
+ *  proceeds WITHOUT the lock so it can never deadlock. CROSS-PACKAGE CAVEAT: telegram-runtime writes this
+ *  file with its OWN code and does not take this lock; full safety needs it to adopt the same lock (a
+ *  separate cross-package contract — this closes the foundation-vs-foundation window). */
+function withProfileLockSync<T>(cwd: string, fn: () => T): T {
+  const lockDir = join(cwd, '.iapeer', '.peer-profile.lock')
+  const deadline = Date.now() + PROFILE_LOCK_WAIT_MS
+  let held = false
+  for (;;) {
+    try {
+      mkdirSync(lockDir)
+      held = true
+      break
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') break // fs issue → proceed unlocked (best-effort)
+      try {
+        if (Date.now() - statSync(lockDir).mtimeMs > PROFILE_LOCK_STALE_MS) {
+          rmdirSync(lockDir)
+          continue // reclaimed a crashed writer's stale lock → retry immediately
+        }
+      } catch {
+        /* the lock vanished between checks — retry */
+      }
+      if (Date.now() > deadline) break // give up waiting → proceed unlocked (never deadlock)
+      try {
+        ;(globalThis as { Bun?: { sleepSync(ms: number): void } }).Bun?.sleepSync(15)
+      } catch {
+        /* */
+      }
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    if (held)
+      try {
+        rmdirSync(lockDir)
+      } catch {
+        /* */
+      }
+  }
+}
+
 export function writePeerProfileAtomic(cwd: string, profile: PeerProfileWrite): void {
   ensureLocalIapScaffold(cwd)
   const path = peerProfilePath(cwd)
+  // В31 — the ENTIRE read-merge-write runs under the per-cwd lock so a concurrent foundation writer's
+  // owner sections are never clobbered by a stale-read merge.
+  withProfileLockSync(cwd, () => writePeerProfileMerged(path, profile))
+}
 
+function writePeerProfileMerged(path: string, profile: PeerProfileWrite): void {
   let existing: Record<string, unknown> = {}
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
