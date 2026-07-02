@@ -82,6 +82,15 @@ describe('buildLaunchInvocation — differential vs the verbatim pre-extraction 
       const got = buildLaunchInvocation(s, adapterFor(s), CFG)
       const want = oracleInline(s, adapterFor(s), CFG)
       expect(got.argv).toEqual(want.argv)
+      // В59 pins claude to the classic renderer — an INTENTIONAL addition BEYOND the pre-extraction
+      // oracle. Assert it here, then exclude it from the byte-identity check so the differential still
+      // guards everything the extraction was responsible for.
+      if (s.runtime === 'claude') {
+        expect(got.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBe('1')
+        delete got.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+      } else {
+        expect(got.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBeUndefined()
+      }
       expect(got.env).toEqual(want.env)
     })
   }
@@ -144,6 +153,15 @@ describe('buildLaunchInvocation — strips the claude-code-internal session name
     expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined()
     expect(env.CLAUDECODE).toBeUndefined()
     expect(env[CODEX_BEARER_ENV_VAR]).toBe(CODEX_DUMMY_BEARER)
+  })
+  // В59 — the classic-renderer pin is a CLAUDE_CODE_* var, so it must be set AFTER the namespace strip
+  // (else the strip loop would delete it). This guards that ordering: even with a DIRTY env full of
+  // CLAUDE_CODE_* corruptors that get wiped, the pin survives on claude and is absent on codex.
+  test('В59: claude is pinned to the classic renderer (survives the CLAUDE_CODE_* strip); codex has no such var', () => {
+    const claudeEnv = buildLaunchInvocation(spec({ runtime: 'claude', identity: 'claude-p' }), claudeAdapter, DIRTY).env
+    expect(claudeEnv.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBe('1')
+    const codexEnv = buildLaunchInvocation(spec({ runtime: 'codex', identity: 'codex-p' }), codexAdapter, DIRTY).env
+    expect(codexEnv.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBeUndefined()
   })
 })
 

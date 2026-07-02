@@ -67,5 +67,17 @@ export function buildLaunchInvocation(
   for (const k of Object.keys(childEnv)) {
     if (k.startsWith('CLAUDE_CODE_') || k === 'CLAUDECODE') delete childEnv[k]
   }
+  // В59 — pin claude to the CLASSIC (main-screen) renderer. Two load-bearing effects: (1) the whole
+  // supervisor model — pane-log serialize-snapshot, composer-occupancy, the ready-gate flip — assumes
+  // claude's DEFAULT no-alt-screen relative-cursor rendering (the daemon census). Pinning it makes that
+  // assumption UNCONDITIONAL: no future claude feature, and no mis-accepted mid-session upsell, can
+  // silently switch to the alt-screen renderer and corrupt the surface the supervisor reads off. This
+  // NEUTRALIZES the consequence of the В40 fullscreen-renderer nag even if a stray keystroke accepts it.
+  // (2) It disables the very feature that upsell offers, so the modal has nothing to enable — expected to
+  // suppress it at the SOURCE (the root-cause complement to the nag-watcher backstop). Set AFTER the
+  // CLAUDE_CODE_* strip above (which would otherwise delete it); claude-only — codex/router runtimes
+  // ignore CLAUDE_CODE_*. Safe by construction: claude already renders classic by default (peers boot and
+  // attach today), so this pins the current behavior, it does not change it.
+  if (spec.runtime === 'claude') childEnv.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = '1'
   return { argv, env: childEnv }
 }
