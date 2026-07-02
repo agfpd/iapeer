@@ -100,6 +100,9 @@ export interface PeerListing {
   default_runtime: Runtime
   /** Runtime with the freshest activity (what `attach` resumes); undefined if none. */
   last_active_runtime?: Runtime
+  /** Epoch-ms of that freshest activity (the dashboard's ACTIVE age column);
+   *  undefined when no runtime has an activity proxy. */
+  last_active_ms?: number
   intelligence: Intelligence
   description: string
   /** The peer's working directory (registry fact). Machine-readable so host-local
@@ -149,6 +152,7 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
       personality: peer.personality,
       default_runtime: peer.runtime,
       last_active_runtime: lastActive,
+      last_active_ms: bestMt >= 0 ? bestMt : undefined,
       intelligence: peer.intelligence,
       description: peer.description,
       cwd: peer.cwd,
@@ -1754,11 +1758,15 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
       }
       case 'list': {
-        // tty + no --json → the interactive control-panel (↑/↓ · Enter=attach · / · q);
-        // non-tty / --json → the scriptable table (machine-parsable).
+        // tty + no --json → the live Ink dashboard (Фаза 3: host header · live peer
+        // table · per-peer log panel · Enter=attach via suspend-and-spawn);
+        // non-tty / --json → the scriptable table (machine-parsable). The dashboard
+        // fails CLOSED to the table when no real TTY drives it (sentinel), the same
+        // belt as the onboard wizard.
         if (flags.json !== true && process.stdout.isTTY && process.stdin.isTTY) {
-          const { runListTui } = await import('./listTui.ts')
-          return await runListTui(env)
+          const { runDashboard, DASHBOARD_NOT_INTERACTIVE } = await import('../tui/dashboard/run.tsx')
+          const code = await runDashboard({ env })
+          if (code !== DASHBOARD_NOT_INTERACTIVE) return code
         }
         const rows = listPeers({ env })
         out(flags.json ? JSON.stringify(rows, null, 2) + '\n' : formatListTable(rows))
