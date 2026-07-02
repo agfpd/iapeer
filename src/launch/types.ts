@@ -288,7 +288,7 @@ export interface RuntimeAdapter {
   /**
    * MID-SESSION nag/upsell auto-dismiss (livability). Distinct from bootDialogKeys:
    * the boot-driver stops at ready, but claude/codex can pop a ONE-TIME interactive
-   * upsell modal AFTER the session is live (e.g. "Try the new fullscreen renderer?")
+   * upsell modal AFTER the session is live (e.g. "Try the new fullscreen-renderer?")
    * that BLOCKS the pty waiting for a keypress no headless peer answers — it froze the
    * live fleet until a human cleared it. A persistent supervisor watcher (daemon.ts)
    * runs THIS off the authoritative model for the whole session and writes the keys.

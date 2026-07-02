@@ -599,7 +599,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
 
   // ── mid-session nag-watcher (livability) ────────────────────────────────────────
   // The boot-driver above STOPS at ready. But claude/codex can pop a ONE-TIME upsell modal
-  // MID-SESSION (e.g. "Try the new fullscreen renderer?", which appears on the return-to-prompt
+  // MID-SESSION (e.g. "Try the new fullscreen-renderer?", which appears on the return-to-prompt
   // boundary after a tool result) that BLOCKS the pty on a keypress no headless peer answers — it
   // froze live fleet peers (boris, doc) until a human cleared it by hand. A PERSISTENT watcher answers
   // the curated, verified-safe DECLINE for that class off the SAME authoritative @xterm model, for the

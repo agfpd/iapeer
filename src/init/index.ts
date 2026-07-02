@@ -130,7 +130,7 @@ export function writeClaudeMcpConfig(cwd: string, personality: string, daemonUrl
  *     peer has no one to approve it, so the wake stalls. This flag pre-approves the cwd's MCP
  *     servers so the dialog never appears (verified live, claude 2.1.183). Set unconditionally.
  *   - `"tui": "default"` — pins the CLASSIC renderer so claude never pops its one-time
- *     "Try the new fullscreen renderer?" upsell modal (a BLOCKING mid-session nag that froze
+ *     "Try the new fullscreen-renderer?" upsell modal (a BLOCKING mid-session nag that froze
  *     live fleet peers; empirically an explicit tui choice suppresses it — verified live). This
  *     is the PREVENTION belt to the supervisor nag-watcher: init keeps the modal from appearing
  *     for a new peer at all, the watcher dismisses the class on every peer mid-session. Set ONLY

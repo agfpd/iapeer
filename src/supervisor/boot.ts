@@ -44,7 +44,7 @@ export type NagAction = { kind: 'dismiss'; keys: string[]; bytes: Buffer } | { k
 /**
  * MID-SESSION nag/upsell step (livability) — the persistent sibling of nextBootAction. Unlike the
  * boot-driver, which STOPS at ready, the daemon loops this for the WHOLE session: a one-time CC upsell
- * modal (e.g. "Try the new fullscreen renderer?") can pop AFTER the session is live and BLOCK the pty on
+ * modal (e.g. "Try the new fullscreen-renderer?") can pop AFTER the session is live and BLOCK the pty on
  * a keypress no headless peer answers. If the adapter recognizes the (FULL-signature) modal it returns
  * the verified-safe DECLINE keys; the caller writes `action.bytes` to the pty (cooldown-guarded so a
  * cleared modal is never double-answered). An adapter with no nagDismissKeys → always 'none'.

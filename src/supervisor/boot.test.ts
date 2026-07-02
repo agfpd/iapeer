@@ -70,7 +70,7 @@ describe('nextNagAction — mid-session upsell modals auto-declined off the mode
   // The EXACT live modal (linus ground-truth, cleared on boris+doc). Default cursor on "1. Yes, try it",
   // so a bare Enter would ENABLE fullscreen — the watcher must pick "2. Not now" (literal '2' + Enter).
   const fullscreenModal =
-    'Try the new fullscreen renderer?\n' +
+    'Try the new fullscreen render' + 'er?\n' +
     '· Flicker-free output — fixes the flashing you see during long responses\n' +
     '· Mouse support — click to move your cursor or expand results\n' +
     '· Selected text auto-copies to your clipboard\n' +
@@ -92,8 +92,8 @@ describe('nextNagAction — mid-session upsell modals auto-declined off the mode
 
   test('a transcript merely MENTIONING the renderer is NOT a modal → none (no stray keystroke)', () => {
     // Title words present in prose but the "2. Not now" decision row absent → must not fire.
-    expect(nextNagAction(claudeAdapter, 'I switched to the new fullscreen renderer yesterday.').kind).toBe('none')
-    expect(nextNagAction(claudeAdapter, 'Try the new fullscreen renderer? (discussing the option)').kind).toBe('none')
+    expect(nextNagAction(claudeAdapter, 'I switched to the new fullscreen render' + 'er yesterday.').kind).toBe('none')
+    expect(nextNagAction(claudeAdapter, 'Try the new fullscreen render' + 'er? (discussing the option)').kind).toBe('none')
   })
 
   test('clean composer / unrelated dialog → none', () => {
