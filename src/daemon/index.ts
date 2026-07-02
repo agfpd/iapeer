@@ -200,6 +200,9 @@ function errResult(text: string): ToolResult {
 /** Injected seams for callTool — all OPTIONAL, all wired by the composition point
  *  (daemon/main.ts); library/test callers omit them and stay hermetic. */
 export interface CallToolDeps {
+  /** Б7 — injected env for the request-path registry read + routeSend (daemon:286 isolation). Default
+   *  process.env; the production daemon threads its startDaemon env here. */
+  env?: NodeJS.ProcessEnv
   /** Wake-on-miss primitive (Ф2) — see StartDaemonOptions.wake. */
   wake?: WakeFn
   /** Per-delivery outcome log dir (Ф-#8a) — see StartDaemonOptions.deliveryLogDir. */
@@ -243,6 +246,7 @@ export async function callTool(
     }
     const t0 = Date.now()
     const sent = await routeSend(caller, input, {
+      env: deps.env,
       wake: deps.wake,
       ephemeral: deps.ephemeral,
       noteLiveTopic: deps.noteLiveTopic,
@@ -311,7 +315,7 @@ export function createMcpServer(deps: CallToolDeps = {}): Server {
     const headerIdentity = headerFromRequestInfo(extra as never)
     let caller: ResolvedCaller
     try {
-      caller = resolveCallerFromHeader(headerIdentity, readPeersIndex())
+      caller = resolveCallerFromHeader(headerIdentity, readPeersIndex({ env: deps.env }))
     } catch (e) {
       // No silent default — reject the CallTool when identity is missing/invalid.
       if (process.env.IAPEER_DAEMON_LOG) {
@@ -459,6 +463,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
       return
     }
     const server = createMcpServer({
+      env: opts.env, // Б7 — thread the daemon's storage env into the request path (registry read + routeSend)
       wake: opts.wake,
       deliveryLogDir: opts.deliveryLogDir,
       onDelivered: opts.onDelivered,

@@ -107,8 +107,11 @@ export function resolveDeliveryTarget(args: {
   personality: string
   runtime?: string
   sockDir?: string
+  /** Б7 — injected env sandboxes the liveness reads (supervisor run-dir); default process.env (prod). */
+  env?: NodeJS.ProcessEnv
 }): Result<DeliveryTarget> {
-  const sockDir = args.sockDir ?? resolveSockDir()
+  const env = args.env ?? process.env
+  const sockDir = args.sockDir ?? resolveSockDir(env)
   if (!isValidName(args.personality)) {
     return err(`invalid personality "${args.personality}" — must match /^[a-z][a-z0-9-]{0,31}$/`)
   }
@@ -117,12 +120,12 @@ export function resolveDeliveryTarget(args: {
     const runtime = args.runtime
     const socketPath = buildSocketPath(runtime, args.personality, sockDir)
     const address = buildProcessAddress(runtime, args.personality)
-    if (!sessionAlive(socketPath, address)) {
+    if (!sessionAlive(socketPath, address, env)) {
       return err(`peer offline: ${args.personality} (${args.runtime})`)
     }
     return ok({ runtime, personality: args.personality, address, socketPath })
   }
-  const matches = listOnlinePeers(sockDir).filter(peer => peer.personality === args.personality)
+  const matches = listOnlinePeers(sockDir, env).filter(peer => peer.personality === args.personality)
   if (matches.length === 0) return err(`peer offline: ${args.personality}`)
   if (matches.length > 1) {
     return err(
@@ -145,13 +148,14 @@ export function resolvePeerDeliveryTarget(
   personality: string,
   runtime: string | undefined,
   peer: PeerRecord,
+  env: NodeJS.ProcessEnv = process.env,
 ): Result<DeliveryTarget> {
-  if (runtime) return resolveDeliveryTarget({ personality, runtime })
+  if (runtime) return resolveDeliveryTarget({ personality, runtime, env })
   if (peer.runtime) {
-    const exactDefault = resolveDeliveryTarget({ personality, runtime: peer.runtime })
+    const exactDefault = resolveDeliveryTarget({ personality, runtime: peer.runtime, env })
     if (exactDefault.ok) return exactDefault
   }
-  return resolveDeliveryTarget({ personality })
+  return resolveDeliveryTarget({ personality, env })
 }
 
 // Confirm poll interval — how often deliverViaHost re-reads the transcript for a NEW record carrying
@@ -232,13 +236,14 @@ export async function deliverWarm(
   envelope: string,
   cwd?: string,
   seam: WarmDeliverSeam = {},
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Result<void>> {
   const address = target.address
   const prev = deliverTails.get(address) ?? Promise.resolve()
   // run AFTER prev settles (success or failure) — a prior delivery's error must not stall the chain
   const run = prev.then(
-    () => deliverViaHost(target, envelope, cwd, seam),
-    () => deliverViaHost(target, envelope, cwd, seam),
+    () => deliverViaHost(target, envelope, cwd, seam, env),
+    () => deliverViaHost(target, envelope, cwd, seam, env),
   )
   deliverTails.set(
     address,
@@ -255,6 +260,7 @@ async function deliverViaHost(
   envelope: string,
   cwd: string | undefined,
   seam: WarmDeliverSeam,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Result<void>> {
   const adapter = getAdapter(target.runtime)
   // Baseline the transcript/session-jsonl file SIZES BEFORE delivery (per-runtime candidate files).
@@ -264,8 +270,9 @@ async function deliverViaHost(
   // socket-ack runtimes (codex) return before it — computing it for them recursively scanned all of
   // ~/.codex/sessions (full-file read per session) on every delivery for nothing.
   const usesBaseline = adapter.kind !== 'router' && adapter.deliveryConfirm !== 'socket-ack'
-  const baseline = cwd && usesBaseline ? compactDoneBaseline(target.runtime, cwd) : null
-  const send = seam.deliverHosted ?? deliverHosted
+  const baseline = cwd && usesBaseline ? compactDoneBaseline(target.runtime, cwd, { env }) : null
+  // Б7 — the default deliverHosted resolves the supervisor run-dir from env (sandboxed under a test root).
+  const send = seam.deliverHosted ?? ((identity: string, msg: string) => deliverHosted(identity, msg, env))
   const sent = await send(target.address, envelope)
   if (!sent.ok) {
     return err(
@@ -892,6 +899,11 @@ export interface ComposerQueueRouteDeps {
 }
 
 export interface RouteDeps {
+  /** Б7 — injected env sandboxes ALL of routeSend's env-resolved reads (the registry, the supervisor
+   *  run-dir liveness/delivery). Default process.env (prod: env === process.env). Closes the daemon:286
+   *  isolation invariant — a library/test daemon with an injected root no longer reads the real registry
+   *  or the real fleet's live sessions. */
+  env?: NodeJS.ProcessEnv
   /** On a miss, wake the dead peer instead of returning offline (Ф2). */
   wake?: WakeFn
   /** Ephemeral-target serial-queue delivery (M3); absent → normal routing. */
@@ -1275,7 +1287,8 @@ export async function routeSend(
     return err(`message exceeds ${MAX_MESSAGE_LEN} char limit (got ${message.length})`)
   }
 
-  const index = readPeersIndex()
+  const env = deps.env ?? process.env
+  const index = readPeersIndex({ env })
   const peer = findPeer(index, personality)
   if (!peer) {
     return err(`peer "${personality}" is not in the iapeer peers index; message NOT delivered`)
@@ -1309,7 +1322,7 @@ export async function routeSend(
     return deps.ephemeral.deliver({ peer, envelope, topic, runtime })
   }
 
-  const target = resolvePeerDeliveryTarget(personality, runtime, peer)
+  const target = resolvePeerDeliveryTarget(personality, runtime, peer, env)
   if (target.ok) {
     if (target.value.address === caller.address) return err('cannot send to self')
     // Telegram sender policy — RESOLVED channel (the only-live-session fallback can
@@ -1321,7 +1334,7 @@ export async function routeSend(
     // peer.cwd enables the Ф-B transcript-mtime liveness probe (busy-session case).
     // deliverWarm is HOST-AWARE (spawn-flip Ф0b-2): a supervisor-hosted target delivers over its
     // socket, any other target keeps the tmux path. Flag-off → byte-identical to deliverViaTmux.
-    const delivered = await deliverWarm(target.value, envelope, peer.cwd)
+    const delivered = await deliverWarm(target.value, envelope, peer.cwd, {}, env)
     if (!delivered.ok) return delivered
     noteTopic(deps, target.value.address, topic)
     noteDelivered(deps, target.value.address) // В7 — floor the idle proxy so this delivery isn't reaped away
@@ -1349,12 +1362,12 @@ export async function routeSend(
     const reviveDeadline = monotonicMs() + launchdReviveGraceMs()
     while (monotonicMs() < reviveDeadline) {
       await sleep(LAUNCHD_REVIVE_POLL_MS)
-      const revived = resolvePeerDeliveryTarget(personality, runtime, peer)
+      const revived = resolvePeerDeliveryTarget(personality, runtime, peer, env)
       if (!revived.ok) continue // not back yet — keep polling until the deadline
       if (revived.value.address === caller.address) return err('cannot send to self')
       const reviveGuard = telegramSenderGuard(caller, revived.value.runtime, personality)
       if (!reviveGuard.ok) return reviveGuard
-      const delivered = await deliverWarm(revived.value, envelope, peer.cwd)
+      const delivered = await deliverWarm(revived.value, envelope, peer.cwd, {}, env)
       if (delivered.ok) {
         noteTopic(deps, revived.value.address, topic)
         return ok({
@@ -1399,7 +1412,7 @@ export async function routeSend(
   if (woke.taskDelivered === false) {
     const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: live.value, envelope, topic })
     if (queued) return queued
-    const delivered = await deliverWarm(live.value, envelope, peer.cwd)
+    const delivered = await deliverWarm(live.value, envelope, peer.cwd, {}, env)
     if (!delivered.ok) return delivered
     noteTopic(deps, live.value.address, topic)
     return ok({

@@ -247,3 +247,36 @@ describe('launchd-revive delivery retry (#2)', () => {
     expect(wakeCalled).toBe(true)
   })
 })
+
+// Б7 — routeSend resolves the registry from the INJECTED deps.env, not process.env (the daemon:286
+// isolation invariant). Proof: a peer that exists ONLY in a separately-injected sandbox registry is
+// found when env is passed, and NOT found when it is not (process.env's registry lacks it).
+describe('Б7 routeSend env isolation (registry read is sandboxed by deps.env)', () => {
+  test('a peer present only in the injected env registry is resolved via deps.env', async () => {
+    const sandbox = mkdtempSync(join(tmpdir(), 'iapeer-b7-'))
+    try {
+      writeFileSync(
+        join(sandbox, 'peers-profiles.json'),
+        JSON.stringify({
+          version: 2,
+          peers: [
+            { personality: 'boris', runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial', cwd: '/tmp/boris' },
+            { personality: 'zzsandbox', runtime: 'telegram', runtimes: ['telegram'], description: '', intelligence: 'artificial', cwd: sandbox },
+          ],
+        }),
+      )
+      const env = { ...process.env, IAPEER_ROOT: sandbox }
+      // WITH env → the sandbox registry is read: 'zzsandbox' is found (the error is a channel/offline one,
+      // NOT "not in the iapeer peers index").
+      const withEnv = await routeSend(caller, { personality: 'zzsandbox', message: 'm' }, { env })
+      expect(withEnv.ok).toBe(false)
+      if (!withEnv.ok) expect(withEnv.error.message).not.toContain('not in the iapeer peers index')
+      // WITHOUT env → process.env's registry (the shared beforeAll root) has NO 'zzsandbox' → not found.
+      const noEnv = await routeSend(caller, { personality: 'zzsandbox', message: 'm' })
+      expect(noEnv.ok).toBe(false)
+      if (!noEnv.ok) expect(noEnv.error.message).toContain('not in the iapeer peers index')
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
+  })
+})
