@@ -7,6 +7,7 @@ import {
   findPeer,
   readPeersIndex,
   removePeer,
+  updatePeersIndex,
   upsertPeer,
   withPeersLock,
   type PeerRecord,
@@ -428,5 +429,54 @@ describe('clampDescription — MAX_DESCRIPTION_LEN boundary (450)', () => {
     const desc = 'z'.repeat(450)
     await upsertPeer({ personality: 'verbose', runtime: 'claude', cwd: '/tmp/verbose', description: desc }, opts())
     expect(findPeer(readPeersIndex(opts()), 'verbose')!.description).toBe(desc)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Б6a — registry integrity: В35 cwd-collision under lock, В33 read-invariant guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('В35 upsertPeer refuses to re-point an existing personality to a DIFFERENT cwd', () => {
+  const base = (over: Partial<{ cwd: string }> = {}) => ({
+    personality: 'dup',
+    runtime: 'claude' as const,
+    intelligence: 'artificial' as const,
+    cwd: '/tmp/iapeer-peers/dup-a',
+    ...over,
+  })
+  test('same cwd re-provision is a no-op (allowed)', async () => {
+    await upsertPeer(base(), opts())
+    await upsertPeer(base(), opts()) // idempotent same-cwd
+    expect(findPeer(readPeersIndex(opts()), 'dup')!.cwd).toBe('/tmp/iapeer-peers/dup-a')
+  })
+  test('a DIFFERENT cwd for the same personality THROWS (no silent identity split)', async () => {
+    await upsertPeer(base(), opts())
+    await expect(upsertPeer(base({ cwd: '/tmp/iapeer-peers/dup-b' }), opts())).rejects.toThrow(
+      /already exists at .* refusing to re-point/,
+    )
+    expect(findPeer(readPeersIndex(opts()), 'dup')!.cwd).toBe('/tmp/iapeer-peers/dup-a') // original intact
+  })
+})
+
+describe('В33 updatePeersIndex refuses to publish an unreadable index', () => {
+  test('a DUPLICATE personality is rejected before write (registry stays readable)', async () => {
+    await upsertPeer(
+      { personality: 'p', runtime: 'claude', intelligence: 'artificial', cwd: '/tmp/iapeer-peers/p' },
+      opts(),
+    )
+    await expect(
+      updatePeersIndex(index => ({ ...index, peers: [...index.peers, { ...index.peers[0]! }] }), opts()),
+    ).rejects.toThrow(/duplicate peer/)
+    expect(readPeersIndex(opts()).peers).toHaveLength(1) // NOT corrupted — still one readable peer
+  })
+  test('an EMPTY cwd is rejected before write', async () => {
+    await upsertPeer(
+      { personality: 'q', runtime: 'claude', intelligence: 'artificial', cwd: '/tmp/iapeer-peers/q' },
+      opts(),
+    )
+    await expect(
+      updatePeersIndex(index => ({ ...index, peers: index.peers.map(p => ({ ...p, cwd: '' })) }), opts()),
+    ).rejects.toThrow(/empty cwd/)
+    expect(readPeersIndex(opts()).peers[0]!.cwd).toBe('/tmp/iapeer-peers/q') // unchanged
   })
 })

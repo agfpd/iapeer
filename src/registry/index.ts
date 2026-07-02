@@ -9,7 +9,7 @@
 // is no unlocked path to the registry file anywhere in the package.
 
 import * as lockfile from 'proper-lockfile'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { writeFileAtomicRaw } from '../storage/atomicWrite.ts'
@@ -345,6 +345,24 @@ function writePeersIndexAtomic(paths: PeersPaths, index: PeersIndex): void {
   writeFileAtomicRaw(paths.peersFile, `${JSON.stringify(normalized, null, 2)}\n`, 0o600, paths.tmpDir)
 }
 
+/** В33 — assert the READ invariants BEFORE publishing. writePeersIndexAtomic does no validation, so a
+ *  duplicate personality (e.g. a partial renamePeer + create, or reindex projecting two same-named local
+ *  profiles) or an empty cwd would write SUCCESSFULLY and then make EVERY readPeersIndex throw — the whole
+ *  fleet stops resolving until the file is hand-repaired. Fail LOUD here (the single-writer chokepoint) so
+ *  the on-disk file is never left unreadable. */
+function assertWritableIndex(index: PeersIndex): void {
+  const seen = new Set<string>()
+  for (const p of index.peers) {
+    if (!p.cwd || !p.cwd.trim()) {
+      throw new IapError(`refusing to write peers-profiles.json: peer "${p.personality}" has an empty cwd (would be unreadable)`)
+    }
+    if (seen.has(p.personality)) {
+      throw new IapError(`refusing to write peers-profiles.json: duplicate peer "${p.personality}" (would make the registry unreadable for the whole fleet)`)
+    }
+    seen.add(p.personality)
+  }
+}
+
 export async function updatePeersIndex(
   updater: (index: PeersIndex) => PeersIndex,
   options: PeersUpdateOptions = {},
@@ -352,6 +370,7 @@ export async function updatePeersIndex(
   return withPeersLock(options, paths => {
     const current = readPeersIndex({ ...options, rootDir: paths.rootDir })
     const next = updater(current)
+    assertWritableIndex(next) // В33 — fail before publish; the file stays readable
     writePeersIndexAtomic(paths, next)
     return next
   })
@@ -369,6 +388,17 @@ export interface UpsertPeerArgs {
   intelligence?: Intelligence
   interfaces?: PeerInterfaces
   cwd: string
+}
+
+/** Two cwds refer to the SAME folder (realpath-tolerant so a symlinked path compares equal to its
+ *  target). Falls back to a literal compare when a path can't be resolved (e.g. not yet created). */
+function sameCwd(a: string, b: string): boolean {
+  if (a === b) return true
+  try {
+    return realpathSync(a) === realpathSync(b)
+  } catch {
+    return a === b
+  }
 }
 
 export async function upsertPeer(
@@ -410,6 +440,18 @@ export async function upsertPeer(
 
   return updatePeersIndex(index => {
     const existing = index.peers.find(peer => peer.personality === args.personality)
+
+    // В35 — re-check the personality↔cwd collision UNDER THE LOCK (closing the TOCTOU: the pre-lock
+    // snapshot check in provisionPeer can be stale by the seconds-long birth-hook window). An existing
+    // peer at a DIFFERENT folder must NOT be silently re-pointed — that splits one identity across two
+    // folders (routing goes to whichever the entry point resolves). Legitimate folder moves are
+    // fail-closed in ensurePeerProfile; renames go through renamePeer — neither re-points via upsert.
+    if (existing && !sameCwd(existing.cwd, args.cwd)) {
+      throw new IapError(
+        `peer "${args.personality}" already exists at ${existing.cwd}; refusing to re-point it to ${args.cwd} ` +
+          `(one personality = one folder — use 'iapeer rename' to move it)`,
+      )
+    }
 
     // H1 merge-with-existing: a field ABSENT from args inherits from `existing`,
     // NOT from a runtime default. The runtime default applies ONLY to a brand-new

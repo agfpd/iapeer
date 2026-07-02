@@ -201,7 +201,17 @@ export function migrateProfileRuntimeField(cwd: string): boolean {
  * profile. Used by verify (compare against the live index) and reindex (rewrite it).
  */
 export function projectProfileToRecord(cwd: string): PeerRecord | null {
-  const profile = readPeerProfile(cwd)
+  // В32 — a CORRUPT local profile (invalid JSON / invalid stored field) makes readPeerProfile THROW.
+  // Unguarded, one bad profile aborts the whole reconcile/reindex map → verify crashes for all ~30 peers
+  // (with a message that does not even name the peer), and verify --fix never reaches reindex. Treat a
+  // corrupt profile like a missing one: reconcileIndex reports null drift, and reindexFromLocals PRESERVES
+  // the existing registry record (its `if (!projected) return rec`), so nothing is crashed or removed.
+  let profile
+  try {
+    profile = readPeerProfile(cwd)
+  } catch {
+    return null
+  }
   if (!profile) return null
   return {
     personality: profile.personality,

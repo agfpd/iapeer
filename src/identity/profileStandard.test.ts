@@ -156,6 +156,19 @@ describe('reconcileIndex / reindexFromLocals (self-heal)', () => {
     expect(reconcileIndex({ env: process.env }).find(e => e.personality === 'boris')?.drift).toEqual([])
   })
 
+  test('В32: a CORRUPT local profile does NOT crash reconcile/reindex — it is isolated, the peer preserved', async () => {
+    // corrupt boris's profile (invalid JSON) — this used to make readPeerProfile THROW, aborting the map
+    writeFileSync(join(borisCwd, '.iapeer', 'peer-profile.json'), '{ this is not json')
+    // reconcile does NOT throw; the corrupt peer reads as drift=null (missing), not a crash for all peers
+    let entries: ReturnType<typeof reconcileIndex>
+    expect(() => (entries = reconcileIndex({ env: process.env }))).not.toThrow()
+    expect(entries!.find(e => e.personality === 'boris')?.drift).toBeNull()
+    // reindex does NOT throw and PRESERVES the existing registry record (never removes the peer)
+    const { missing } = await reindexFromLocals({ env: process.env })
+    expect(missing).toContain('boris')
+    expect(readPeersIndex({ env: process.env }).peers.find(p => p.personality === 'boris')).toBeDefined()
+  })
+
   test('reindex writes the Phase-3 registry disk shape: default_runtime ONLY (legacy mirror dropped)', async () => {
     await reindexFromLocals({ env: process.env })
     const disk = JSON.parse(readFileSync(join(root, 'peers-profiles.json'), 'utf8'))
