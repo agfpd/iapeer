@@ -69,9 +69,9 @@ d('runSupervisorClient interactive attach (surface-5, Bun-native pty)', () => {
   let runDir: string
   const session = 'ptsattach'
 
-  beforeAll(() => {
+  beforeAll(async () => {
     runDir = mkdtempSync(join(tmpdir(), 'iapeer-attach-'))
-    startSupervisorDaemon({ session, runtime: 'tick', runDir })
+    await startSupervisorDaemon({ session, runtime: 'tick', runDir })
   })
   afterAll(() => {
     try {

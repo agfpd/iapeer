@@ -78,8 +78,8 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
     rmSync(runDir, { recursive: true, force: true })
   })
 
-  test('spawns a detached daemon that comes up live', () => {
-    const r = startSupervisorDaemon({ session, runtime: 'tick', runDir })
+  test('spawns a detached daemon that comes up live', async () => {
+    const r = await startSupervisorDaemon({ session, runtime: 'tick', runDir })
     expect(r.state).toBe('started')
     expect(sessionAlive(runDir, session)).toBe(true)
     expect(listSessions(runDir).some(s => s.session === session && s.alive)).toBe(true)
@@ -176,7 +176,7 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
         env: { SERVE_MARKER: 'identity-abi-xyz', OUTFILE: out, PATH: process.env.PATH ?? '', TMUX: 'should-be-stripped' },
         cwd: childCwd,
       }
-      const r = startSupervisorDaemon({ session: servingSession, runtime: 'claude', runDir, serve })
+      const r = await startSupervisorDaemon({ session: servingSession, runtime: 'claude', runDir, serve })
       expect(r.state).toBe('started')
       const wrote = await waitFor(() => existsSync(out) && readFileSync(out, 'utf8').trim().split('\n').length >= 4)
       expect(wrote).toBe(true)
@@ -200,7 +200,7 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
     const exitLog = join(runDir, 'exits.log')
     const childPidFile = join(runDir, 'exit-child.pid')
     try {
-      const r = startSupervisorDaemon({
+      const r = await startSupervisorDaemon({
         session: exSession,
         runtime: 'tick',
         runDir,
@@ -237,7 +237,7 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
       return m.length ? `${m[m.length - 1][1]}x${m[m.length - 1][2]}` : ''
     }
     try {
-      const r = startSupervisorDaemon({
+      const r = await startSupervisorDaemon({
         session: gSession,
         runtime: 'tick',
         runDir,

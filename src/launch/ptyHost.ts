@@ -121,7 +121,7 @@ export async function startPtyHost(b: {
 }): Promise<HostStartResult> {
   try {
     const { startSupervisorDaemon } = await import('../supervisor/index.ts')
-    const r = startSupervisorDaemon({
+    const r = await startSupervisorDaemon({
       session: b.identity,
       runtime: b.runtime,
       runDir: hostRunDir(),

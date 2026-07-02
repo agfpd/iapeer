@@ -34,7 +34,7 @@ d('supervisor pane-log ≡ tmux pipe-pane', () => {
     try {
       spawnSync('tmux', ['-S', tmuxSock, 'new-session', '-d', '-s', 'p', '-x', '80', '-y', '24', ...child], { stdio: 'ignore' })
       spawnSync('tmux', ['-S', tmuxSock, 'pipe-pane', '-o', '-t', 'p', `cat >> '${logTmux}'`], { stdio: 'ignore' })
-      startSupervisorDaemon({ session: 'bp', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
+      await startSupervisorDaemon({ session: 'bp', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
       await sleep(2300) // both children: sleep .5 + emit + sleep 1 ≈ exit ~1.5s; tmux's cat EOF-flushes
       const a = readBuf(logTmux)
       const b = readBuf(logSup)
@@ -64,7 +64,7 @@ d('supervisor pane-log ≡ tmux pipe-pane', () => {
     const child = ['sh', '-c', `printf '\\033[2J\\033[HLine one\\r\\n  ❯ ready prompt\\r\\nthird line ok\\r\\n'; sleep 30`]
     try {
       spawnSync('tmux', ['-S', tmuxSock, 'new-session', '-d', '-s', 'b', '-x', String(COLS), '-y', String(ROWS), ...child], { stdio: 'ignore' })
-      startSupervisorDaemon({ session: 'bind', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
+      await startSupervisorDaemon({ session: 'bind', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
       // let the frame render in both
       let cap = ''
       for (let i = 0; i < 30 && !/❯ ready prompt/.test(cap); i++) {
@@ -106,7 +106,7 @@ dp('supervisor pane-log self-heal (Defect 2)', () => {
     // emit AAA once, then CCC repeatedly so a write reliably lands after the 1 s heal throttle window
     const child = ['sh', '-c', `printf 'AAA\\n'; sleep 0.4; i=0; while [ $i -lt 12 ]; do printf 'CCC\\n'; sleep 0.5; i=$((i+1)); done`]
     try {
-      startSupervisorDaemon({ session: 'heal', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
+      await startSupervisorDaemon({ session: 'heal', runtime: 'tick', runDir, serve: { argv: child, env: { PATH: process.env.PATH ?? '' }, cwd: dir, paneLogPath: logSup } })
       for (let i = 0; i < 20 && !readBuf(logSup).includes(Buffer.from('AAA')); i++) await sleep(100)
       expect(readBuf(logSup).includes(Buffer.from('AAA'))).toBe(true)
       // unlink the live pane-log out from under the supervisor (the observed Defect-2 scenario)

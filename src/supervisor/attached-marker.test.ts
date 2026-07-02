@@ -42,7 +42,7 @@ afterEach(() => { for (const d2 of dirs.splice(0)) rmSync(d2, { recursive: true,
 d('supervisor .attached marker (the hosted occupancy gate signal)', () => {
   test('present ⟺ clients.size>0 across multiple clients (no stuck "attached" on partial detach)', async () => {
     const runDir = mkRunDir(), session = 'mk'
-    startSupervisorDaemon({ session, runtime: 'tick', runDir })
+    await startSupervisorDaemon({ session, runtime: 'tick', runDir })
     expect(await waitFor(() => sessionAlive(runDir, session))).toBe(true)
     const marker = attachedPath(runDir, session)
     expect(existsSync(marker)).toBe(false) // no client yet → absent
@@ -61,7 +61,7 @@ d('supervisor .attached marker (the hosted occupancy gate signal)', () => {
 
   test('ABNORMAL detach (abrupt terminate, not a clean Ctrl-]) → marker still removed', async () => {
     const runDir = mkRunDir(), session = 'ab'
-    startSupervisorDaemon({ session, runtime: 'tick', runDir })
+    await startSupervisorDaemon({ session, runtime: 'tick', runDir })
     expect(await waitFor(() => sessionAlive(runDir, session))).toBe(true)
     const marker = attachedPath(runDir, session)
     const c = await attach(runDir, session)
@@ -76,7 +76,7 @@ d('supervisor .attached marker (the hosted occupancy gate signal)', () => {
     const marker = attachedPath(runDir, session)
     writeFileSync(marker, '') // a crashed predecessor left this present, with no live client
     expect(existsSync(marker)).toBe(true)
-    startSupervisorDaemon({ session, runtime: 'tick', runDir }) // fresh daemon = 0 clients
+    await startSupervisorDaemon({ session, runtime: 'tick', runDir }) // fresh daemon = 0 clients
     expect(await waitFor(() => sessionAlive(runDir, session))).toBe(true)
     expect(await waitFor(() => !existsSync(marker))).toBe(true) // start-cleanup removed the stale lie
     killSession(runDir, session)

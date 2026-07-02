@@ -24,7 +24,7 @@ d('deliverToHost (supervisor-socket delivery — bracketed paste + CR)', () => {
     try {
       // probe child: raw mode (no line-discipline cooking), read exactly n bytes, dump to a file
       const argv = ['sh', '-c', `stty raw -echo; head -c ${n} > '${out}'; sleep 5`]
-      const r = startSupervisorDaemon({ session: 'dlv', runtime: 'tick', runDir, serve: { argv, env: { PATH: process.env.PATH ?? '' }, cwd: runDir } })
+      const r = await startSupervisorDaemon({ session: 'dlv', runtime: 'tick', runDir, serve: { argv, env: { PATH: process.env.PATH ?? '' }, cwd: runDir } })
       expect(r.state).toBe('started')
       await sleep(400) // let the probe reach raw mode
       const res = await deliverToHost(runDir, 'dlv', msg)

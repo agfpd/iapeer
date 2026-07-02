@@ -5,7 +5,7 @@
 // serving is productionized (a later block) the daemon-spawn argv is repointed at the installed
 // binary; for now it self-spawns from source (bun + this file), which is what the tests exercise.
 import { spawn as nodeSpawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runSupervisorClient, sessionAlive } from './client.ts'
 import { defaultRunDir, logPath, pidPath, servePath, sockPath } from './paths.ts'
@@ -86,8 +86,10 @@ export function resolveDaemonSelfArgv(execPath: string, selfPath: string): strin
 }
 const selfArgv = (): string[] => resolveDaemonSelfArgv(process.execPath, fileURLToPath(import.meta.url))
 
-/** Start a detached supervisor daemon and wait until its socket is live. Idempotent. */
-export function startSupervisorDaemon(opts: StartDaemonOptions): StartDaemonResult {
+/** Start a detached supervisor daemon and wait until its socket is live. Idempotent.
+ *  Async: the socket-wait yields the event loop (a sync busy-wait here froze the whole
+ *  router daemon for the bring-up window on every warm wake). */
+export async function startSupervisorDaemon(opts: StartDaemonOptions): Promise<StartDaemonResult> {
   const { session, runtime, runDir } = opts
   if (sessionAlive(runDir, session)) return { state: 'already-running' }
   mkdirSync(runDir, { recursive: true })
@@ -111,13 +113,21 @@ export function startSupervisorDaemon(opts: StartDaemonOptions): StartDaemonResu
     detached: true,
     stdio: ['ignore', out, out],
   })
+  // The child dup'd `out` at spawn — close the PARENT copy immediately. This function
+  // runs inside the always-on router daemon on EVERY warm wake; an unclosed fd here bled
+  // the daemon ~1 fd/wake toward EMFILE (live-observed) → eventual full routing outage.
+  try {
+    closeSync(out)
+  } catch {
+    /* */
+  }
   child.unref()
   const deadline = Date.now() + (opts.timeoutMs ?? 5000)
   while (Date.now() < deadline) {
     if (existsSync(sockPath(runDir, session)) && sessionAlive(runDir, session)) {
       return { state: 'started', pid: Number(readFileSync(pidPath(runDir, session), 'utf8')) }
     }
-    Bun.sleepSync(80)
+    await Bun.sleep(80) // yield the loop — never a sync block in the daemon's wake path
   }
   // Failed to come up — drop the serve-spec we wrote so it can't mislead a later read.
   if (opts.serve)
@@ -192,7 +202,7 @@ export async function runSupervisorCli(argv: string[]): Promise<number> {
       return 0 // unreachable
     }
     case 'start': {
-      const r = startSupervisorDaemon({ session: a!, runtime: b || 'claude', runDir })
+      const r = await startSupervisorDaemon({ session: a!, runtime: b || 'claude', runDir })
       console.log(`${r.state}${r.pid ? ` pid=${r.pid}` : ''}${r.detail ? ` — ${r.detail}` : ''}: ${a}`)
       return r.state === 'failed' ? 1 : 0
     }
@@ -200,7 +210,7 @@ export async function runSupervisorCli(argv: string[]): Promise<number> {
       await runSupervisorClient(runDir, a!)
       return 0
     case 'up': {
-      const r = startSupervisorDaemon({ session: a!, runtime: b || 'claude', runDir })
+      const r = await startSupervisorDaemon({ session: a!, runtime: b || 'claude', runDir })
       if (r.state === 'failed') {
         console.error(r.detail)
         return 1
