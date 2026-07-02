@@ -314,6 +314,13 @@ export interface RuntimeAdapter {
    *  superviseTick uses THIS for idle/quiet age. null for a router (no transcript). */
   lastTurnMtime(cwd: string): number | null
 
+  /** В58 — newest FILE mtime among the session's CHILD workflow/subagent transcripts (a running workflow
+   *  writes them continuously). A peer that launched a long workflow (>1h) makes NO turns of its own, so
+   *  lastTurnMtime is stale and the idle-reap would cut the busy session mid-work. superviseTick folds
+   *  THIS into the idle proxy so live child work keeps the session alive. Optional — null / undefined for
+   *  runtimes without a subagent layout (routers, codex). */
+  childActivityMtime?(cwd: string): number | null
+
   /** Resume preflight — validate a resume request fail-loud (never silent fresh).
    *  Returns the resolved ref (claude uuid) or ok:false with a reason. */
   resolveResume(cwd: string): { ok: boolean; ref?: string; reason?: string }

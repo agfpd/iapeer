@@ -346,6 +346,55 @@ export const claudeAdapter: RuntimeAdapter = {
   },
 
   /**
+   * В58 — newest FILE mtime among the session's CHILD workflow/subagent transcripts, or null when there
+   * are none. Claude writes them under `~/.claude/projects/<slug>/<session-uuid>/subagents/**\/agent-*.jsonl`
+   * (a plain subagent) and `<session-uuid>/subagents/workflows/<wf>/agent-*.jsonl` (a workflow subagent),
+   * appending continuously while the child runs — so a fresh mtime here means the peer is actively
+   * driving a workflow even though it makes no turns of its OWN (lastTurnMtime is stale). superviseTick
+   * folds this into the idle proxy so a peer on a long (>1h) workflow is not idle-reaped mid-work. Bounded
+   * recursive walk; a super-fresh file (< 60s) short-circuits so the common active-workflow case is cheap.
+   */
+  childActivityMtime(cwd: string): number | null {
+    const root = transcriptDir(cwd)
+    let sessions: string[]
+    try {
+      sessions = readdirSync(root)
+    } catch {
+      return null
+    }
+    let newest = 0
+    const freshFloor = Date.now() - 60_000 // any file newer than this is "definitely active" → stop early
+    const walk = (dir: string, depth: number): boolean => {
+      if (depth > 4) return false // <session>/subagents/workflows/<wf>/agent-*.jsonl — bounded
+      let items: import('fs').Dirent[]
+      try {
+        items = readdirSync(dir, { withFileTypes: true })
+      } catch {
+        return false
+      }
+      for (const it of items) {
+        const p = join(dir, it.name)
+        if (it.isDirectory()) {
+          if (walk(p, depth + 1)) return true
+        } else if (it.isFile() && it.name.endsWith('.jsonl')) {
+          try {
+            const mt = statSync(p).mtimeMs
+            if (mt > newest) newest = mt
+            if (mt > freshFloor) return true // active work found — no need to scan the rest
+          } catch {
+            /* race — entry vanished */
+          }
+        }
+      }
+      return false
+    }
+    for (const s of sessions) {
+      if (walk(join(root, s, 'subagents'), 0)) break
+    }
+    return newest > 0 ? newest : null
+  },
+
+  /**
    * Resume preflight (fail-loud — never a silent fresh fallback): resolve the
    * newest transcript uuid for cwd via the claude-slug dir scan (lifecycle.
    * findLatestClaudeTranscript / spawner.findLatestTranscript). {ok:true, ref}

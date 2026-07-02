@@ -1429,6 +1429,29 @@ describe('Б2 reap/wake hardening', () => {
     }
   })
 
+  test('В58: fresh CHILD workflow activity floors the idle proxy — a peer on a long workflow is NOT reaped', () => {
+    const now = Date.now()
+    const a = setup('wf-idle', { wakeMsAgo: 7_200_000 }) // woke 2h ago, no turns of its own
+    const b = setup('wf-busy', { wakeMsAgo: 7_200_000 })
+    try {
+      // no child activity + stale last turn → reaped-idle
+      const outIdle = superviseTick(a.cfg, {
+        env: a.env, nowMs: now, sessionAlive: () => true, killSession: () => {},
+        lastTurnMtime: () => now - 7_200_000, childActivityMtime: () => null,
+      })
+      expect(outIdle.find(x => x.identity === 'claude-wf-idle')?.action).toBe('reaped-idle')
+      // a live workflow writing subagent transcripts NOW → floor is fresh → NOT reaped
+      const outBusy = superviseTick(b.cfg, {
+        env: b.env, nowMs: now, sessionAlive: () => true, killSession: () => {},
+        lastTurnMtime: () => now - 7_200_000, childActivityMtime: () => now - 5_000, // a subagent wrote 5s ago
+      })
+      expect(outBusy.find(x => x.identity === 'claude-wf-busy')?.action).toBe('alive')
+    } finally {
+      a.cleanup()
+      b.cleanup()
+    }
+  })
+
   test('В7: a fresh lastDelivered floors the idle proxy — a just-delivered message is NOT reaped away', () => {
     const now = Date.now()
     // an otherwise-idle session (woke 2h ago, last turn 2h ago) — would be reaped WITHOUT the marker

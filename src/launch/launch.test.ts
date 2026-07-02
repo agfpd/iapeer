@@ -120,6 +120,16 @@ describe('codexAdapter.isInputReady', () => {
 })
 
 
+describe('В58 claudeAdapter.childActivityMtime (idle-proxy sees a running workflow)', () => {
+  // NB the real-file scan cannot be exercised hermetically here: transcriptDir resolves the home via
+  // os.homedir() (which ignores $HOME on POSIX), so a temp-HOME slug is unreachable. The scan is
+  // runtime-verified (returns a real subagent mtime for a repo cwd, null for a nonexistent one), and the
+  // idle-proxy FOLD is unit-tested via the childActivityMtime seam in lifecycle.test.ts.
+  test('a cwd with no transcript slug dir → null (the null path is safe)', () => {
+    expect(claudeAdapter.childActivityMtime!('/tmp/iapeer-no-such-cwd-xyz')).toBeNull()
+  })
+})
+
 describe('telegramAdapter (router — no TUI surface)', () => {
   test('router predicates are trivial', () => {
     expect(telegramAdapter.bootDialogKeys('anything')).toBeNull()

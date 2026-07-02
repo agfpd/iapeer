@@ -1237,6 +1237,9 @@ export interface SuperviseDeps {
    *  idle) and NOT the pane-log mtime (a statusline re-render ticks it at idle); both falsely keep an
    *  idle session young. Tests inject a controlled value to exercise the idle/quiet age hermetically. */
   lastTurnMtime?: (runtime: string, cwd: string) => number | null
+  /** В58 — child workflow/subagent activity seam (default: the adapter's childActivityMtime). Folded into
+   *  the idle proxy so a peer driving a long workflow (no turns of its own) is not reaped mid-work. */
+  childActivityMtime?: (runtime: string, cwd: string) => number | null
   /** Liveness seam (default: the real `sessionAlive` = pty-host pid-file check). Tests inject a fixed
    *  verdict so the idle path is exercised hermetically — no live pty session needed. */
   sessionAlive?: (sock: string, identity: string) => boolean
@@ -1251,6 +1254,7 @@ interface SuperviseCtx {
   env: NodeJS.ProcessEnv
   nowMs: number
   lastTurnMt: (runtime: string, cwd: string) => number | null
+  childActivityMt: (runtime: string, cwd: string) => number | null
   isAlive: (sock: string, identity: string) => boolean
   kill: (sock: string, identity: string) => void
   verbose: boolean
@@ -1265,7 +1269,7 @@ interface SuperviseCtx {
  * returns exactly one outcome; the trace side-effects mirror the prior inline behaviour.
  */
 function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
-  const { cfg, env, nowMs, lastTurnMt, isAlive, kill, verbose, trace } = ctx
+  const { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace } = ctx
   // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
   if (isLaunchdManaged(s.personality, env)) {
     if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
@@ -1356,11 +1360,18 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   const ephemeral = isEphemeralPeer(s.cwd)
   let lt = 0
   try { lt = lastTurnMt(s.runtime, s.cwd) ?? 0 } catch { /* unreadable → wokeAt floor */ }
+  // В58 — fold in CHILD workflow/subagent activity. A peer driving a long (>1h) workflow makes NO turns
+  // of its own, so lt is stale; without this the busy-with-workflow session is idle-reaped mid-work (live
+  // incident: iapeer-memory cut mid-audit). A running workflow writes its subagent transcripts
+  // continuously → their fresh mtime is genuine activity. Only RAISES the floor (never keeps a truly idle
+  // session alive: a finished workflow's files are old).
+  let childMt = 0
+  try { childMt = childActivityMt(s.runtime, s.cwd) ?? 0 } catch { /* no subagent layout → ignored */ }
   // В7 — fold in the last CONFIRMED live delivery. A message delivered just as the session crosses
   // idleSecs (codex acks BEFORE it writes the turn record) would otherwise be reaped out from under the
   // just-delivered message before lt catches up — a silent loss behind ok:true. lastDelivered only ever
   // RAISES the floor (a delivery is activity), so it can never keep a genuinely idle session alive.
-  const mt = Math.max(lt, s.wokeAt, readLastDelivered(cfg, s.identity))
+  const mt = Math.max(lt, s.wokeAt, childMt, readLastDelivered(cfg, s.identity))
   const ageSecs = Math.floor((nowMs - mt) / 1000)
   // wake_policy:ephemeral M2 — die-after-reply: an ARMED ephemeral session (the
   // daemon routed its outbound reply) is reaped after a QUIET window, checked
@@ -1431,6 +1442,8 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const env = deps.env ?? process.env
   const nowMs = deps.nowMs ?? Date.now()
   const lastTurnMt = deps.lastTurnMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).lastTurnMtime(c))
+  const childActivityMt =
+    deps.childActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).childActivityMtime?.(c) ?? null)
   // Default seams bind the injected env so a sandboxed tick never reads/kills the real fleet.
   const isAlive = deps.sessionAlive ?? ((sock: string, identity: string) => sessionAlive(sock, identity, env))
   const kill = deps.killSession ?? ((sock: string, identity: string) => killSession(sock, identity, env))
@@ -1450,7 +1463,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const trace = (fields: Record<string, string | number | undefined>): void =>
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise', ...fields }, { env, nowMs })
   const out: SuperviseOutcome[] = []
-  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, isAlive, kill, verbose, trace }
+  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace }
   for (const s of readSessionStates(cfg)) {
     // Per-peer ISOLATION: a throw while evaluating ONE peer must NOT abort the whole sweep — that is
     // the silent fleet-wide reap-outage class (one malformed peer-state and NO peer gets reaped, the
