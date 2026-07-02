@@ -70,6 +70,51 @@ export function stripQueries(s: string): string {
   return s.replace(QUERY_RE, '')
 }
 
+// ── chunk-boundary query buffering (В24) ────────────────────────────────────────
+// A capability query split across a pty read boundary (`\x1b[>` in one chunk, `q` in the next)
+// matches NEITHER chunk → the daemon neither answers nor strips it, and the fragment LEAKS to an
+// attached client whose real terminal answers it as keystrokes into the child. Before running the
+// capability detect/strip on a chunk, carry a trailing INCOMPLETE escape into the next one.
+
+const MAX_DANGLING = 16 // a real short query fits well within this — a longer trailing ESC is passed through
+
+function isCompleteEscape(seq: string): boolean {
+  if (seq.length < 2) return false // a bare ESC — could begin any sequence
+  switch (seq[1]) {
+    case '[': {
+      // CSI — parameter/intermediate bytes then a FINAL byte 0x40–0x7e
+      for (let i = 2; i < seq.length; i++) {
+        const c = seq.charCodeAt(i)
+        if (c >= 0x40 && c <= 0x7e) return true
+      }
+      return false
+    }
+    case ']':
+    case 'P':
+    case 'X':
+    case '^':
+    case '_':
+      // OSC / DCS / SOS / PM / APC — terminated by BEL or ST (\x1b\)
+      return seq.includes('\x07') || seq.includes('\x1b\\')
+    case 'O':
+      return seq.length >= 3 // SS3 (ESC O <byte>)
+    default:
+      return true // any other 2-byte escape (ESC + one final char) is complete once the 2nd byte arrives
+  }
+}
+
+/** Split `s` into [complete, dangling]: `dangling` is a trailing incomplete escape sequence to prepend
+ *  to the NEXT chunk before capability detect/strip. Bounded — a lone trailing ESC with no follow-up
+ *  never stalls the forward forever (it is passed through once it exceeds MAX_DANGLING). Pure/testable. */
+export function splitDanglingEscape(s: string): [string, string] {
+  const esc = s.lastIndexOf('\x1b')
+  if (esc < 0) return [s, '']
+  const tail = s.slice(esc)
+  if (tail.length > MAX_DANGLING) return [s, '']
+  if (isCompleteEscape(tail)) return [s, '']
+  return [s.slice(0, esc), tail]
+}
+
 // ── key-name → pty bytes (boot-driver, serving slice a) ─────────────────────────
 // Translate a tmux send-keys-style key list into the raw bytes a pty expects, so the supervisor
 // boot-driver can answer startup dialogs (codex trust/update/hooks, claude trust/resume-picker) off

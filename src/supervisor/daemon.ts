@@ -22,6 +22,7 @@ import {
   frame,
   makeFramer,
   parseSize,
+  splitDanglingEscape,
   stripQueries,
 } from './protocol.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry } from './paths.ts'
@@ -86,6 +87,10 @@ const BOOT_DRIVE_MS = 120_000
 // survives the hold (our key did not take), the next tick re-fires, so retries stay bounded, not lost.
 const NAG_POLL_MS = 2000
 const NAG_COOLDOWN_MS = 4000
+// В25 — cap the attach-snapshot stabilization wait: under saturating output the model never goes quiet,
+// so without a budget firstAttach would never complete (frozen attach). On timeout we snapshot the
+// current model; live-forward delivers the rest once the gate lifts.
+const MODEL_STABLE_BUDGET_MS = 500
 
 // Bun-native PTY (Bun ≥1.3.5) is not yet in @types/bun — type the slice we use.
 interface PtyChild {
@@ -187,7 +192,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // (same inode) so a normal cap never triggers a spurious reopen. Tied to output (no idle wakeups) —
   // exactly when the log matters.
   const healPaneLog = (): void => {
-    if (!opts.paneLogPath || paneLogFd < 0) return
+    if (!opts.paneLogPath) return
     const now = Date.now()
     if (now - paneLogCheckedMs < PANELOG_HEAL_MS) return
     paneLogCheckedMs = now
@@ -197,7 +202,12 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     } catch {
       ino = -1 // path gone
     }
-    if (ino !== paneLogIno) openPaneLog()
+    // В19 — reopen when the fd is DEAD (initial open failed / a prior reopen failed) as well as when the
+    // path maps to a DIFFERENT inode (unlinked/replaced). The old `paneLogFd < 0` early-return above made
+    // a single failed open PERMANENT — the log stayed blind for the whole session (composer-busy detect,
+    // telegram typing, boot ready-gate all read this file). fd<0 with ino=-1 (path also gone) still needs
+    // a reopen attempt: openPaneLog recreates the file.
+    if (paneLogFd < 0 || ino !== paneLogIno) openPaneLog()
   }
   openPaneLog()
 
@@ -210,7 +220,11 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // NO E3 capability) → smeared/overlapping scroll-up history. After the catch-up the supervisor does
   // NOTHING on resize — the child redraws its viewport (SIGWINCH) and the terminal reflows its own
   // scrollback, like a directly-launched claude.
-  const painted = new WeakSet<object>()
+  // В23 — a SET (not a WeakSet) so `.size` gates the .attached marker on INTERACTIVE clients only. A
+  // client is painted iff it sent a FRAME_RESIZE (runClient always does on connect; a deliver-client
+  // NEVER resizes). Using clients.size counted deliver-clients too → a delivery briefly marked "human
+  // attached", falsely holding a concurrent delivery in the composer queue. Kept in sync with removals.
+  const painted = new Set<object>()
   // INITIALIZING GATE (scrollback fix): a client is held OUT of live output-forwarding from connect until
   // its one-time attach snapshot has been sent. Without this, live frames (claude's relative-cursor
   // redraws) race ahead of the snapshot and corrupt the fresh terminal. The model still ingests those
@@ -223,6 +237,10 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // write's parse-callback; `writeSeq` bumps on every write so the drain can detect new arrivals mid-await.
   let writeChain: Promise<void> = Promise.resolve()
   let writeSeq = 0
+  // В24 — a trailing INCOMPLETE escape sequence carried from one child-output chunk to the next, so a
+  // capability query split across a pty read boundary is detected/stripped as a whole (client-facing only;
+  // the model + pane-log always get the raw bytes immediately).
+  let queryTail = ''
   // ATTACHED-CLIENT MARKER (spawn-flip Ф0b-3 slice 3c): keep `<runDir>/<session>.attached` in sync with
   // clients.size — present iff ≥1 operator is attached. The warm-deliver path (a DIFFERENT process)
   // reads it to gate the hosted busy-composer hold: hold ONLY when a human is attached (their unfinished
@@ -231,7 +249,9 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   const attachedMarker = attachedPath(runDir, session)
   const syncAttached = (): void => {
     try {
-      if (clients.size > 0) writeFileSync(attachedMarker, '')
+      // В23 — gate on PAINTED (interactive) clients, not raw client count: a deliver-client connection
+      // must never read as "a human is attached".
+      if (painted.size > 0) writeFileSync(attachedMarker, '')
       else if (existsSync(attachedMarker)) unlinkSync(attachedMarker)
     } catch {
       /* */
@@ -253,7 +273,11 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   /** Backpressure-safe send to one client; drop it (and report false) if its socket is dead. */
   const sendClient = (s: { write(b: Buffer): number }, buf: Buffer): boolean => {
     const ok = writerFor(s).send(buf)
-    if (!ok) clients.delete(s)
+    if (!ok) {
+      clients.delete(s)
+      painted.delete(s as object) // В23 — keep the painted set (marker gate) in sync on every drop
+      syncAttached()
+    }
     return ok
   }
 
@@ -269,19 +293,26 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         const buf = Buffer.isBuffer(d) ? d : typeof d === 'string' ? Buffer.from(d, 'utf8') : Buffer.from(d)
         // PANE-LOG: the RAW child bytes, exactly as pipe-pane writes them (before any query-stripping
         // for clients) — written as a Buffer, never a string. The `s` below is for query DETECTION only.
-        if (paneLogFd >= 0) {
-          healPaneLog() // reopen if the path was unlinked/replaced out from under us (Defect 2)
-          try {
-            writeSync(paneLogFd, buf)
-          } catch {
-            /* best-effort */
+        if (opts.paneLogPath) {
+          healPaneLog() // reopen if never-opened / unlinked / replaced out from under us (Defect 2 + В19)
+          if (paneLogFd >= 0) {
+            try {
+              writeSync(paneLogFd, buf)
+            } catch {
+              /* best-effort */
+            }
           }
         }
-        const s = buf.toString('latin1')
         writeSeq++ // a new write arrived (lets the attach drain detect bytes that land mid-await)
-        writeChain = new Promise<void>(resolve => xterm.write(buf, () => resolve())) // authoritative model (+ parse barrier)
-        for (const r of capabilityResponses(s)) child.terminal.write(r) // answer capability queries
-        const fwd = Buffer.from(stripQueries(s), 'latin1') // forward to clients sans queries (daemon is authoritative)
+        writeChain = new Promise<void>(resolve => xterm.write(buf, () => resolve())) // authoritative model (+ parse barrier) — RAW bytes
+        // В24 — run capability detect/strip over the chunk PLUS any carried tail, holding back a trailing
+        // INCOMPLETE escape for the next chunk so a query split across a pty read boundary is matched as a
+        // whole. The model + pane-log above get the RAW bytes immediately; only the client-facing detect/
+        // strip is tail-buffered (the held bytes reach the client next chunk, once complete).
+        const [complete, dangling] = splitDanglingEscape(queryTail + buf.toString('latin1'))
+        queryTail = dangling
+        for (const r of capabilityResponses(complete)) child.terminal.write(r) // answer capability queries
+        const fwd = Buffer.from(stripQueries(complete), 'latin1') // forward to clients sans queries (daemon is authoritative)
         if (fwd.length) {
           // Forward live output to every ATTACHED client — but NOT to one still INITIALIZING (its
           // snapshot hasn't been sent; these bytes are already in the model and will be in that snapshot,
@@ -337,6 +368,12 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // bytes still land in the model and bump writeSeq — loop until the sequence holds steady so the snapshot
   // reflects every byte received so far (no stale screen, no dropped tail).
   const awaitModelParsedStable = async (): Promise<void> => {
+    // В25 — BOUND the stabilization. Under a saturating output stream (a big file dump, a verbose build,
+    // a tailing log) every await window sees a new write → seq never holds steady → firstAttach never
+    // completes, so the attaching operator sees a FROZEN blank screen while their keystrokes go to the
+    // child blind. Cap the wait: on timeout, snapshot the CURRENT model — bytes that land after are
+    // delivered by normal live-forward once the gate lifts (the model already ingests them).
+    const deadline = Date.now() + MODEL_STABLE_BUDGET_MS
     for (;;) {
       const seq = writeSeq
       try {
@@ -345,6 +382,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         /* a write parse-callback should not reject */
       }
       if (seq === writeSeq) return
+      if (Date.now() > deadline) return // saturating output — snapshot now, live-forward catches the rest
     }
   }
   // Build + send the one-time attach SNAPSHOT (full resolved model: scrollback + screen + cursor + SGR colour
@@ -428,6 +466,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       const sz = parseSize(payload)
       if (!painted.has(s as object)) {
         painted.add(s as object)
+        syncAttached() // В23 — this client is now INTERACTIVE (it resized) → the .attached marker reflects it
         void firstAttach(s, sz.cols, sz.rows) // split-resize: model → snapshot → gate-lift → child (clean frame0)
       } else {
         applyGeometry(sz.cols, sz.rows) // LATER resize: one real resize, no re-snapshot
@@ -458,16 +497,18 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         framers.get(s)?.(d)
       },
       drain(s: object) {
-        if (!writers.get(s)?.flush()) { clients.delete(s); syncAttached() } // writable again → flush queued tail
+        if (!writers.get(s)?.flush()) { clients.delete(s); painted.delete(s); syncAttached() } // writable again → flush queued tail
       },
       close(s: object) {
         clients.delete(s)
+        painted.delete(s)
         writers.delete(s)
         syncAttached()
         restoreServeGeometryIfIdle() // last client gone → un-stick the pty from its size
       },
       error(s: object) {
         clients.delete(s)
+        painted.delete(s)
         writers.delete(s)
         syncAttached()
         restoreServeGeometryIfIdle()
@@ -542,8 +583,16 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       } catch {
         return // transient model read — retry next tick
       }
+      // В21 — check the deadline FIRST, independent of the action. Previously the clearInterval only
+      // fired in the `else` branch, so a boot-dialog predicate that kept returning 'dialog' (a resume-
+      // picker whose layout changed after a claude update, a screen matching the dialog pattern) drove
+      // keystrokes into the pty EVERY tick for the whole session — the BOOT_DRIVE_MS backstop was dead.
+      if (Date.now() > driveDeadline) {
+        clearInterval(driver)
+        return
+      }
       if (action.kind === 'dialog') child.terminal.write(action.bytes)
-      else if (action.kind === 'ready' || Date.now() > driveDeadline) clearInterval(driver)
+      else if (action.kind === 'ready') clearInterval(driver)
     }, BOOT_POLL_MS)
     ;(driver as { unref?: () => void }).unref?.()
   }

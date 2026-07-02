@@ -24,10 +24,12 @@ async function waitFor(pred: () => boolean, timeoutMs = 5000, step = 40): Promis
 }
 
 interface Client { end(): void; terminate(): void }
-async function attach(runDir: string, session: string): Promise<Client> {
+// An INTERACTIVE client sends a FRAME_RESIZE on connect (as runClient does) → it becomes "painted" and
+// counts toward the .attached marker. A deliver-client (deliverToHost) NEVER resizes → not painted (В23).
+async function attach(runDir: string, session: string, paint = true): Promise<Client> {
   const sock = await Bun.connect({
     unix: sockPath(runDir, session),
-    socket: { open(s) { s.write(frame(FRAME_RESIZE, sizePayload(80, 24))) }, data() { /* */ } },
+    socket: { open(s) { if (paint) s.write(frame(FRAME_RESIZE, sizePayload(80, 24))) }, data() { /* */ } },
   })
   return {
     end: () => { try { sock.end() } catch { /* */ } },
@@ -40,7 +42,24 @@ const mkRunDir = (): string => { const d2 = mkdtempSync(join(tmpdir(), 'iapeer-a
 afterEach(() => { for (const d2 of dirs.splice(0)) rmSync(d2, { recursive: true, force: true }) })
 
 d('supervisor .attached marker (the hosted occupancy gate signal)', () => {
-  test('present ⟺ clients.size>0 across multiple clients (no stuck "attached" on partial detach)', async () => {
+  test('В23: a deliver-client (no FRAME_RESIZE) does NOT set the marker — only interactive clients do', async () => {
+    const runDir = mkRunDir(), session = 'dv'
+    await startSupervisorDaemon({ session, runtime: 'tick', runDir })
+    expect(await waitFor(() => sessionAlive(runDir, session))).toBe(true)
+    const marker = attachedPath(runDir, session)
+    const deliverClient = await attach(runDir, session, false) // deliver-style: connects, never resizes
+    await sleep(200)
+    expect(existsSync(marker)).toBe(false) // NOT "a human is attached" — a delivery must not set the gate
+    // now a real interactive client attaches → marker appears
+    const human = await attach(runDir, session, true)
+    expect(await waitFor(() => existsSync(marker))).toBe(true)
+    human.end()
+    expect(await waitFor(() => !existsSync(marker))).toBe(true) // the deliver-client alone leaves it absent
+    deliverClient.end()
+    killSession(runDir, session)
+  })
+
+  test('present ⟺ interactive(painted) clients>0 across multiple clients (no stuck "attached" on partial detach)', async () => {
     const runDir = mkRunDir(), session = 'mk'
     await startSupervisorDaemon({ session, runtime: 'tick', runDir })
     expect(await waitFor(() => sessionAlive(runDir, session))).toBe(true)

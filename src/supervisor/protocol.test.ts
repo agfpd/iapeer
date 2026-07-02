@@ -14,6 +14,7 @@ import {
   makeFramer,
   parseSize,
   sizePayload,
+  splitDanglingEscape,
   stripQueries,
 } from './protocol.ts'
 
@@ -69,6 +70,37 @@ describe('capability responder (the queries @xterm does not auto-answer)', () =>
     const out = stripQueries(s)
     expect(out).toBe('beforemidafter')
     expect(out).not.toContain('\x1b[6n')
+  })
+})
+
+describe('В24 splitDanglingEscape (chunk-boundary query buffering)', () => {
+  test('holds an INCOMPLETE trailing CSI so a split query is matched next chunk', () => {
+    // XTVERSION `\x1b[>q` split as `...\x1b[>` | `q`
+    const [c1, tail1] = splitDanglingEscape('output\x1b[>')
+    expect(c1).toBe('output')
+    expect(tail1).toBe('\x1b[>')
+    // next chunk: prepend the tail → the whole query is now present and answered
+    const [c2, tail2] = splitDanglingEscape(tail1 + 'q\r\n')
+    expect(tail2).toBe('')
+    expect(capabilityResponses(c2)).toEqual(['\x1bP>|iapeer-pts(0.1)\x1b\\'])
+    expect(stripQueries(c2)).toBe('\r\n') // the reassembled query is stripped from the client stream
+  })
+  test('holds an incomplete OSC-11 (no terminator yet)', () => {
+    const [c, tail] = splitDanglingEscape('x\x1b]11;?')
+    expect(c).toBe('x')
+    expect(tail).toBe('\x1b]11;?')
+    const [, tail2] = splitDanglingEscape(tail + '\x07')
+    expect(tail2).toBe('') // BEL completes it
+  })
+  test('a COMPLETE trailing escape is NOT held', () => {
+    expect(splitDanglingEscape('a\x1b[0mb')).toEqual(['a\x1b[0mb', '']) // SGR complete
+    expect(splitDanglingEscape('a\x1b]11;?\x07')).toEqual(['a\x1b]11;?\x07', '']) // OSC complete (BEL)
+    expect(splitDanglingEscape('plain text')).toEqual(['plain text', '']) // no ESC
+  })
+  test('a bare trailing ESC is held; an over-long trailing run is passed through (never stalls)', () => {
+    expect(splitDanglingEscape('hi\x1b')).toEqual(['hi', '\x1b'])
+    const long = '\x1b' + 'x'.repeat(40) // > MAX_DANGLING and not a real query → pass through
+    expect(splitDanglingEscape('z' + long)).toEqual(['z' + long, ''])
   })
 })
 
