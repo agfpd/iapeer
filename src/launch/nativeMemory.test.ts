@@ -4,7 +4,7 @@
 // write must preserve byte-meaningfully.
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -189,5 +189,37 @@ describe('preTrustCodexCwd (birth-time trust, codex global config)', () => {
     const env = { HOME: home } as NodeJS.ProcessEnv
     expect(preTrustCodexCwd('/peers/first', env).state).toBe('written')
     expect(readFileSync(codexGlobalConfigPath(env), 'utf8')).toBe('[projects."/peers/first"]\ntrust_level = "trusted"\n')
+  })
+
+  test('В42: refuses a cwd carrying a TOML-unsafe char (" or \\) — never writes a corrupting key', () => {
+    const home = mkTmp()
+    const env = { HOME: home } as NodeJS.ProcessEnv
+    const bad = preTrustCodexCwd('/peers/we"ird', env)
+    expect(bad.state).toBe('failed')
+    expect(bad.detail).toContain('TOML-key-safe')
+    // fail-closed BEFORE any dir/file creation — the shared config is untouched
+    expect(existsSync(codexGlobalConfigPath(env))).toBe(false)
+  })
+
+  test('В43: removeCodexCwdTrust reconstructs the realpath key of an ALREADY-DELETED cwd via its symlinked ancestor', () => {
+    const home = mkTmp()
+    const env = { HOME: home } as NodeJS.ProcessEnv
+    const realParent = mkTmp() // canonical dir
+    const linkParent = join(mkTmp(), 'link')
+    symlinkSync(realParent, linkParent) // linkParent → realParent (a symlink component)
+    const cwd = join(linkParent, 'peer')
+    mkdirSync(cwd, { recursive: true })
+    // preTrust stores the RESOLVED key (realpath of realParent + /peer), which differs from the
+    // symlinked literal — proving the ancestor reconstruction below is genuinely required, not a
+    // trivial literal match.
+    preTrustCodexCwd(cwd, env)
+    const stored = readFileSync(codexGlobalConfigPath(env), 'utf8')
+    expect(stored).toContain(`${realpathSync(realParent)}/peer"]`)
+    expect(stored).not.toContain(linkParent) // the symlinked literal is NOT the key
+    // reap: the cwd is gone → realpath(cwd) throws → literal misses the resolved key…
+    rmSync(cwd, { recursive: true, force: true })
+    // …but the ancestor-realpath reconstruction (realpath(linkParent) + "/peer") matches it
+    expect(removeCodexCwdTrust(cwd, env).state).toBe('written')
+    expect(readFileSync(codexGlobalConfigPath(env), 'utf8')).not.toContain('trust_level')
   })
 })

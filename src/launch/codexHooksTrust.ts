@@ -49,6 +49,7 @@ import { createHash } from 'crypto'
 import { dirname } from 'path'
 import { writeFileAtomic } from '../storage/index.ts'
 import { codexGlobalConfigPath } from './nativeMemory.ts'
+import { assertTomlSafeKey } from './tomlKey.ts'
 
 /** hooks.json event names → the snake_case labels codex keys state with
  *  (upstream `hook_event_key_label`). */
@@ -224,14 +225,6 @@ function resolveHooksSource(hooksJsonPath: string): string {
   // /tmp → /private/tmp made a literal entry miss). The file must exist —
   // we parse it anyway.
   return realpathSync(hooksJsonPath)
-}
-
-/** TOML basic strings treat `\` and `"` specially — paths carrying them would
- *  need escaping codex-side too; refuse instead of guessing. */
-function assertTomlSafeKey(key: string): void {
-  if (key.includes('"') || key.includes('\\')) {
-    throw new Error(`hooks.json path is not TOML-key-safe (contains " or \\): ${key}`)
-  }
 }
 
 /**

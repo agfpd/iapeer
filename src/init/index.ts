@@ -216,7 +216,34 @@ export function codexConfigPath(options: StorageOptions = {}): string {
  *     serves every codex peer with its own identity (env_http_headers, verified live).
  * Returns {path, added} (added=false when the block already existed).
  */
-export function writeCodexMcpConfig(daemonUrl: string, options: StorageOptions = {}): { path: string; added: boolean } {
+/**
+ * Rewrite the `url = …` line INSIDE the `[mcp_servers.iapeer]` section to `url`, leaving
+ * the rest of the shared config byte-for-byte. The section runs from its header to the next
+ * `[…]` header (the `.env_http_headers` sub-table ends it — the url sits above that anyway).
+ * Returns the input unchanged when the url already matches (idempotent) or no url line exists.
+ */
+function healCodexMcpUrl(text: string, url: string): string {
+  const want = `url = ${JSON.stringify(url)}`
+  const lines = text.split('\n')
+  let inSection = false
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(/^\s*\[([^\]]+)\]\s*$/)
+    if (header) {
+      inSection = header[1] === `mcp_servers.${IAPEER_MCP_SERVER_NAME}`
+      continue
+    }
+    if (inSection && /^\s*url\s*=/.test(lines[i]!)) {
+      if (lines[i]!.trim() !== want) lines[i] = want
+      break // exactly one url line per server section
+    }
+  }
+  return lines.join('\n')
+}
+
+export function writeCodexMcpConfig(
+  daemonUrl: string,
+  options: StorageOptions = {},
+): { path: string; added: boolean; healed?: boolean } {
   const path = codexConfigPath(options)
   let existing = ''
   try {
@@ -224,7 +251,17 @@ export function writeCodexMcpConfig(daemonUrl: string, options: StorageOptions =
   } catch {
     /* no config yet → create it */
   }
-  if (/\[mcp_servers\.iapeer\]/.test(existing)) return { path, added: false } // idempotent
+  if (/\[mcp_servers\.iapeer\]/.test(existing)) {
+    // В44 — the block already exists, but the OLD code returned added:false WITHOUT checking
+    // the url. init bakes a fallback :8765 endpoint BEFORE the daemon publishes its real port;
+    // a later IAPEER_PORT change re-inits the claude side but left this codex block pinned to a
+    // now-DEAD port forever, while initPeer reported success. Heal the url in place (idempotent
+    // by content — only our section's `url=` line is touched, everything else is preserved).
+    const healed = healCodexMcpUrl(existing, daemonUrl)
+    if (healed === existing) return { path, added: false } // already correct → no write
+    writeFileAtomic(path, healed, 0o644)
+    return { path, added: false, healed: true }
+  }
   const block =
     `\n[mcp_servers.${IAPEER_MCP_SERVER_NAME}]\n` +
     `url = ${JSON.stringify(daemonUrl)}\n` +

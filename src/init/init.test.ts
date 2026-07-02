@@ -199,6 +199,33 @@ describe('writeCodexMcpConfig (token-free recipe — dummy bearer + env_http_hea
       rmSync(codexHome, { recursive: true, force: true })
     }
   })
+  test('В44: heals a STALE url in the existing block (idempotent by content), other sections untouched', () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'iapeer-codexheal-'))
+    try {
+      const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome }
+      // an existing block pinned to a DEAD port (the re-init-after-IAPEER_PORT-change scenario)
+      writeFileSync(
+        codexConfigPath({ env }),
+        '[other]\nkeep = true\n\n[mcp_servers.iapeer]\nurl = "http://127.0.0.1:8765/mcp"\ndefault_tools_approval_mode = "approve"\n\n[mcp_servers.iapeer.env_http_headers]\n"X-IAPeer-Identity" = "PEER_IDENTITY"\n',
+      )
+      const r = writeCodexMcpConfig('http://127.0.0.1:9999/mcp', { env })
+      expect(r.added).toBe(false) // block already existed
+      expect(r.healed).toBe(true) // …but the url was corrected
+      const toml = readFileSync(codexConfigPath({ env }), 'utf8')
+      expect(toml).toContain('url = "http://127.0.0.1:9999/mcp"') // healed
+      expect(toml).not.toContain('8765') // stale port gone
+      expect((toml.match(/\[mcp_servers\.iapeer\]/g) ?? []).length).toBe(1) // no duplicate section
+      expect(toml).toContain('default_tools_approval_mode = "approve"') // sibling keys intact
+      expect(toml).toContain('"X-IAPeer-Identity" = "PEER_IDENTITY"') // sub-table intact
+      expect(toml).toContain('[other]') // foreign section intact
+      // a second run with the SAME url is a pure no-op (no write, no heal)
+      const again = writeCodexMcpConfig('http://127.0.0.1:9999/mcp', { env })
+      expect(again.added).toBe(false)
+      expect(again.healed).toBeUndefined()
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('initPeer orchestration', () => {

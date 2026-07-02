@@ -21,10 +21,11 @@
 // (slot-gated, see provision/index.ts).
 
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'fs'
-import { dirname, join } from 'path'
+import { basename, dirname, join, resolve } from 'path'
 import { homedir } from 'os'
 import type { Runtime } from '../core/constants.ts'
 import { writeFileAtomic } from '../storage/index.ts'
+import { assertTomlSafeKey } from './tomlKey.ts'
 
 export type NativeMemoryState = 'off' | 'on'
 
@@ -161,6 +162,11 @@ export function preTrustCodexCwd(cwd: string, env: NodeJS.ProcessEnv = process.e
     } catch {
       /* cwd not on disk yet → keep as given */
     }
+    // В42 — the cwd becomes a QUOTED TOML key `[projects."<real>"]`. An operator-supplied
+    // `create --path` cwd carrying `"`/`\` (legal on APFS) would corrupt the SHARED global
+    // config and break codex for every peer on the host. Refuse (the try/catch reports it
+    // as a 'failed' lever); same guard the sibling hooks-trust writer uses.
+    assertTomlSafeKey(real)
     const text = existsSync(path) ? readFileSync(path, 'utf8') : ''
     if (text.includes(`[projects."${real}"]`)) return { runtime: 'codex', path, state: 'already' }
     const block = `${text.length && !text.endsWith('\n') ? '\n' : ''}${text.trim().length ? '\n' : ''}[projects."${real}"]\ntrust_level = "trusted"\n`
@@ -170,6 +176,30 @@ export function preTrustCodexCwd(cwd: string, env: NodeJS.ProcessEnv = process.e
   } catch (e) {
     return { runtime: 'codex', path, state: 'failed', detail: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/**
+ * Resolve `p` to its real path even when the leaf (or several trailing components) no
+ * longer exists: realpath the nearest EXISTING ancestor and re-append the missing tail.
+ * Returns null only if nothing on the chain up to the root exists (impossible for `/`).
+ * Used by removeCodexCwdTrust to reconstruct the realpath-form key of an already-deleted
+ * cwd so a stale trust entry written under a symlink-resolved path is still matched.
+ */
+function realpathViaExistingAncestor(p: string): string | null {
+  let cur = resolve(p)
+  const tail: string[] = []
+  // Guard against an unbounded loop: dirname('/') === '/'.
+  for (let depth = 0; depth < 4096; depth++) {
+    try {
+      return tail.length ? join(realpathSync(cur), ...tail.slice().reverse()) : realpathSync(cur)
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return null // reached the root and even it did not resolve
+      tail.push(basename(cur))
+      cur = parent
+    }
+  }
+  return null
 }
 
 /**
@@ -192,7 +222,14 @@ export function removeCodexCwdTrust(cwd: string, env: NodeJS.ProcessEnv = proces
     } catch {
       /* cwd already deleted → only the literal form can match */
     }
-    const candidates = new Set([real, cwd])
+    // В43 — the writer keyed the entry on the RESOLVED real path. When the cwd is already
+    // DELETED (the throwaway-sandbox reap case), realpathSync(cwd) above throws and `real`
+    // falls back to the LITERAL cwd — which MISSES if any path component was a symlink
+    // (e.g. codex stored /private/tmp/… for a /tmp/… cwd). Reconstruct the resolved form
+    // from the nearest still-existing ANCESTOR + the deleted remainder, so the stale entry
+    // is found and removed instead of lingering as a phantom trust for that path.
+    const viaAncestor = realpathViaExistingAncestor(cwd)
+    const candidates = new Set([real, cwd, ...(viaAncestor ? [viaAncestor] : [])])
     const lines = readFileSync(path, 'utf8').split('\n')
     const kept: string[] = []
     let inDoomed = false
