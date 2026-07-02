@@ -87,7 +87,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
   // pty-only liveness: a router is supervisor-HOSTED. Probe by RUNTIME STATE (not the `.pty-host`
   // marker). On child death it goes false → block-watch exits → run-infra exits → launchd KeepAlive
   // respawns (the SOLE respawn owner; the supervisor never self-respawns — H4 held).
-  const isAlive = (): boolean => hostSessionAlive(identity)
+  const isAlive = (): boolean => hostSessionAlive(identity, env)
 
   const cfg: LaunchConfig = {
     claudeBin: env.CLAUDE_BIN ?? 'claude',
@@ -164,7 +164,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
   // kill the supervisor daemon (killPtyHost: SIGTERM → it SIGKILLs the child + cleans up sock/pid/serve)
   // so the detached child does not outlive bootout holding stale in-memory state. A NATURAL death
   // (stop=false) skips this: nothing to tear down, exit 0 → KeepAlive respawns a fresh bring-up.
-  if (stop) killPtyHost(identity)
+  if (stop) killPtyHost(identity, env)
   return 0
 }
 

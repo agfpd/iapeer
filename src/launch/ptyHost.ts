@@ -27,9 +27,11 @@ export const HOST_COLS = 220
 export const HOST_ROWS = 50
 
 
-/** The supervisor's run dir (session sockets/pids/serve-specs). Env-isolatable via IAPEER_ROOT. */
-export function hostRunDir(): string {
-  return defaultRunDir()
+/** The supervisor's run dir (session sockets/pids/serve-specs). Resolved from the INJECTED env so a
+ *  sandboxed caller (cfg.env) never touches the real ~/.iapeer/state/supervisor — the isolation
+ *  invariant. Defaults to process.env for the prod daemon (env === process.env). */
+export function hostRunDir(env: NodeJS.ProcessEnv = process.env): string {
+  return defaultRunDir(env)
 }
 
 /**
@@ -39,13 +41,14 @@ export function hostRunDir(): string {
  * means rolling the marker back (rm) on a STILL-RUNNING hosted session never tears it (rm affects only
  * the NEXT spawn). Rollback of a RUNNING hosted session is therefore kill-then-rm, NOT rm-alone.
  */
-export function hostSessionAlive(identity: string): boolean {
-  return hostDaemonAlive(hostRunDir(), identity)
+export function hostSessionAlive(identity: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return hostDaemonAlive(hostRunDir(env), identity)
 }
 
-/** Reap a hosted session: SIGTERM the supervisor daemon (its shutdown SIGKILLs the child + cleans up). */
-export function killPtyHost(identity: string): void {
-  killSupervisorSession(hostRunDir(), identity)
+/** Reap a hosted session: SIGTERM the supervisor daemon (its shutdown SIGKILLs the child + cleans up).
+ *  env sandboxes the run-dir: a test with an injected root must NEVER SIGTERM a real fleet peer. */
+export function killPtyHost(identity: string, env: NodeJS.ProcessEnv = process.env): void {
+  killSupervisorSession(hostRunDir(env), identity)
 }
 
 /**
@@ -56,8 +59,8 @@ export function killPtyHost(identity: string): void {
  * a human's unfinished composer input, but NEVER for the AI's own composer output when no one is
  * attached. The host equivalent of `hasAttachedTmuxClient`.
  */
-export function hasAttachedSupervisorClient(identity: string): boolean {
-  return existsSync(attachedPath(hostRunDir(), identity))
+export function hasAttachedSupervisorClient(identity: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return existsSync(attachedPath(hostRunDir(env), identity))
 }
 
 /** Current child pty geometry of a hosted session, from the supervisor's `<session>.geometry.json`
@@ -65,8 +68,8 @@ export function hasAttachedSupervisorClient(identity: string): boolean {
  *  rather than assuming the fixed HOST geometry, because a DETACHED session keeps its last client geometry
  *  (the child is no longer reverted to serve on detach — that revert caused the reattach-duplicate bug).
  *  Reading the actual geometry keeps the pane-log composer-occupancy model aligned with the real pty size. */
-export function hostGeometry(identity: string): { cols: number; rows: number } {
-  return readGeometry(hostRunDir(), identity) ?? { cols: HOST_COLS, rows: HOST_ROWS }
+export function hostGeometry(identity: string, env: NodeJS.ProcessEnv = process.env): { cols: number; rows: number } {
+  return readGeometry(hostRunDir(env), identity) ?? { cols: HOST_COLS, rows: HOST_ROWS }
 }
 
 /**
@@ -75,9 +78,9 @@ export function hostGeometry(identity: string): { cols: number; rows: number } {
  * session FAILS rather than landing in a fresh same-named session — the host equivalent of the tmux
  * `session_id:pane_id` token. null when no daemon pid is readable.
  */
-export function hostSessionToken(identity: string): string | null {
+export function hostSessionToken(identity: string, env: NodeJS.ProcessEnv = process.env): string | null {
   try {
-    const pid = readFileSync(pidPath(hostRunDir(), identity), 'utf8').trim()
+    const pid = readFileSync(pidPath(hostRunDir(env), identity), 'utf8').trim()
     return pid ? `host:${pid}` : null
   } catch {
     return null
@@ -90,9 +93,9 @@ export function hostSessionToken(identity: string): string | null {
  * scan (and the no-runtime delivery resolve) include hosted peers. Empty + cheap when flag-off (the
  * run-dir is empty).
  */
-export function listHostedPeers(): Array<{ runtime: TmuxRuntime; personality: string }> {
+export function listHostedPeers(env: NodeJS.ProcessEnv = process.env): Array<{ runtime: TmuxRuntime; personality: string }> {
   const out: Array<{ runtime: TmuxRuntime; personality: string }> = []
-  for (const s of listSupervisorSessions(hostRunDir())) {
+  for (const s of listSupervisorSessions(hostRunDir(env))) {
     if (!s.alive) continue
     const p = parseSessionName(s.session)
     if (p) out.push({ runtime: p.runtime, personality: p.personality })
@@ -118,13 +121,16 @@ export async function startPtyHost(b: {
   paneLogPath: string
   exitLogPath?: string
   invocation: LaunchInvocation
+  /** Injected env — the run-dir (serve-spec + detached spawn) resolves from THIS, so a sandboxed
+   *  launch never writes serve secrets to / spawns a process against the real ~/.iapeer. */
+  env?: NodeJS.ProcessEnv
 }): Promise<HostStartResult> {
   try {
     const { startSupervisorDaemon } = await import('../supervisor/index.ts')
     const r = await startSupervisorDaemon({
       session: b.identity,
       runtime: b.runtime,
-      runDir: hostRunDir(),
+      runDir: hostRunDir(b.env),
       serve: {
         argv: b.invocation.argv,
         env: b.invocation.env as Record<string, string>,
@@ -148,7 +154,7 @@ export async function startPtyHost(b: {
  * 2 s cadence + bootDeadline.
  */
 export async function waitHostReady(
-  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; paneLogStartByte?: number },
+  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; paneLogStartByte?: number; env?: NodeJS.ProcessEnv },
   sleep: (ms: number) => Promise<void>,
 ): Promise<boolean> {
   const log = `${b.logDir}/${b.identity}.log`
@@ -160,7 +166,7 @@ export async function waitHostReady(
   // session (the first message is then lost). See readyGateModel.loadPaneLogModel.
   for (let i = 0; i < iters; i++) {
     await sleep(2000)
-    if (!hostSessionAlive(b.identity)) return false
+    if (!hostSessionAlive(b.identity, b.env)) return false
     const view = await paneLogViewport(log, HOST_COLS, HOST_ROWS, b.paneLogStartByte ?? 0)
     if (view && b.adapter.isInputReady(view)) return true
   }
@@ -168,6 +174,6 @@ export async function waitHostReady(
 }
 
 /** Deliver the first/next message to the hosted session over its supervisor socket. */
-export function deliverHosted(identity: string, message: string): Promise<DeliverResult> {
-  return deliverToHost(hostRunDir(), identity, message)
+export function deliverHosted(identity: string, message: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
+  return deliverToHost(hostRunDir(env), identity, message)
 }

@@ -79,22 +79,23 @@ function monotonicMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n)
 }
 
-function sessionAlive(_sock: string, address: string): boolean {
+function sessionAlive(_sock: string, address: string, env: NodeJS.ProcessEnv = process.env): boolean {
   // pty-only: a peer's liveness is its supervisor daemon (a cheap pid-file check). `address` IS the
   // identity. (`_sock` is retained for call-site compatibility; tmux sockets no longer exist.)
-  return hostSessionAlive(address)
+  // env sandboxes the run-dir — an env-injected verb must not read the real fleet's liveness.
+  return hostSessionAlive(address, env)
 }
 
 /** Is the (runtime,personality) endpoint live right now? Public liveness predicate. */
-export function isPeerLive(runtime: string, personality: string, sockDir = resolveSockDir()): boolean {
+export function isPeerLive(runtime: string, personality: string, sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): boolean {
   const socketPath = buildSocketPath(runtime, personality, sockDir)
-  return sessionAlive(socketPath, buildProcessAddress(runtime, personality))
+  return sessionAlive(socketPath, buildProcessAddress(runtime, personality), env)
 }
 
-export function listOnlinePeers(_sockDir = resolveSockDir()): OnlinePeer[] {
+export function listOnlinePeers(_sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): OnlinePeer[] {
   // pty-only: every live peer is a supervisor-hosted session (no tmux sockets to scan).
   const out = new Map<string, OnlinePeer>()
-  for (const h of listHostedPeers()) {
+  for (const h of listHostedPeers(env)) {
     out.set(buildProcessAddress(h.runtime, h.personality), { personality: h.personality, runtime: h.runtime })
   }
   return Array.from(out.values()).sort(

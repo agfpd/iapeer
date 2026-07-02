@@ -183,6 +183,7 @@ export const launch: LaunchFn = async (
       paneLogPath,
       exitLogPath: cfg.exitLogDir ? exitLogPath(cfg.exitLogDir) : undefined,
       invocation,
+      env, // sandbox the supervisor run-dir (serve-spec + detached spawn) via the injected env
     })
     if (host.ok) {
       // ROUTER (telegram/notifier): no startup dialogs and no transcript. The session is "up" the
@@ -193,7 +194,7 @@ export const launch: LaunchFn = async (
       // router's <iap>-marker stdin reader). So confirm the hosted session is live and return ready —
       // no waitHostReady (would load @xterm for nothing), no first-message deliver, no ready-gate.
       if (adapter.kind === 'router') {
-        if (hostSessionAlive(identity)) return ready(identity)
+        if (hostSessionAlive(identity, env)) return ready(identity)
         return fail(identity, 'hosted router session not alive immediately after bringup')
       }
       // BOOT: the supervisor's boot-driver dismisses startup dialogs internally; wait for the input
@@ -201,7 +202,7 @@ export const launch: LaunchFn = async (
       // the SAME shape as the tmux boot/deliver/ready-gate below, with host equivalents.
       const baselineMtime = adapter.newestActivityMtime(cwd) ?? 0
       const isReady = await waitHostReady(
-        { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte },
+        { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte, env },
         sleep,
       )
       if (!isReady) return fail(identity, 'never-became-ready (hosted: supervisor input surface not ready)')
@@ -220,12 +221,12 @@ export const launch: LaunchFn = async (
         },
         { env },
       )
-      const d = await deliverHosted(identity, firstMessage)
+      const d = await deliverHosted(identity, firstMessage, env)
       if (!d.ok) return fail(identity, `hosted deliver failed: ${d.error}`)
       const readyDeadline = Date.now() + cfg.readyGateSecs * 1000
       while (Date.now() < readyDeadline) {
         await sleep(2000)
-        if (!hostSessionAlive(identity)) return fail(identity, 'hosted session vanished during ready-gate')
+        if (!hostSessionAlive(identity, env)) return fail(identity, 'hosted session vanished during ready-gate')
         if ((adapter.newestActivityMtime(cwd) ?? 0) > baselineMtime) return ready(identity)
       }
       return fail(identity, 'model-did-not-process-task (hosted: no activity advance after delivery)')

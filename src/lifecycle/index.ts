@@ -715,11 +715,12 @@ export async function withWakeLock<T>(
 // liveness
 // ─────────────────────────────────────────────────────────────────────────────
 
-function sessionAlive(_sock: string, identity: string): boolean {
+function sessionAlive(_sock: string, identity: string, env: NodeJS.ProcessEnv = process.env): boolean {
   // pty-only: a peer is alive iff its supervisor session is live (a cheap pid-file check). Routing
   // liveness on the live session (not the `.pty-host` spawn-intent marker) keeps a marker rollback safe
   // on a still-running session. (`_sock` retained for call-site compatibility; no tmux sockets exist.)
-  return hostSessionAlive(identity)
+  // env sandboxes the run-dir — a test with an injected root must not read the real fleet's liveness.
+  return hostSessionAlive(identity, env)
 }
 
 /** Death-class tag for a gone session (pty-only). A gone peer is a supervisor session that ended; its
@@ -969,7 +970,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     }
     // Idempotent fast path inside the lock: a live session wins (a concurrent
     // wake already brought it up) — no second spawn.
-    if (sessionAlive(sock, identity)) {
+    if (sessionAlive(sock, identity, env)) {
       writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
       // taskDelivered:false — the winning concurrent wake delivered ITS OWN task as
       // the boot first-message; THIS caller's task was not delivered by anything.
@@ -1069,7 +1070,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       // path above). We do NOT flip to READY — the wake DID fail its ready-gate, the caller
       // must still hear FAILED; we only make the live remnant supervised. Best-effort: a write
       // hiccup must not mask the original FAILED reason.
-      if (sessionAlive(sock, identity)) {
+      if (sessionAlive(sock, identity, env)) {
         try {
           writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
         } catch { /* keep the original FAILED reason — enroll is best-effort */ }
@@ -1108,11 +1109,12 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
 // Reap — kill a session (used by idle-reap / supervise; H4-guarded by callers)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function killSession(_sock: string, identity: string): void {
+export function killSession(_sock: string, identity: string, env: NodeJS.ProcessEnv = process.env): void {
   // pty-only: SIGTERM the supervisor daemon — its shutdown SIGKILLs the child and removes the
   // sock/pid/serve-spec/markers. Idempotent if the session is already gone. (`_sock` retained for
-  // call-site compatibility; no tmux sockets exist.)
-  killPtyHost(identity)
+  // call-site compatibility; no tmux sockets exist.) env sandboxes the run-dir — a test with an
+  // injected root must NEVER SIGTERM a real fleet peer's supervisor.
+  killPtyHost(identity, env)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1150,6 +1152,9 @@ export interface SuperviseDeps {
   /** Liveness seam (default: the real `sessionAlive` = pty-host pid-file check). Tests inject a fixed
    *  verdict so the idle path is exercised hermetically — no live pty session needed. */
   sessionAlive?: (sock: string, identity: string) => boolean
+  /** Reap seam (default: the real `killSession` = SIGTERM the supervisor daemon). Tests inject a no-op
+   *  so exercising the reap path NEVER SIGTERMs a real process — the destructive-kill isolation guard. */
+  killSession?: (sock: string, identity: string) => void
 }
 
 /** Resolved per-tick context threaded into superviseOnePeer (deps already defaulted by superviseTick). */
@@ -1159,6 +1164,7 @@ interface SuperviseCtx {
   nowMs: number
   lastTurnMt: (runtime: string, cwd: string) => number | null
   isAlive: (sock: string, identity: string) => boolean
+  kill: (sock: string, identity: string) => void
   verbose: boolean
   trace: (fields: Record<string, string | number | undefined>) => void
 }
@@ -1171,7 +1177,7 @@ interface SuperviseCtx {
  * returns exactly one outcome; the trace side-effects mirror the prior inline behaviour.
  */
 function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
-  const { cfg, env, nowMs, lastTurnMt, isAlive, verbose, trace } = ctx
+  const { cfg, env, nowMs, lastTurnMt, isAlive, kill, verbose, trace } = ctx
   // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
   if (isLaunchdManaged(s.personality, env)) {
     if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
@@ -1252,7 +1258,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
   // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).
   if (ephemeral && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
-    killSession(sock, s.identity)
+    kill(sock, s.identity)
     clearEphemeralArmed(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-done' })
@@ -1278,7 +1284,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // tool, no reply yet) keeps the pane-log fresh via the TUI render, so it is no longer
   // reaped mid-task — only a genuinely idle/wedged unarmed session crosses this bound.
   if (ephemeral && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
-    killSession(sock, s.identity)
+    kill(sock, s.identity)
     clearEphemeralArmed(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-unarmed-bound' })
@@ -1295,7 +1301,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     // INITIATES. Its presence on the next wake = the session was parked cleanly =
     // RESUME-eligible (resolveWakeMode branch 3b). A crash/self-close (the dead
     // branch above) never writes it → that wakes FRESH (branch 3a).
-    killSession(sock, s.identity)
+    kill(sock, s.identity)
     setIdleReaped(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-idle', age: `${ageSecs}s`, outcome: 'resume-eligible' })
@@ -1311,7 +1317,9 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const env = deps.env ?? process.env
   const nowMs = deps.nowMs ?? Date.now()
   const lastTurnMt = deps.lastTurnMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).lastTurnMtime(c))
-  const isAlive = deps.sessionAlive ?? sessionAlive
+  // Default seams bind the injected env so a sandboxed tick never reads/kills the real fleet.
+  const isAlive = deps.sessionAlive ?? ((sock: string, identity: string) => sessionAlive(sock, identity, env))
+  const kill = deps.killSession ?? ((sock: string, identity: string) => killSession(sock, identity, env))
   const verbose = superviseLogVerbose(env)
   // Pane-log volume cap (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
@@ -1328,7 +1336,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const trace = (fields: Record<string, string | number | undefined>): void =>
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise', ...fields }, { env, nowMs })
   const out: SuperviseOutcome[] = []
-  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, isAlive, verbose, trace }
+  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, isAlive, kill, verbose, trace }
   for (const s of readSessionStates(cfg)) {
     // Per-peer ISOLATION: a throw while evaluating ONE peer must NOT abort the whole sweep — that is
     // the silent fleet-wide reap-outage class (one malformed peer-state and NO peer gets reaped, the
@@ -1434,7 +1442,7 @@ export async function drainEphemeralQueue(
   const env = deps.env ?? process.env
   const identity = buildProcessAddress(runtime, personality)
   const sock = buildSocketPath(runtime, personality, cfg.sockDir)
-  if (sessionAlive(sock, identity)) return null // one task per session — wait for its reap
+  if (sessionAlive(sock, identity, env)) return null // one task per session — wait for its reap
   const item = peekEphemeralTask(cfg, identity)
   if (!item) return null
   // Durable drain trace: which item, how deep the queue.
@@ -1540,9 +1548,9 @@ export function lastActiveRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runti
 
 /** Runtimes of `peer` whose session is LIVE right now (lifecycle-local liveness,
  *  same `sessionAlive` predicate the wake/attach paths use). */
-function liveRuntimesOf(peer: PeerRecord, cfg: LifecycleConfig): Runtime[] {
+function liveRuntimesOf(peer: PeerRecord, cfg: LifecycleConfig, env: NodeJS.ProcessEnv = process.env): Runtime[] {
   return peer.runtimes.filter(rt =>
-    sessionAlive(buildSocketPath(rt, peer.personality, cfg.sockDir), buildProcessAddress(rt, peer.personality)),
+    sessionAlive(buildSocketPath(rt, peer.personality, cfg.sockDir), buildProcessAddress(rt, peer.personality), env),
   )
 }
 
@@ -1570,9 +1578,9 @@ function liveRuntimesOf(peer: PeerRecord, cfg: LifecycleConfig): Runtime[] {
  * arg) resolve to codex, set the peer's default to codex once; per-command runtime
  * args remain the explicit override.
  */
-export function resolvePeerRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runtime {
+export function resolvePeerRuntime(peer: PeerRecord, cfg: LifecycleConfig, env: NodeJS.ProcessEnv = process.env): Runtime {
   if (peer.runtimes.length === 1) return peer.runtimes[0]
-  const live = liveRuntimesOf(peer, cfg)
+  const live = liveRuntimesOf(peer, cfg, env)
   if (live.includes(peer.runtime)) return peer.runtime
   if (live.length === 1) return live[0]
   return peer.runtime
@@ -1610,7 +1618,7 @@ export async function attachPeer(opts: AttachOptions): Promise<AttachResult> {
   const runtime = opts.runtime ?? resolvePeerRuntime(peer, cfg)
   const identity = buildProcessAddress(runtime, opts.personality)
   const sock = buildSocketPath(runtime, opts.personality, cfg.sockDir)
-  if (sessionAlive(sock, identity)) return { ok: true, identity, socketPath: sock, woke: false, runtime }
+  if (sessionAlive(sock, identity, env)) return { ok: true, identity, socketPath: sock, woke: false, runtime }
   const woke = await wakeOrSpawn({ personality: opts.personality, runtime, task: '', resume: true }, { cfg, env })
   if (woke.status === 'FAILED') return { ok: false, reason: woke.reason ?? 'wake failed' }
   return { ok: true, identity, socketPath: sock, woke: true, runtime }

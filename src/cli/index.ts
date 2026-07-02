@@ -129,7 +129,7 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
   return index.peers.map(peer => {
     const runtimes: RuntimeStatus[] = peer.runtimes.map(rt => ({
       runtime: rt,
-      status: isPeerLive(rt, peer.personality, cfg.sockDir)
+      status: isPeerLive(rt, peer.personality, cfg.sockDir, env)
         ? 'live'
         : isStopped(cfg, buildProcessAddress(rt, peer.personality))
           ? 'stopped'
@@ -248,7 +248,7 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // the service was already not loaded — benign for stop — but surface the detail in
       // the reason rather than silently claiming success.)
       const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
-      killSession(sock, identity)
+      killSession(sock, identity, env)
       out.push({ personality, runtime: rt, action: 'bootout', reason: r.status === 0 ? undefined : `launchctl bootout exited ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''}` })
     } else {
       // A deliberate stop is a CLEAN PARK, not a death (stop→start must survive ≥
@@ -258,7 +258,7 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // no reaped-gone death class for a state the daemon knows 100%).
       setStopped(cfg, identity)
       setIdleReaped(cfg, identity)
-      killSession(sock, identity)
+      killSession(sock, identity, env)
       removeSessionState(cfg, identity)
       out.push({ personality, runtime: rt, action: 'stopped' })
     }
@@ -551,7 +551,7 @@ export async function newPeer(
   clearStopped(cfg, identity)
   clearIdleReaped(cfg, identity)
   clearNewEager(cfg, identity)
-  killSession(sock, identity) // canary-clean deliberate teardown; no-op when dead
+  killSession(sock, identity, env) // canary-clean deliberate teardown; no-op when dead
   removeSessionState(cfg, identity) // never a death class — supervise stays silent
   const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
   const r = await wake({ personality, runtime: rt, task: '', resume: false })
@@ -626,7 +626,7 @@ export async function compactPeer(
     if (!done.ok) return { personality, runtime: rt, action: 'failed', woke, reason: done.error.message }
     return null
   }
-  const liveRuntimes = peer.runtimes.filter(rt => isPeerLive(rt, personality, cfg.sockDir))
+  const liveRuntimes = peer.runtimes.filter(rt => isPeerLive(rt, personality, cfg.sockDir, env))
   if (runtime ? liveRuntimes.includes(runtime as Runtime) : liveRuntimes.length > 0) {
     const rt = (runtime as Runtime | undefined)
       ?? (liveRuntimes.includes(peer.runtime) ? peer.runtime : liveRuntimes.length === 1 ? liveRuntimes[0] : undefined)
@@ -744,7 +744,7 @@ export async function removePeerCli(
   if (!peer) return { personality, action: 'absent' }
   if (!opts.force) {
     const cfg = loadLifecycleConfig(env)
-    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, personality, cfg.sockDir))
+    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, personality, cfg.sockDir, env))
     if (liveRt) {
       return {
         personality,
@@ -969,7 +969,7 @@ export async function renamePeerCli(
   }
   const cfg = loadLifecycleConfig(env)
   if (!opts.force) {
-    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, oldPersonality, cfg.sockDir))
+    const liveRt = peer.runtimes.find(rt => isPeerLive(rt, oldPersonality, cfg.sockDir, env))
     if (liveRt) {
       return {
         oldPersonality,
@@ -2325,7 +2325,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         setNewEager(cfg, identity)
         out(`self-fresh: marked ${identity} for eager fresh re-launch; self-killing session\n`)
         const sock = buildSocketPath(addr.runtime, addr.personality, cfg.sockDir)
-        killSession(sock, identity)
+        killSession(sock, identity, env)
         return 0
       }
       case 'interrupt': {

@@ -367,21 +367,21 @@ describe('wakeOrSpawn live-session fast path', () => {
   test('READY with taskDelivered:false — the winning wake delivered only ITS envelope', async () => {
     const root = mkdtempSync(join(tmpdir(), 'iapeer-fpl-root-'))
     const laDir = mkdtempSync(join(tmpdir(), 'iapeer-fpl-la-')) // empty → not launchd-managed
-    const prevRoot = process.env.IAPEER_ROOT
     const child = Bun.spawn(['sleep', '300']) // a live pid for the faked hosted session
     try {
-      // pty-only: a live session = a live supervisor pid. hostSessionAlive reads the run dir from
-      // process.env, so set IAPEER_ROOT for this test and drop a live pid there.
-      process.env.IAPEER_ROOT = root
+      // K3: env is INJECTED end-to-end — NO process.env mutation. The supervisor run-dir (liveness)
+      // now resolves from THIS env, so the test can never read/kill the real fleet's sessions. Before
+      // the cfg-isolation fix, hostSessionAlive read the run-dir from process.env and this test had to
+      // mutate the global IAPEER_ROOT (and could have hit a live fleet peer on a name collision).
+      const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir }
       await upsertPeer(
         { personality: 'fpl', runtime: 'claude', cwd: root, intelligence: 'artificial' },
         { rootDir: root },
       )
       // a live hosted session already up — what a WINNING concurrent wake leaves behind
-      const runDir = defaultRunDir(process.env)
+      const runDir = defaultRunDir(env)
       mkdirSync(runDir, { recursive: true })
       writeFileSync(pidPath(runDir, 'claude-fpl'), String(child.pid))
-      const env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir }
       const r = await wakeOrSpawn({ personality: 'fpl', runtime: 'claude', task: 'second sender envelope' }, { env })
       expect(r.status).toBe('READY')
       expect(r.woke).toBe(false)
@@ -389,8 +389,6 @@ describe('wakeOrSpawn live-session fast path', () => {
       expect(r.taskDelivered).toBe(false)
     } finally {
       child.kill()
-      if (prevRoot === undefined) delete process.env.IAPEER_ROOT
-      else process.env.IAPEER_ROOT = prevRoot
       rmSync(root, { recursive: true, force: true })
       rmSync(laDir, { recursive: true, force: true })
     }
@@ -959,6 +957,26 @@ describe('generic idle-reap — content-time idle proxy (statusline-tick fix)', 
       })
       expect(out.find(x => x.identity === 'claude-w')?.action).toBe('reaped-idle')
       expect(hasIdleReaped(cfg, 'claude-w')).toBe(true) // daemon-initiated park → resume-eligible
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('K3: the reap routes through the injectable killSession seam (no real SIGTERM in tests)', () => {
+    const { env, cfg, root, laDir } = liveEnv('k', 7_200_000)
+    try {
+      const now = Date.now()
+      const killed: string[] = []
+      const out = superviseTick(cfg, {
+        env,
+        nowMs: now,
+        sessionAlive: () => true,
+        lastTurnMtime: () => now - 7_200_000, // genuinely idle → reap
+        killSession: (_sock, identity) => killed.push(identity), // spy — the seam, not the real SIGTERM
+      })
+      expect(out.find(x => x.identity === 'claude-k')?.action).toBe('reaped-idle')
+      expect(killed).toEqual(['claude-k']) // the reap called OUR seam — a real process was never signalled
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(laDir, { recursive: true, force: true })
