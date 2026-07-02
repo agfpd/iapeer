@@ -2,9 +2,9 @@
 // Block 2, ported from PoC pts.mjs). Detach key Ctrl-] (session keeps running). The two reattach
 // port-deps live here + in protocol.ts: #1 TERM_RESET on EVERY exit path (incl. SIGHUP window-close,
 // via writeSync which works inside a signal handler), and #2 backpressure is the daemon's side.
-import { existsSync, readFileSync, writeSync } from 'node:fs'
+import { writeSync } from 'node:fs'
 import { FRAME_DATA, FRAME_RESIZE, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
-import { pidPath, sockPath } from './paths.ts'
+import { pidStartToken, readPidFile, sockPath } from './paths.ts'
 
 const DETACH = 0x1d // Ctrl-]
 
@@ -16,9 +16,26 @@ const pidAlive = (p: number): boolean => {
     return false
   }
 }
+
+// В22 — OWNER-validated liveness. kill(pid,0) is the fast fail (dead pid → not alive). When the pid is
+// alive AND the pidfile carries a start-token, verify the token matches the pid's CURRENT start time so a
+// REUSED pid (a different process that inherited the number) never reads as our live session. `ps` is
+// bounded by a short per-session cache — repeated liveness reads within a tick do not re-spawn it.
+const OWNER_TTL_MS = 3000
+const ownerCache = new Map<string, { pid: number; token: string; verdict: boolean; until: number }>()
+
 export function sessionAlive(runDir: string, session: string): boolean {
-  const pf = pidPath(runDir, session)
-  return existsSync(pf) && pidAlive(Number(readFileSync(pf, 'utf8')))
+  const rec = readPidFile(runDir, session)
+  if (!rec || !pidAlive(rec.pid)) return false
+  if (!rec.token) return true // legacy tokenless pidfile → kill-0 only (no regression during rollout)
+  const key = `${runDir}\0${session}`
+  const now = Date.now()
+  const cached = ownerCache.get(key)
+  if (cached && cached.pid === rec.pid && cached.token === rec.token && now < cached.until) return cached.verdict
+  const live = pidStartToken(rec.pid)
+  const verdict = live !== null && live === rec.token // same process instance, not a reused pid
+  ownerCache.set(key, { pid: rec.pid, token: rec.token, verdict, until: now + OWNER_TTL_MS })
+  return verdict
 }
 
 /** Attach an interactive terminal client to a live daemon session. Resolves when the client

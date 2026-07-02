@@ -25,7 +25,7 @@ import {
   splitDanglingEscape,
   stripQueries,
 } from './protocol.ts'
-import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry } from './paths.ts'
+import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
 import { nextBootAction, nextNagAction, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
@@ -515,7 +515,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       },
     },
   })
-  writeFileSync(pid, String(process.pid))
+  writePidFile(runDir, session, process.pid) // В22 — `<pid> <startToken>` so a reused pid can't impersonate this session
   writeGeometry(runDir, session, serveCols, serveRows) // initial geometry sidecar (= serve); updated on every real child resize
 
   let down = false

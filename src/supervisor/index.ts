@@ -8,7 +8,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runSupervisorClient, sessionAlive } from './client.ts'
-import { defaultRunDir, logPath, pidPath, servePath, sockPath } from './paths.ts'
+import { defaultRunDir, logPath, pidPath, pidStartToken, readPidFile, servePath, sockPath } from './paths.ts'
 
 // daemon.ts loads @xterm. It is dynamic-imported ONLY in the 'daemon' CLI case below (the detached
 // daemon process, where @xterm belongs), so importing THIS module — e.g. launch resolving
@@ -125,17 +125,35 @@ export async function startSupervisorDaemon(opts: StartDaemonOptions): Promise<S
   const deadline = Date.now() + (opts.timeoutMs ?? 5000)
   while (Date.now() < deadline) {
     if (existsSync(sockPath(runDir, session)) && sessionAlive(runDir, session)) {
-      return { state: 'started', pid: Number(readFileSync(pidPath(runDir, session), 'utf8')) }
+      return { state: 'started', pid: readPidFile(runDir, session)?.pid }
     }
     await Bun.sleep(80) // yield the loop — never a sync block in the daemon's wake path
   }
-  // Failed to come up — drop the serve-spec we wrote so it can't mislead a later read.
+  // Failed to come up in time. В20 — KILL the spawned child FIRST. A merely-slow child that becomes the
+  // daemon AFTER we unlink the serve-spec would readServeSpec → undefined → come up as a BARE CONDUIT
+  // ([bin] runtime with NO PEER_IDENTITY / composed argv / doctrine) that captures the peer's identity:
+  // liveness then reads it "online", messages route into an identity-less session, and if it slipped
+  // past enroll-on-FAILED it is invisible to idle-reap (an unbounded orphan). Better a dead peer (the
+  // next wake respawns clean) than an identity-less conduit. Kill, THEN drop the spec + any stale
+  // sock/pid the dying child created (SIGKILL skips the child's own cleanup).
+  try {
+    child.kill('SIGKILL')
+  } catch {
+    /* already gone */
+  }
   if (opts.serve)
     try {
       unlinkSync(servePath(runDir, session))
     } catch {
       /* */
     }
+  for (const p of [sockPath(runDir, session), pidPath(runDir, session)]) {
+    try {
+      if (existsSync(p)) unlinkSync(p)
+    } catch {
+      /* best-effort */
+    }
+  }
   return { state: 'failed', detail: `daemon did not come up; see ${logPath(runDir, session)}` }
 }
 
@@ -146,16 +164,22 @@ export function listSessions(runDir: string): Array<{ session: string; alive: bo
     .map(f => f.replace(/\.sock$/, ''))
     .map(session => {
       const alive = sessionAlive(runDir, session)
-      return { session, alive, pid: alive ? Number(readFileSync(pidPath(runDir, session), 'utf8')) : undefined }
+      return { session, alive, pid: alive ? readPidFile(runDir, session)?.pid : undefined }
     })
 }
 
 export function killSession(runDir: string, session: string): boolean {
-  const pf = pidPath(runDir, session)
-  if (!existsSync(pf)) return false
-  const pid = Number(readFileSync(pf, 'utf8'))
+  const rec = readPidFile(runDir, session)
+  if (!rec) return false
+  // В22 — verify the pid is STILL our daemon before SIGTERM. After an abnormal death + pid reuse, a bare
+  // kill here would SIGTERM the INNOCENT process that inherited the pid. Skip the kill when the start-token
+  // no longer matches (a legacy tokenless pidfile keeps the old behavior — no regression during rollout).
+  if (rec.token) {
+    const live = pidStartToken(rec.pid)
+    if (live !== null && live !== rec.token) return false // reused pid — NOT our session; do not signal it
+  }
   try {
-    process.kill(pid, 'SIGTERM')
+    process.kill(rec.pid, 'SIGTERM')
   } catch {
     /* already gone */
   }

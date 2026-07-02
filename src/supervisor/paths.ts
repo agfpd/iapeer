@@ -3,6 +3,7 @@
 // socket/pid files never touch a real location.
 import { renameSync, writeFileSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pluginStateDir } from '../storage/index.ts'
 
@@ -13,6 +14,49 @@ export function defaultRunDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export const sockPath = (runDir: string, session: string): string => join(runDir, `${session}.sock`)
 export const pidPath = (runDir: string, session: string): string => join(runDir, `${session}.pid`)
+
+// ── pid-OWNERSHIP token (В22) ───────────────────────────────────────────────────
+// kill(pid,0) proves SOME process holds the pid, not that it is STILL our daemon: after an abnormal
+// death (SIGKILL/panic/reboot) the pidfile survives, and if the OS reuses that pid for another same-uid
+// process, a bare kill(pid,0) reads the dead session as "alive" (peer undeliverable + unreapable) and a
+// kill() would SIGTERM the innocent reuser. The pidfile therefore stores `<pid> <startToken>` where the
+// token is the process's start time; a reused pid has a DIFFERENT start time, so ownership is verifiable.
+
+/** The OS-reported start time of `pid` (a stable per-process-instance token), or null if it is not
+ *  running / unreadable. `ps -o lstart=` is a single spawn — callers bound its frequency (see the
+ *  liveness cache in client.ts). */
+export function pidStartToken(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  try {
+    const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+    const t = (r.stdout ?? '').trim()
+    return t.length > 0 ? t : null
+  } catch {
+    return null
+  }
+}
+
+/** Write the pidfile as `<pid> <startToken>` (В22). Falls back to bare `<pid>` if the token is
+ *  unavailable — a tokenless pidfile is treated as legacy (owner-check skipped, kill-0 only). */
+export function writePidFile(runDir: string, session: string, pid: number): void {
+  const token = pidStartToken(pid)
+  writeFileSync(pidPath(runDir, session), token ? `${pid} ${token}` : String(pid))
+}
+
+/** Parse the pidfile → { pid, token } (token '' for a legacy bare-pid file). null when absent/invalid. */
+export function readPidFile(runDir: string, session: string): { pid: number; token: string } | null {
+  let raw: string
+  try {
+    raw = readFileSync(pidPath(runDir, session), 'utf8').trim()
+  } catch {
+    return null
+  }
+  if (!raw) return null
+  const sp = raw.indexOf(' ')
+  const pid = Number(sp < 0 ? raw : raw.slice(0, sp))
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  return { pid, token: sp < 0 ? '' : raw.slice(sp + 1).trim() }
+}
 export const logPath = (runDir: string, session: string): string => join(runDir, `${session}.log`)
 /** Serving spec (cutover Block 2 slice b): the composed {argv, env, cwd} a detached daemon serves.
  *  Written 0600 by startSupervisorDaemon BEFORE spawn (env can carry launch.env secrets), read by
