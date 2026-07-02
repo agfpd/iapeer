@@ -9,10 +9,10 @@
 // is no unlocked path to the registry file anywhere in the package.
 
 import * as lockfile from 'proper-lockfile'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { randomUUID } from 'crypto'
+import { writeFileAtomicRaw } from '../storage/atomicWrite.ts'
 import {
   IAPEER_DIR,
   MAX_DESCRIPTION_LEN,
@@ -313,7 +313,6 @@ export async function withPeersLock<T>(
  * sanctioned write path for the registry file (#3).
  */
 function writePeersIndexAtomic(paths: PeersPaths, index: PeersIndex): void {
-  const tmp = join(paths.tmpDir, `.${PEERS_PROFILES_FILE}.${process.pid}.${randomUUID()}.tmp`)
   // Persist the RAW intelligence verbatim (legacy-safe round-trip) and DROP the
   // intelligenceRaw shadow field from the on-disk shape — the file carries the
   // legacy vocab the live IAP reads, never the foundation's in-memory normalization.
@@ -333,8 +332,10 @@ function writePeersIndexAtomic(paths: PeersPaths, index: PeersIndex): void {
       ...(peer.interfaces ? { interfaces: peer.interfaces } : {}),
     }))
   const normalized = { version: PEERS_SCHEMA_VERSION, peers: peersForDisk }
-  writeFileSync(tmp, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 })
-  renameSync(tmp, paths.peersFile)
+  // Route through the SHARED atomic-write core (fsync-before-rename + looped writeSync) — the private
+  // registry writer no longer keeps its own copy that drifted off the durability protocol. tmpDir is
+  // paths.tmpDir (same filesystem as peersFile → the rename stays atomic).
+  writeFileAtomicRaw(paths.peersFile, `${JSON.stringify(normalized, null, 2)}\n`, 0o600, paths.tmpDir)
 }
 
 export async function updatePeersIndex(

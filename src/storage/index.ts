@@ -10,21 +10,10 @@
 // reaching for the generic atomic-write primitive. The registry keeps its own
 // private writer (see registry/index.ts) used only inside withPeersLock.
 
-import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from 'fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
 import { homedir } from 'os'
 import { basename, dirname, join } from 'path'
-import { randomUUID } from 'crypto'
+import { writeFileAtomicRaw } from './atomicWrite.ts'
 import {
   CACHE_DIR,
   IAPEER_DIR,
@@ -304,28 +293,6 @@ export function writeFileAtomic(path: string, data: string, mode: number = FILE_
       `refusing to write ${PEERS_PROFILES_FILE} via storage.writeFileAtomic — it is the registry's locked write target; use registry.upsertPeer/removePeer/renamePeer`,
     )
   }
-  const dir = dirname(path)
-  mkdirSync(dir, { recursive: true, mode: DIR_MODE })
-  const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`)
-  try {
-    // fsync the tmp file BEFORE the rename: rename is atomic on a single fs, but
-    // without flushing the bytes first a power-loss can publish a zero-length /
-    // partial shared file (codex config.toml, .mcp.json, router.json, plists).
-    const fd = openSync(tmp, 'w', mode)
-    try {
-      writeSync(fd, data)
-      fsyncSync(fd)
-    } finally {
-      closeSync(fd)
-    }
-    renameSync(tmp, path)
-  } catch (e) {
-    // Never leak the tmp file when the write/rename fails (#audit).
-    try {
-      if (existsSync(tmp)) unlinkSync(tmp)
-    } catch {
-      /* best-effort cleanup */
-    }
-    throw e
-  }
+  // The durability core (fsync-before-rename + looped writeSync) lives in ONE place — see atomicWrite.ts.
+  writeFileAtomicRaw(path, data, mode)
 }
