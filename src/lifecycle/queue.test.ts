@@ -76,6 +76,20 @@ describe('ephemeral queue primitives (FIFO)', () => {
     expect(JSON.parse(readFileSync(join(dir, '000003'), 'utf8')).task).toBe('three')
   })
 
+  test('K2: seq names are MONOTONIC — a fully drained queue does NOT reuse a name', () => {
+    const cfg = mkCfg()
+    // enqueue → drain empty → enqueue again: the second task must NOT get 000001 back.
+    expect(enqueueEphemeralTask(cfg, 'claude-w', { task: 'A' })).toBe(1)
+    const a = peekEphemeralTask(cfg, 'claude-w')!
+    expect(a.seq).toBe('000001')
+    removeEphemeralTask(cfg, 'claude-w', a.seq)
+    expect(ephemeralQueueDepth(cfg, 'claude-w')).toBe(0) // queue empty
+    enqueueEphemeralTask(cfg, 'claude-w', { task: 'B' })
+    const b = peekEphemeralTask(cfg, 'claude-w')!
+    expect(b.task).toBe('B')
+    expect(b.seq).toBe('000002') // NOT reused — high-water mark advanced past 1
+  })
+
   test('a poison head (corrupt JSON) is dropped, not wedging the queue', () => {
     const cfg = mkCfg()
     mkdirSync(ephemeralQueueDir(cfg, 'claude-w'), { recursive: true })
@@ -135,6 +149,30 @@ describe('drainEphemeralQueue (peek → wake → rm-on-READY)', () => {
     expect(logged).toContain('ev=ephemeral-drain')
     expect(logged).toContain('identity=claude-w')
     expect(logged).toContain('depth=2')
+  })
+
+  test('K2: READY with taskDelivered:false LEAVES the item — a concurrent wake delivered its OWN task, not ours', async () => {
+    const cfg = mkCfg()
+    enqueueEphemeralTask(cfg, 'claude-w', { task: 'mine' })
+    const calls: WakeArgs[] = []
+    // A concurrent wake won the lock and took the live-session fast path: READY but
+    // taskDelivered:false — OUR task was never delivered. The drain must NOT consume it.
+    const fastPath = async (args: WakeArgs): Promise<WakeResult> => {
+      calls.push(args)
+      return { status: 'READY', woke: false, runtime: 'claude', taskDelivered: false }
+    }
+    const r = await drainEphemeralQueue(cfg, 'w', 'claude', { wakeFn: fastPath })
+    expect(r?.status).toBe('READY')
+    expect(ephemeralQueueDepth(cfg, 'claude-w')).toBe(1) // NOT consumed — no silent loss
+
+    // the next drain (after the racing session reaps) delivers it for real → consumed
+    const real = async (args: WakeArgs): Promise<WakeResult> => {
+      calls.push(args)
+      return { status: 'READY', woke: true, runtime: 'claude', taskDelivered: true }
+    }
+    expect((await drainEphemeralQueue(cfg, 'w', 'claude', { wakeFn: real }))?.status).toBe('READY')
+    expect(calls[1]?.task).toBe('mine') // same task finally delivered
+    expect(ephemeralQueueDepth(cfg, 'claude-w')).toBe(0)
   })
 
   test('FAILED wake LEAVES the item at the head — the next drain RETRIES the same task (acceptance (b))', async () => {

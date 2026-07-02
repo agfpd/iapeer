@@ -1445,7 +1445,14 @@ export async function drainEphemeralQueue(
   )
   const wake = deps.wakeFn ?? wakeOrSpawn
   const result = await wake({ personality, runtime, topic: item.topic, task: item.task }, { cfg, env })
-  if (result.status === 'READY') removeEphemeralTask(cfg, identity, item.seq)
+  // Remove ONLY when THIS wake actually delivered the task. On the live-session fast
+  // path (READY, taskDelivered:false) a CONCURRENT wake delivered ITS OWN task — ours
+  // was NOT delivered. Deleting it here would silently drop a queued task (the loss the
+  // contract forbids); leaving it at the head lets the next drain (after that session
+  // reaps) deliver it into a fresh session — invariant "one task = one fresh session".
+  if (result.status === 'READY' && result.taskDelivered !== false) {
+    removeEphemeralTask(cfg, identity, item.seq)
+  }
   return result
 }
 

@@ -43,6 +43,30 @@ export function ephemeralQueueDir(cfg: LifecycleConfig, identity: string): strin
 }
 
 const SEQ_PAD = 6
+const HWM_FILE = '.hwm'
+
+/** High-water mark of seqs ever ISSUED for this queue — the monotonic floor that
+ *  makes names never repeat, even after the queue drains empty (`max(existing)+1`
+ *  alone resets to 1 once empty, so a concurrent drain still holding the OLD seq
+ *  could delete a fresh task that got the reused name). 0 when absent/unreadable. */
+function readHwm(dir: string): number {
+  try {
+    const n = parseInt(readFileSync(join(dir, HWM_FILE), 'utf8'), 10)
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+/** Raise the high-water mark (monotonic; only ever rises). Best-effort — a lost
+ *  bump merely risks a reuse after a FULL drain, the same rare window we harden. */
+function bumpHwm(dir: string, seq: number): void {
+  try {
+    if (seq > readHwm(dir)) writeFileSync(join(dir, HWM_FILE), String(seq), { mode: 0o600 })
+  } catch {
+    /* best-effort */
+  }
+}
 
 function listSeqs(dir: string): string[] {
   let entries: string[]
@@ -79,16 +103,19 @@ export function enqueueEphemeralTask(
     mode: 0o600,
   })
   try {
-    // Next seq = max existing + 1; on an EEXIST race, advance and retry.
+    // Next seq = max(existing items, ever-issued high-water) + 1 — MONOTONIC: never
+    // reuse a name after the queue empties. On an EEXIST race, advance and retry.
     let seq = (() => {
       const seqs = listSeqs(dir)
-      return seqs.length ? parseInt(seqs[seqs.length - 1]!, 10) + 1 : 1
+      const maxExisting = seqs.length ? parseInt(seqs[seqs.length - 1]!, 10) : 0
+      return Math.max(maxExisting, readHwm(dir)) + 1
     })()
     // Bounded retry: a competitor can win a name at most once per its own enqueue.
     for (let attempt = 0; attempt < 1000; attempt++, seq++) {
       const target = join(dir, String(seq).padStart(SEQ_PAD, '0'))
       try {
         linkSync(tmp, target) // atomic exclusive-create (EEXIST when taken)
+        bumpHwm(dir, seq) // record the issued name so it is never reused
         return listSeqs(dir).length
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
