@@ -39,6 +39,7 @@ import {
   addTopic,
   loadLifecycleConfig,
   processEagerRelaunches,
+  processOrphanEagerMarks,
   readTopic,
   resolveWakeRuntime,
   setEphemeralArmed,
@@ -373,6 +374,10 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       tick: async () => {
         const outcomes = superviseTick(cfg, { env })
         await processEagerRelaunches(cfg, outcomes, { env })
+        // Orphaned-eager fallback: a .new-eager whose session died WITHOUT a .session
+        // on disk is invisible to superviseTick — relaunch it fresh here (H4-guarded;
+        // live incident 03.07: a self-fresh peer lay down until the owner attached).
+        await processOrphanEagerMarks(cfg, { env })
         // M3 drain scan — ONE mechanism for the whole serial-queue loop: feeds the
         // next task right after a reaped-ephemeral (same tick), drains on daemon
         // start (durable queue), and RETRIES a failed wake (the item stayed at the

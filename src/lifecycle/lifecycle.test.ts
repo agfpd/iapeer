@@ -553,6 +553,30 @@ describe('resolveWakeMode (TARGET: death-cause + peer-type/topic)', () => {
   test('argsResume=true (attach) + transcript → RESUME', () => {
     expect(resolveWakeMode(cfg(), 'claude-p', cwd(), true, hasTranscript)).toEqual({ resume: true, resumeRef: 'uuid-1', cause: 'attach' })
   })
+
+  // ── branch 1.5: a standing .new-eager OUTRANKS everything (live incident 03.07:
+  // an orphaned self-fresh was then ATTACH-resumed onto the old context) ──────────
+  test('.new-eager + attach → FRESH (self-fresh-eager outranks attach-resume), mark consumed', () => {
+    const c = cfg()
+    setNewEager(c, 'claude-p')
+    expect(resolveWakeMode(c, 'claude-p', cwd(), true, hasTranscript)).toEqual({ resume: false, cause: 'self-fresh-eager' })
+    expect(hasNewEager(c, 'claude-p')).toBe(false) // consumed — a later unrelated wake is unaffected
+  })
+  test('.new-eager + message-wake (even with a clean .idle-reaped park) → FRESH, both marks consumed', () => {
+    const c = cfg()
+    setNewEager(c, 'claude-p')
+    setIdleReaped(c, 'claude-p')
+    expect(resolveWakeMode(c, 'claude-p', cwd(), undefined, hasTranscript)).toEqual({ resume: false, cause: 'self-fresh-eager' })
+    expect(hasNewEager(c, 'claude-p')).toBe(false)
+    // .idle-reaped hygiene: a stale clean-park marker must not resume a LATER crash
+    expect(resolveWakeMode(c, 'claude-p', cwd(), undefined, hasTranscript)).toEqual({ resume: false, cause: 'crash-or-self-close' })
+  })
+  test('folder-launch consumes a standing .new-eager (its promise is fulfilled by the fresh launch)', () => {
+    const c = cfg()
+    setNewEager(c, 'claude-p')
+    expect(resolveWakeMode(c, 'claude-p', cwd(), false, hasTranscript)).toEqual({ resume: false, cause: 'folder-launch' })
+    expect(hasNewEager(c, 'claude-p')).toBe(false)
+  })
   test('argsResume=true + nothing to resume → FAIL-LOUD (failReason, no silent fresh)', () => {
     const m = resolveWakeMode(cfg(), 'claude-p', cwd(), true, noTranscript)
     expect(m.resume).toBe(false)
@@ -750,6 +774,91 @@ describe('superviseTick death-cause accounting (TARGET)', () => {
       expect(seen[0].task).toBe('')
       // the mark was consumed by the relaunch
       expect(hasNewEager(cfg, 'claude-rt')).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  // ── processOrphanEagerMarks — the .session-independent fallback (live incident 03.07:
+  // a self-freshed peer whose dead session carried NO .session was INVISIBLE to the tick
+  // and lay down until the owner attached — which then resumed the old context) ──────
+  test('ORPHANED .new-eager (no .session, session dead) → relaunched fresh, mark consumed', async () => {
+    const { env, cfg, root, laDir } = deadSessionEnv('orph')
+    try {
+      rmSync(join(cfg.stateDir, 'claude-orph.session'), { force: true }) // the incident shape: mark without state
+      setNewEager(cfg, 'claude-orph')
+      const seen: Array<{ personality: string; runtime?: string; resume?: boolean }> = []
+      const { processOrphanEagerMarks } = await import('./index.ts')
+      const results = await processOrphanEagerMarks(cfg, {
+        env,
+        wakeFn: async args => {
+          seen.push({ personality: args.personality, runtime: args.runtime, resume: args.resume })
+          return { status: 'READY', woke: true }
+        },
+      })
+      expect(seen).toEqual([{ personality: 'orph', runtime: 'claude', resume: false }])
+      expect(results.length).toBe(1)
+      expect(hasNewEager(cfg, 'claude-orph')).toBe(false) // consumed
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('mark WITH a .session present → orphan scan skips (the standard eager path owns it)', async () => {
+    const { env, cfg, root, laDir } = deadSessionEnv('own')
+    try {
+      setNewEager(cfg, 'claude-own')
+      const seen: string[] = []
+      const { processOrphanEagerMarks } = await import('./index.ts')
+      await processOrphanEagerMarks(cfg, { env, wakeFn: async args => (seen.push(args.personality), { status: 'READY', woke: true }) })
+      expect(seen).toEqual([])
+      expect(hasNewEager(cfg, 'claude-own')).toBe(true) // left for the standard path
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('mark on a LAUNCHD-MANAGED peer → orphan scan never touches it (H4)', async () => {
+    const { env, cfg, root, laDir } = deadSessionEnv('h4')
+    try {
+      rmSync(join(cfg.stateDir, 'claude-h4.session'), { force: true })
+      writeFileSync(join(laDir, 'com.iapeer.h4.plist'), '<plist/>') // launchd-owned marker
+      setNewEager(cfg, 'claude-h4')
+      const seen: string[] = []
+      const { processOrphanEagerMarks } = await import('./index.ts')
+      await processOrphanEagerMarks(cfg, { env, wakeFn: async args => (seen.push(args.personality), { status: 'READY', woke: true }) })
+      expect(seen).toEqual([])
+      expect(hasNewEager(cfg, 'claude-h4')).toBe(true) // untouched
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(laDir, { recursive: true, force: true })
+    }
+  })
+
+  test('mark with a LIVE session (self-fresh mark→kill window) → orphan scan leaves it alone', async () => {
+    const { env, cfg, root, laDir } = deadSessionEnv('live')
+    try {
+      rmSync(join(cfg.stateDir, 'claude-live.session'), { force: true })
+      setNewEager(cfg, 'claude-live')
+      // a REAL live supervisor-shaped session: pid of a real process + sock file in the run-dir
+      const runDir = join(root, 'state', 'supervisor')
+      mkdirSync(runDir, { recursive: true })
+      const child = Bun.spawn(['sleep', '30'])
+      const { writePidFile } = await import('../supervisor/paths.ts')
+      writePidFile(runDir, 'claude-live', child.pid)
+      writeFileSync(join(runDir, 'claude-live.sock'), '')
+      try {
+        const seen: string[] = []
+        const { processOrphanEagerMarks } = await import('./index.ts')
+        await processOrphanEagerMarks(cfg, { env, wakeFn: async args => (seen.push(args.personality), { status: 'READY', woke: true }) })
+        expect(seen).toEqual([])
+        expect(hasNewEager(cfg, 'claude-live')).toBe(true) // the standard path consumes it after the kill lands
+      } finally {
+        child.kill()
+      }
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(laDir, { recursive: true, force: true })

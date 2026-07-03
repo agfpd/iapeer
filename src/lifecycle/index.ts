@@ -622,9 +622,26 @@ export function resolveWakeMode(
   resolveResume: (cwd: string) => { ok: boolean; ref?: string; reason?: string },
   incomingTopic?: string,
 ): WakeMode {
-  // 1. folder-launch → always fresh.
-  if (argsResume === false) return { resume: false, cause: 'folder-launch' }
-  // 2. attach → always resume, fail-loud if nothing to resume.
+  // 1. folder-launch → always fresh. Consume a standing .new-eager too — the mark's
+  // promise ("next bring-up is FRESH") is fulfilled by this launch; leaving it would
+  // leak an eager relaunch into a LATER, unrelated death.
+  if (argsResume === false) {
+    clearNewEager(cfg, identity)
+    return { resume: false, cause: 'folder-launch' }
+  }
+  // 1.5 — a standing .new-eager OUTRANKS EVERYTHING below, including attach-resume
+  // (live incident 03.07: a peer self-freshed, its eager relaunch never fired — the
+  // dead session carried no .session so the tick never saw it — and the owner's
+  // `iapeer list`→Enter attach then RESUMED the old context, defeating the self-fresh
+  // entirely). The mark is the owner's explicit "come up FRESH next"; ANY wake that
+  // finds it must honor it. Consume-on-fire + clear .idle-reaped (mirror .fresh-next
+  // hygiene: a stale clean-park marker must not make a later crash read as resume).
+  if (hasNewEager(cfg, identity)) {
+    clearNewEager(cfg, identity)
+    clearIdleReaped(cfg, identity)
+    return { resume: false, cause: 'self-fresh-eager' }
+  }
+  // 2. attach → resume, fail-loud if nothing to resume.
   if (argsResume === true) {
     const r = resolveResume(cwd)
     if (!r.ok) return { resume: false, failReason: r.reason ?? 'resume requested but nothing to resume', cause: 'attach-nothing-to-resume' }
@@ -1516,6 +1533,57 @@ export async function processEagerRelaunches(
           { cfg, env: deps.env },
         ),
       )
+    } catch (e) {
+      results.push({ status: 'FAILED', woke: false, reason: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  return results
+}
+
+/**
+ * ORPHANED eager-mark fallback (live incident 03.07, iapeer-memory): the standard eager
+ * path runs off superviseTick's `.session` walk — a peer whose session died WITHOUT a
+ * `.session` on disk (an unsupervised live session: a lost/never-written state file —
+ * the code even warns "live but UNSUPERVISED" on a state-write failure) is INVISIBLE to
+ * the tick, so its `.new-eager` was never consumed and the peer lay DOWN until an
+ * external stimulus (the owner's attach — which then also resumed the old context).
+ * This scan makes the mark a DURABLE contract independent of `.session`: every daemon
+ * tick, any `.new-eager` whose identity has NO live session AND NO `.session` (the
+ * standard path would have handled that) is relaunched fresh here. Guards: H4
+ * (launchd-managed → never touched), a LIVE session (self-fresh mark→kill window, or a
+ * concurrent wake that already brought it up — the mark stays; the standard path or the
+ * next tick consumes it), and the wake.lock inside wakeOrSpawn serializes against any
+ * concurrent message-wake (which itself now consumes the mark via resolveWakeMode 1.5).
+ */
+export async function processOrphanEagerMarks(
+  cfg: LifecycleConfig,
+  deps: WakeDeps & { wakeFn?: (args: WakeArgs, deps: WakeDeps) => Promise<WakeResult> } = {},
+): Promise<WakeResult[]> {
+  const env = deps.env ?? process.env
+  const wake = deps.wakeFn ?? wakeOrSpawn
+  let entries: string[] = []
+  try {
+    entries = readdirSync(cfg.stateDir).filter(f => f.endsWith('.new-eager'))
+  } catch {
+    return [] // no state dir → no marks
+  }
+  const results: WakeResult[] = []
+  for (const f of entries) {
+    const identity = f.slice(0, -'.new-eager'.length)
+    const addr = parseSessionName(identity)
+    if (!addr) continue
+    if (isLaunchdManaged(addr.personality, env)) continue // H4 — the daemon never touches launchd-owned peers
+    if (existsSync(sessionStatePath(cfg, identity))) continue // standard eager path owns this death
+    const sock = buildSocketPath(addr.runtime, addr.personality, cfg.sockDir)
+    if (sessionAlive(sock, identity, env)) continue // mark→kill window or already re-launched — leave the mark
+    appendLifecycleEvent(
+      cfg.eventLogDir,
+      { ev: 'supervise', identity, action: 'eager-orphan-fresh', reason: 'orphaned .new-eager (no .session, session dead)', outcome: 'eager-fresh' },
+      { env },
+    )
+    clearNewEager(cfg, identity) // consume — the relaunch below is fresh by construction
+    try {
+      results.push(await wake({ personality: addr.personality, runtime: addr.runtime, task: '', resume: false }, { cfg, env }))
     } catch (e) {
       results.push({ status: 'FAILED', woke: false, reason: e instanceof Error ? e.message : String(e) })
     }
