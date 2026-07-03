@@ -95,6 +95,10 @@ const NAG_STUCK_MS = 10_000
 // so without a budget firstAttach would never complete (frozen attach). On timeout we snapshot the
 // current model; live-forward delivers the rest once the gate lifts.
 const MODEL_STABLE_BUDGET_MS = 500
+/** How long firstAttach waits for the child's SIGWINCH redraw wave to ARRIVE after the attach
+ *  resize (first bytes; the В25-capped stability drain follows). Signal delivery + a full TUI
+ *  redraw take tens of ms; a child that answers SIGWINCH with nothing just costs this timeout. */
+const SIGWINCH_REDRAW_WAIT_MS = 300
 
 // Bun-native PTY (Bun ≥1.3.5) is not yet in @types/bun — type the slice we use.
 interface PtyChild {
@@ -422,36 +426,43 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     }
     writeGeometry(runDir, session, c, r) // record current child geometry → sidecar for warm-deliver / ready-gate readers
   }
-  // FIRST attach for a client. Order (codex review) for a clean, coloured, correctly-sized snapshot:
+  // FIRST attach for a client. Order for a clean, coloured, correctly-sized snapshot:
   //   1. DRAIN to stability — pending child bytes were generated under the OLD geometry; parse them BEFORE a
   //      model resize (else they rewrap wrong), and capture bytes that land while the client is gated.
-  //   2. MODEL resize to the client geometry IF it differs — serialize() round-trips only at matching dims
-  //      (xterm.js #3093), so the model must be the client's size before we serialize.
-  //   3. SNAPSHOT — serialize + send + lift gate, SYNCHRONOUS (no await), so no live byte interleaves.
-  //   4. CHILD resize IF it differs — an honest one-SIGWINCH window-resize (like native). NOT a nudge, NOT a
-  //      forced repaint: serialize already recreated screen+cursor, so claude's live bytes continue from the
-  //      matching grid. A same-size reattach touches the child ZERO times → pure snapshot, no re-render.
+  //   2. MODEL + CHILD resize to the client geometry IF it differs — BOTH, BEFORE the snapshot. serialize()
+  //      round-trips only at matching dims (xterm.js #3093); and the child's SIGWINCH must fire NOW so its
+  //      full redraw is INGESTED BY THE MODEL (client still gated) instead of being live-forwarded on top
+  //      of an already-sent snapshot. The prior order (child resized AFTER the snapshot) was the attach-dup
+  //      root on a BUSY session (live incident, Артур 03.07): the post-snapshot SIGWINCH redraw arrived as
+  //      live bytes whose relative cursor-ups no longer matched the client screen — the whole block painted
+  //      AGAIN below the snapshot (stacked "Composing…" spinners) — and every busy tick in the window before
+  //      the SIGWINCH was still OLD-width, wrapping into extra phantom rows. Reproduced: 2× spinner + 2×
+  //      content copies in the client buffer; with this order: 1× each.
+  //   3. WAIT for the redraw wave — the same bounded stabilization as step 1 (В25 cap applies: a saturating
+  //      stream snapshots at the deadline; ticks after the snapshot are already client-width, so they land
+  //      cleanly via live-forward).
+  //   4. SNAPSHOT — serialize + send + lift gate, SYNCHRONOUS (no await between the last stability check and
+  //      the send), so no live byte interleaves. A same-size reattach touches the child ZERO times → pure
+  //      snapshot, no re-render (step 2 is a no-op).
+  // Wait for the FIRST child bytes after a resize (the SIGWINCH redraw wave arriving), or the
+  // timeout for a child that answers SIGWINCH with nothing (a plain pipe-like program). A bare
+  // stability check is NOT enough here: signal delivery + redraw generation take milliseconds,
+  // and a busy child's tick cadence has quiet gaps — the stability loop returns in such a gap
+  // BEFORE the redraw arrives (proven by the repro byte log: the \x1b[NA redraw came as frame #2,
+  // after the snapshot), which re-creates the dup exactly.
+  const awaitSeqBump = async (timeoutMs: number): Promise<void> => {
+    const seq = writeSeq
+    const deadline = Date.now() + timeoutMs
+    while (writeSeq === seq && Date.now() < deadline) await Bun.sleep(15)
+  }
   const firstAttach = async (s: { write(b: Buffer): number }, c: number, r: number): Promise<void> => {
     await awaitModelParsedStable()
-    const changed = c !== cols || r !== rows
-    if (changed) {
-      try {
-        xterm.resize(c, r) // MODEL only (for the serialize round-trip) — child resized below, after the snapshot
-      } catch {
-        /* transient */
-      }
-      cols = c
-      rows = r
+    if (c !== cols || r !== rows) {
+      applyGeometry(c, r) // model + child together — one honest SIGWINCH, BEFORE the snapshot
+      await awaitSeqBump(SIGWINCH_REDRAW_WAIT_MS) // the redraw wave ARRIVES (or the child has none)
+      await awaitModelParsedStable() // …then drain it to stability (bounded, В25 cap)
     }
-    sendSnapshot(s) // serialize the model → send → lift gate (synchronous, no interleave)
-    if (changed) {
-      try {
-        child.terminal.resize(c, r) // honest one-SIGWINCH resize (post-snapshot, forwarded live), like native
-      } catch {
-        /* transient */
-      }
-      writeGeometry(runDir, session, c, r) // record the new current child geometry for the warm-deliver readers
-    }
+    sendSnapshot(s) // serialize the post-redraw model → send → lift gate (synchronous, no interleave)
   }
   // DETACH = NO RESIZE (emulator invariant). A detached hosted TUI keeps its LAST client geometry — it is
   // NEVER shrunk back to serve. The old FINDING-2 revert shrank the child into a tiny viewport, making claude
