@@ -29,13 +29,14 @@
 // unit-testable with no network and no launchctl; the defaults are the real impls.
 
 import { spawnSync } from 'child_process'
-import { mkdtempSync, readdirSync, rmSync } from 'fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { connect } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { isInfraRuntime } from '../core/constants.ts'
 import { IapError } from '../core/errors.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
+import { stampBinaryHealthy } from '../install/index.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import {
   cycleDaemon,
@@ -46,7 +47,7 @@ import {
   type DaemonRestartResult,
   type LaunchdJobCycleResult,
 } from '../launch/launchd.ts'
-import { defaultDaemonSocketPath } from '../daemon/index.ts'
+import { daemonDiscoveryPath, defaultDaemonSocketPath } from '../daemon/index.ts'
 // Type-only (erased at runtime → no import cycle): the cascade tail renders these
 // shapes but receives the component-updaters as injected deps.
 import type { UpdateRuntimeResult } from '../runtime/update.ts'
@@ -76,6 +77,15 @@ export interface UpdateDeps {
   /** Re-register loaded foundation-owned infra launchd jobs whose plists run the
    *  installed iapeer binary (default: registry scan + sentinel guard). */
   recycleInfraJobs?: (env: NodeJS.ProcessEnv) => InfraJobRecycleResult[]
+  /** В54 — post-restart health gate (default: waitForDaemonHealthy). Infra jobs are
+   *  recycled ONLY after this passes — never onto an unproven binary. */
+  waitHealthy?: (env: NodeJS.ProcessEnv) => Promise<HealthResult>
+  /** В53 — the LIVE daemon's version (default: read router.json's `version`), or null
+   *  when no live daemon / unreadable / pre-В53 daemon (no version field). */
+  liveDaemonVersion?: (env: NodeJS.ProcessEnv) => string | null
+  /** В50 — record the installed binary as known-good after a passed health-check
+   *  (default: stampBinaryHealthy; skipped under the test sandbox). */
+  stampHealthy?: (env: NodeJS.ProcessEnv) => boolean
 }
 
 export interface InfraJobRecycleResult {
@@ -96,8 +106,15 @@ export interface UpdateResult {
   to?: string
   /** What happened to the live daemon (only on 'updated'). */
   daemon?: DaemonRestartResult['state']
+  /** Post-restart health verdict (set only when the daemon was restarted): true =
+   *  socket accepting (infra recycled + binary stamped known-good), false = did NOT
+   *  come up (the rollback cue). Undefined when there was nothing to health-check. */
+  healthy?: boolean
   /** Foundation-owned infra jobs recycled after the binary swap (only on 'updated'). */
   infra?: InfraJobRecycleResult[]
+  /** В53 — set when the "already-latest" gate found the LIVE daemon running an older
+   *  version (interrupted prior update) and healed it with a restart. */
+  healedStaleDaemon?: string
   /** Human reason on 'failed' / extra detail on a daemon restart hiccup. */
   reason?: string
 }
@@ -255,13 +272,57 @@ export function recycleFoundationOwnedInfraJobs(env: NodeJS.ProcessEnv = process
   return out
 }
 
+/** В53 default — the live daemon's version from the discovery file (router.json).
+ *  Null when there is no live daemon (file absent — it is removed on clean
+ *  shutdown), the file is unreadable, or the daemon predates the version field. */
+function defaultLiveDaemonVersion(env: NodeJS.ProcessEnv): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(daemonDiscoveryPath({ env }), 'utf8')) as { version?: unknown }
+    return typeof raw.version === 'string' && SEMVER_RE.test(raw.version) ? raw.version : null
+  } catch {
+    return null
+  }
+}
+
+/** Restart → health-gate → (recycle infra + stamp known-good) — the SETTLE half every
+ *  update path shares. В54: infra jobs are recycled ONLY after the daemon proved
+ *  healthy — a broken release must take down the daemon alone, never also flip
+ *  telegram/notifier onto the broken binary (rollback re-cycles them after restoring
+ *  `.prev`). В50: the healthy binary is stamped known-good so the NEXT install may
+ *  refresh `.prev` from it. 'not-loaded' (no daemon on this host) keeps the legacy
+ *  behavior — recycle loaded infra jobs, nothing to health-check or stamp. */
+async function settleDaemon(
+  d: DaemonRestartResult,
+  env: NodeJS.ProcessEnv,
+  deps: UpdateDeps,
+): Promise<{ healthy?: boolean; infra: InfraJobRecycleResult[]; reason?: string }> {
+  if (d.state === 'failed') {
+    return { infra: [], reason: `binary updated but daemon restart failed: ${d.detail ?? ''}`.trim() }
+  }
+  const recycleInfra = deps.recycleInfraJobs ?? recycleFoundationOwnedInfraJobs
+  if (d.state !== 'restarted') {
+    return { infra: recycleInfra(env) } // not-loaded: no live daemon → no health verdict, no stamp
+  }
+  const h = await (deps.waitHealthy ?? ((e: NodeJS.ProcessEnv) => waitForDaemonHealthy({ env: e })))(env)
+  if (!h.healthy) {
+    return { healthy: false, infra: [], reason: `daemon is NOT healthy after restart (${h.detail ?? 'socket not accepting'})` }
+  }
+  // Default stamp is skipped under the test sandbox (a real stamp writes next to the
+  // REAL binary); tests that care inject stampHealthy.
+  const stamp = deps.stampHealthy ?? ((e: NodeJS.ProcessEnv) => (e.IAPEER_TEST_SANDBOX === '1' ? false : stampBinaryHealthy(e)))
+  stamp(env)
+  return { healthy: true, infra: recycleInfra(env) }
+}
+
 /**
  * Update the foundation to the latest published version (cloud-only) and restart
  * the daemon onto it. Idempotent + version-gated: a no-op "already-latest" when the
- * installed version equals the published one (unless `force`). Pure-ish — the three
- * effects are injected, so this is fully unit-testable.
+ * installed version equals the published one (unless `force`) AND the live daemon
+ * actually runs it (В53 — an interrupted prior update left the binary swapped but
+ * the daemon on old code; that heals with a restart, not a false no-op). Pure-ish —
+ * every effect is injected, so this is fully unit-testable.
  */
-export function updateIapeer(deps: UpdateDeps = {}): UpdateResult {
+export async function updateIapeer(deps: UpdateDeps = {}): Promise<UpdateResult> {
   const env = deps.env ?? process.env
   const from = deps.currentVersion ?? IAPEER_VERSION
   const resolve = deps.resolveVersion ?? defaultResolveVersion
@@ -281,7 +342,26 @@ export function updateIapeer(deps: UpdateDeps = {}): UpdateResult {
     }
   }
   if (desired === from && !deps.force) {
-    return { status: 'already-latest', from, latest: desired }
+    // В53 — the binary is at the target, but is the LIVE daemon running it? A prior
+    // update that swapped the binary and then died before/inside cycleDaemon leaves
+    // the fleet on the old core FOREVER while every retry says "already-latest".
+    const live = (deps.liveDaemonVersion ?? defaultLiveDaemonVersion)(env)
+    if (!live || live === from) {
+      return { status: 'already-latest', from, latest: desired }
+    }
+    const d = (deps.restartDaemon ?? cycleDaemon)(env)
+    const settled = await settleDaemon(d, env, deps)
+    return {
+      status: 'updated',
+      from: live,
+      to: desired,
+      latest: desired,
+      daemon: d.state,
+      healthy: settled.healthy,
+      infra: settled.infra,
+      healedStaleDaemon: live,
+      reason: settled.reason,
+    }
   }
 
   const runInstall = deps.runInstall ?? defaultRunInstall
@@ -300,21 +380,17 @@ export function updateIapeer(deps: UpdateDeps = {}): UpdateResult {
     }
   }
 
-  const restart = deps.restartDaemon ?? cycleDaemon
-  const d = restart(env)
-  const recycleInfra = deps.recycleInfraJobs ?? recycleFoundationOwnedInfraJobs
-  // If the daemon re-registration itself failed, do NOT widen the blast radius by
-  // cycling infra jobs onto a binary whose daemon could not come up. Rollback will
-  // re-cycle them after restoring `.prev`.
-  const infra = d.state === 'failed' ? [] : recycleInfra(env)
+  const d = (deps.restartDaemon ?? cycleDaemon)(env)
+  const settled = await settleDaemon(d, env, deps)
   return {
     status: 'updated',
     from,
     to: desired,
     latest: desired,
     daemon: d.state,
-    infra,
-    reason: d.state === 'failed' ? `binary updated but daemon restart failed: ${d.detail ?? ''}`.trim() : undefined,
+    healthy: settled.healthy,
+    infra: settled.infra,
+    reason: settled.reason,
   }
 }
 

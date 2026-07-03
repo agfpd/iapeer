@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { iapeerBinPath, iapeerPrevBinPath, installIapeer, rollbackIapeer } from './index.ts'
+import { iapeerBinPath, iapeerPrevBinPath, installIapeer, rollbackIapeer, shouldCopyCurrentToPrev, stampBinaryHealthy } from './index.ts'
 
 describe('iapeerBinPath', () => {
   test('default = <home>/.local/bin/iapeer (stable host-wide path, on $PATH)', () => {
@@ -62,5 +62,47 @@ describe('rollbackIapeer', () => {
   test('fail-closed sandbox guard: refuses the REAL prod binary path', () => {
     const realEnv = { IAPEER_TEST_SANDBOX: '1', HOME: '/Users/fake-home' } as NodeJS.ProcessEnv
     expect(() => rollbackIapeer(realEnv)).toThrow(/refusing to overwrite the REAL prod binary/)
+  })
+})
+
+// В50 — known-good `.prev`: the healthy-stamp gates whether the CURRENT binary may
+// become the rollback target. A retry after a broken release (stamp mismatch) must
+// preserve the existing .prev, not overwrite it with the broken binary.
+describe('В50 — shouldCopyCurrentToPrev / stampBinaryHealthy', () => {
+  let binDir: string
+  let env: NodeJS.ProcessEnv
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), 'iapeer-prevgate-'))
+    env = { IAPEER_TEST_SANDBOX: '1', HOME: '/Users/x', IAPEER_BIN_DIR: binDir } as NodeJS.ProcessEnv
+  })
+  afterEach(() => {
+    rmSync(binDir, { recursive: true, force: true })
+  })
+
+  test('no stamp at all → legacy copy (first stamped update / manual install keep working)', () => {
+    writeFileSync(iapeerBinPath(env), 'CURRENT')
+    expect(shouldCopyCurrentToPrev(iapeerBinPath(env)).copy).toBe(true)
+  })
+
+  test('stamp matches the current binary (proven healthy) → copy', () => {
+    writeFileSync(iapeerBinPath(env), 'HEALTHY-BYTES')
+    expect(stampBinaryHealthy(env)).toBe(true)
+    expect(shouldCopyCurrentToPrev(iapeerBinPath(env)).copy).toBe(true)
+  })
+
+  test('stamp MISMATCH (binary replaced after the stamp — never health-checked) → preserve .prev', () => {
+    writeFileSync(iapeerBinPath(env), 'HEALTHY-BYTES')
+    expect(stampBinaryHealthy(env)).toBe(true)
+    // a later install swapped the binary (broken release) and CLEARED... no — simulate
+    // the interrupted case: bytes changed, stale stamp still describes the OLD binary
+    writeFileSync(iapeerBinPath(env), 'BROKEN-BYTES')
+    const verdict = shouldCopyCurrentToPrev(iapeerBinPath(env))
+    expect(verdict.copy).toBe(false)
+    expect(verdict.reason).toMatch(/never passed a post-deploy health-check/i)
+  })
+
+  test('stampBinaryHealthy refuses the REAL prod binary path under the sandbox', () => {
+    const realEnv = { IAPEER_TEST_SANDBOX: '1', HOME: '/Users/fake-home' } as NodeJS.ProcessEnv
+    expect(() => stampBinaryHealthy(realEnv)).toThrow(/refusing to overwrite the REAL prod binary/)
   })
 })

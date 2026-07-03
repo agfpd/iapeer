@@ -18,10 +18,11 @@ import { spawnSync } from 'child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { DAEMON_PLIST_LABEL, IapError } from '../core/index.ts'
-import { iapeerBinPath } from '../install/index.ts'
+import { buildProcessAddress, DAEMON_PLIST_LABEL, IapError } from '../core/index.ts'
+import { iapeerBinPath, iapeerHealthyStampPath } from '../install/index.ts'
 import { SIGNING_IDENTITY_CN } from '../install/signing.ts'
 import { daemonPlistPath } from '../daemon/main.ts'
+import { hostSessionAlive, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
 import { isFoundationOwnedPlist, launchAgentsDir } from '../launch/launchd.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 
@@ -32,6 +33,7 @@ export type UninstallActionKind =
   | 'remove-file'
   | 'remove-dir'
   | 'bootout-remove-plist'
+  | 'stop-pty-sessions'
   | 'strip-profile-lines'
   | 'remove-keychain-identity'
 
@@ -61,6 +63,11 @@ export interface UninstallOptions {
   removeCodesignIdentity?: boolean
   /** Injected sys runner (launchctl / security) for hermetic tests. */
   run?: SysRunner
+  /** В56 — how long to wait for a booted-out launchd job to actually unload before
+   *  declaring it stuck (default 10 s; tests inject a short value). */
+  launchdWaitMs?: number
+  /** В55 — how long to wait for SIGTERM'd pty sessions to die (default 8 s). */
+  sessionWaitMs?: number
 }
 
 const defaultRun: SysRunner = (cmd, args) => {
@@ -153,8 +160,26 @@ export function planUninstall(opts: UninstallOptions = {}): UninstallPlan {
     })
   }
 
+  // В55 — live warm-on-demand pty sessions (detached supervisors, NO plist: the
+  // launchd guard above cannot see them). Their run-dir/state live INSIDE ~/.iapeer —
+  // removing the tree under ~30 running agent processes leaves an orphaned live
+  // fleet working out of deleted directories. Stop them FIRST (before remove-dir).
+  const hosted = listHostedPeers(env).map(h => buildProcessAddress(h.runtime, h.personality))
+  items.push({
+    what: `live pty sessions (${hosted.length ? hosted.join(', ') : 'none'})`,
+    action: 'stop-pty-sessions',
+    present: hosted.length > 0,
+    detail: hosted.length ? 'will be stopped before ~/.iapeer is removed' : undefined,
+  })
+
   items.push({ what: 'binary ~/.local/bin/iapeer', action: 'remove-file', path: bin, present: existsSync(bin) })
   items.push({ what: 'previous binary (.prev)', action: 'remove-file', path: prev, present: existsSync(prev) })
+  items.push({
+    what: 'healthy-stamp (.healthy)',
+    action: 'remove-file',
+    path: iapeerHealthyStampPath(env),
+    present: existsSync(iapeerHealthyStampPath(env)),
+  })
   items.push({ what: 'state + config ~/.iapeer', action: 'remove-dir', path: root, present: existsSync(root) })
 
   for (const pf of profileFiles(env)) {
@@ -181,8 +206,47 @@ export interface UninstallResult {
   refused?: { reason: string; foreignLabels: string[] }
 }
 
-/** Remove a foundation install per the plan. Refuses if a foreign fleet is present. */
-export function executeUninstall(opts: UninstallOptions = {}): UninstallResult {
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
+
+/** В56 — poll `launchctl print gui/<uid>/<label>` until the job is GONE (print exits
+ *  non-zero) or the deadline passes. bootout is ASYNC in launchd: firing rm/rmdir the
+ *  moment it returns races the dying daemon's shutdown writes (recreated fragments)
+ *  and, on a bootout failure, leaves an orphaned KeepAlive job holding the port while
+ *  the item reads "removed". Same wait-for-gone contract the update cycle uses. */
+async function waitJobGone(run: SysRunner, uid: number, label: string, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (run('launchctl', ['print', `gui/${uid}/${label}`]).status !== 0) return true // not loaded → gone
+    if (Date.now() >= deadline) return false
+    await sleep(250)
+  }
+}
+
+/** В55 — stop every live warm-on-demand pty session (SIGTERM the supervisor daemon,
+ *  wait for its pidfile-liveness to drop). Best-effort per session; reports laggards. */
+async function stopHostedSessions(env: NodeJS.ProcessEnv, timeoutMs = 8000): Promise<{ stopped: string[]; stuck: string[] }> {
+  const identities = listHostedPeers(env).map(h => buildProcessAddress(h.runtime, h.personality))
+  for (const id of identities) {
+    try {
+      killPtyHost(id, env)
+    } catch {
+      /* verified-dead / permission — the wait below reports it */
+    }
+  }
+  const deadline = Date.now() + timeoutMs
+  let pending = identities
+  while (pending.length > 0 && Date.now() < deadline) {
+    await sleep(250)
+    pending = pending.filter(id => hostSessionAlive(id, env))
+  }
+  return { stopped: identities.filter(id => !pending.includes(id)), stuck: pending }
+}
+
+/** Remove a foundation install per the plan. Refuses if a foreign fleet is present.
+ *  Ordering contract: live pty sessions are stopped and launchd jobs are FULLY
+ *  unloaded (wait-for-gone) BEFORE ~/.iapeer is removed — a failed unload FAILS the
+ *  remove-dir step (never delete the tree out from under a still-running daemon). */
+export async function executeUninstall(opts: UninstallOptions = {}): Promise<UninstallResult> {
   const env = opts.env ?? process.env
   assertSandboxSafe(env)
   const run = opts.run ?? defaultRun
@@ -194,6 +258,9 @@ export function executeUninstall(opts: UninstallOptions = {}): UninstallResult {
   }
 
   const uid = process.getuid?.() ?? 0
+  // Set when a launchd job survived bootout (В56) — ~/.iapeer must NOT be removed
+  // from under a job launchd may respawn (KeepAlive) into the deleted tree.
+  let jobStillLoaded: string | undefined
   for (const item of plan.items) {
     if (!item.present) {
       res.skipped.push(item.what)
@@ -203,16 +270,37 @@ export function executeUninstall(opts: UninstallOptions = {}): UninstallResult {
       switch (item.action) {
         case 'bootout-remove-plist': {
           const label = (item.path ?? '').replace(/\.plist$/, '').split('/').pop() ?? ''
-          run('launchctl', ['bootout', `gui/${uid}/${label}`]) // best-effort (not-loaded → non-zero, fine)
+          run('launchctl', ['bootout', `gui/${uid}/${label}`]) // not-loaded → non-zero, benign (wait-for-gone verifies)
+          if (!(await waitJobGone(run, uid, label, opts.launchdWaitMs))) {
+            jobStillLoaded = label
+            res.failed.push({ what: item.what, detail: `job ${label} still loaded after bootout (wait-for-gone timeout)` })
+            continue // plist kept — the operator can bootout manually and re-run
+          }
           if (item.path) rmSync(item.path, { force: true })
+          break
+        }
+        case 'stop-pty-sessions': {
+          const r = await stopHostedSessions(env, opts.sessionWaitMs)
+          if (r.stuck.length > 0) {
+            res.failed.push({ what: item.what, detail: `still alive after SIGTERM+wait: ${r.stuck.join(', ')}` })
+            continue
+          }
           break
         }
         case 'remove-file':
           if (item.path) rmSync(item.path, { force: true })
           break
-        case 'remove-dir':
+        case 'remove-dir': {
+          if (jobStillLoaded) {
+            res.failed.push({
+              what: item.what,
+              detail: `NOT removed — launchd job ${jobStillLoaded} is still loaded (KeepAlive would respawn into a deleted tree); bootout it manually, then re-run uninstall`,
+            })
+            continue
+          }
           if (item.path) rmSync(item.path, { recursive: true, force: true })
           break
+        }
         case 'strip-profile-lines':
           if (item.path) stripInstallerLines(item.path)
           break

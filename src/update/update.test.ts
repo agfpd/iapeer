@@ -12,7 +12,7 @@ const restarted = (): DaemonRestartResult => ({ state: 'restarted' })
 
 /** A deps bundle with call-tracking spies. `latest` is what the resolver returns for
  *  the spec (latest OR a pinned `target`); null simulates "not found / unreachable". */
-function harness(opts: {
+async function harness(opts: {
   current: string
   latest: string | null
   target?: string
@@ -20,9 +20,13 @@ function harness(opts: {
   restart?: DaemonRestartResult
   recycle?: ReturnType<typeof recycleFoundationOwnedInfraJobs>
   force?: boolean
+  /** В53 — what the live daemon reports (default: matches `current`, i.e. consistent). */
+  liveVersion?: string | null
+  /** В54 — post-restart health verdict (default: healthy). */
+  healthy?: boolean
 }) {
-  const calls = { install: [] as string[], restart: 0, recycle: 0, resolved: [] as string[] }
-  const result = updateIapeer({
+  const calls = { install: [] as string[], restart: 0, recycle: 0, resolved: [] as string[], stamped: 0, healthChecks: 0 }
+  const result = await updateIapeer({
     env: { IAPEER_TEST_SANDBOX: '1' },
     force: opts.force,
     currentVersion: opts.current,
@@ -43,13 +47,22 @@ function harness(opts: {
       calls.recycle++
       return opts.recycle ?? []
     },
+    liveDaemonVersion: () => (opts.liveVersion === undefined ? opts.current : opts.liveVersion),
+    waitHealthy: () => {
+      calls.healthChecks++
+      return Promise.resolve(opts.healthy === false ? { healthy: false, detail: 'probe refused' } : { healthy: true })
+    },
+    stampHealthy: () => {
+      calls.stamped++
+      return true
+    },
   })
   return { result, calls }
 }
 
 describe('updateIapeer — version gate', () => {
-  test('already at latest → no install, no restart', () => {
-    const { result, calls } = harness({ current: '0.2.2', latest: '0.2.2' })
+  test('already at latest → no install, no restart', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.2.2' })
     expect(result.status).toBe('already-latest')
     expect(result.from).toBe('0.2.2')
     expect(result.latest).toBe('0.2.2')
@@ -58,16 +71,16 @@ describe('updateIapeer — version gate', () => {
     expect(calls.recycle).toBe(0)
   })
 
-  test('--force reinstalls + restarts even when already latest', () => {
-    const { result, calls } = harness({ current: '0.2.2', latest: '0.2.2', force: true })
+  test('--force reinstalls + restarts even when already latest', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.2.2', force: true })
     expect(result.status).toBe('updated')
     expect(result.to).toBe('0.2.2')
     expect(calls.install).toEqual(['0.2.2'])
     expect(calls.restart).toBe(1)
   })
 
-  test('newer published version → installs THAT version + restarts', () => {
-    const { result, calls } = harness({ current: '0.2.2', latest: '0.3.0' })
+  test('newer published version → installs THAT version + restarts', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.3.0' })
     expect(result.status).toBe('updated')
     expect(result.from).toBe('0.2.2')
     expect(result.to).toBe('0.3.0')
@@ -78,23 +91,67 @@ describe('updateIapeer — version gate', () => {
     expect(calls.recycle).toBe(1)
   })
 
-  test('after binary install, loaded foundation-owned infra jobs are recycled too', () => {
+  test('after binary install, loaded foundation-owned infra jobs are recycled too', async () => {
     const recycle = [{ personality: 'timer', runtime: 'notifier', label: 'com.iapeer.timer', state: 'restarted' as const }]
-    const { result, calls } = harness({ current: '0.2.2', latest: '0.3.0', recycle })
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.3.0', recycle })
     expect(result.status).toBe('updated')
     expect(result.infra).toEqual(recycle)
     expect(calls.recycle).toBe(1)
   })
 
-  test('no target → resolves the "latest" spec', () => {
-    const { calls } = harness({ current: '0.2.2', latest: '0.3.0' })
+  test('В54 — infra recycles ONLY after the daemon proved healthy; stamp follows health', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.3.0' })
+    expect(result.healthy).toBe(true)
+    expect(calls.healthChecks).toBe(1)
+    expect(calls.recycle).toBe(1)
+    expect(calls.stamped).toBe(1) // В50 — known-good stamp on the healthy binary
+  })
+
+  test('В54 — unhealthy restart → NO infra recycle, NO stamp, loud reason', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.3.0', healthy: false })
+    expect(result.status).toBe('updated')
+    expect(result.healthy).toBe(false)
+    expect(result.infra).toEqual([])
+    expect(result.reason).toMatch(/NOT healthy/i)
+    expect(calls.recycle).toBe(0) // never widen the blast radius onto telegram/notifier
+    expect(calls.stamped).toBe(0) // a broken binary is never stamped known-good
+  })
+})
+
+describe('updateIapeer — В53 stale live daemon (interrupted prior update)', () => {
+  test('binary at latest but live daemon on an OLDER version → heal with a restart', async () => {
+    const { result, calls } = await harness({ current: '0.3.0', latest: '0.3.0', liveVersion: '0.2.9' })
+    expect(result.status).toBe('updated')
+    expect(result.healedStaleDaemon).toBe('0.2.9')
+    expect(result.from).toBe('0.2.9')
+    expect(result.to).toBe('0.3.0')
+    expect(calls.install).toEqual([]) // the binary is already correct — no re-install
+    expect(calls.restart).toBe(1)
+    expect(calls.recycle).toBe(1) // after health
+    expect(calls.stamped).toBe(1)
+  })
+
+  test('no live daemon (router.json absent) → plain already-latest, nothing touched', async () => {
+    const { result, calls } = await harness({ current: '0.3.0', latest: '0.3.0', liveVersion: null })
+    expect(result.status).toBe('already-latest')
+    expect(calls.restart).toBe(0)
+  })
+
+  test('live daemon matches the binary → plain already-latest', async () => {
+    const { result, calls } = await harness({ current: '0.3.0', latest: '0.3.0', liveVersion: '0.3.0' })
+    expect(result.status).toBe('already-latest')
+    expect(calls.restart).toBe(0)
+  })
+
+  test('no target → resolves the "latest" spec', async () => {
+    const { calls } = await harness({ current: '0.2.2', latest: '0.3.0' })
     expect(calls.resolved).toEqual(['latest'])
   })
 })
 
 describe('updateIapeer — pinned version (one-shot target)', () => {
-  test('pin to an exact version → resolves THAT spec and installs it', () => {
-    const { result, calls } = harness({ current: '0.2.4', target: '0.2.2', latest: '0.2.2' })
+  test('pin to an exact version → resolves THAT spec and installs it', async () => {
+    const { result, calls } = await harness({ current: '0.2.4', target: '0.2.2', latest: '0.2.2' })
     expect(calls.resolved).toEqual(['0.2.2']) // resolves the pinned spec, not "latest"
     expect(result.status).toBe('updated')
     expect(result.from).toBe('0.2.4')
@@ -102,14 +159,14 @@ describe('updateIapeer — pinned version (one-shot target)', () => {
     expect(calls.install).toEqual(['0.2.2'])
   })
 
-  test('pinned version already installed → already-at, no install', () => {
-    const { result, calls } = harness({ current: '0.2.2', target: '0.2.2', latest: '0.2.2' })
+  test('pinned version already installed → already-at, no install', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', target: '0.2.2', latest: '0.2.2' })
     expect(result.status).toBe('already-latest')
     expect(calls.install).toEqual([])
   })
 
-  test('pinned version not found on npm → failed (not an npx error)', () => {
-    const { result, calls } = harness({ current: '0.2.4', target: '9.9.9', latest: null })
+  test('pinned version not found on npm → failed (not an npx error)', async () => {
+    const { result, calls } = await harness({ current: '0.2.4', target: '9.9.9', latest: null })
     expect(result.status).toBe('failed')
     expect(result.reason).toMatch(/"9\.9\.9" not found on npm/i)
     expect(calls.install).toEqual([])
@@ -118,31 +175,31 @@ describe('updateIapeer — pinned version (one-shot target)', () => {
 })
 
 describe('updateIapeer — failure paths', () => {
-  test('latest unresolved (offline / registry error) → failed, no install', () => {
-    const { result, calls } = harness({ current: '0.2.2', latest: null })
+  test('latest unresolved (offline / registry error) → failed, no install', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: null })
     expect(result.status).toBe('failed')
     expect(result.reason).toMatch(/latest.*version.*npm|offline|registry/i)
     expect(calls.install).toEqual([])
     expect(calls.restart).toBe(0)
   })
 
-  test('install fails → failed, daemon NOT restarted', () => {
-    const { result, calls } = harness({ current: '0.2.2', latest: '0.3.0', installOk: false })
+  test('install fails → failed, daemon NOT restarted', async () => {
+    const { result, calls } = await harness({ current: '0.2.2', latest: '0.3.0', installOk: false })
     expect(result.status).toBe('failed')
     expect(result.latest).toBe('0.3.0')
     expect(result.reason).toMatch(/install.*failed/i)
     expect(calls.restart).toBe(0)
   })
 
-  test('daemon not loaded → updated, daemon=not-loaded (no error)', () => {
-    const { result } = harness({ current: '0.2.2', latest: '0.3.0', restart: { state: 'not-loaded' } })
+  test('daemon not loaded → updated, daemon=not-loaded (no error)', async () => {
+    const { result } = await harness({ current: '0.2.2', latest: '0.3.0', restart: { state: 'not-loaded' } })
     expect(result.status).toBe('updated')
     expect(result.daemon).toBe('not-loaded')
     expect(result.reason).toBeUndefined()
   })
 
-  test('binary updated but restart failed → updated with a warning reason', () => {
-    const { result, calls } = harness({
+  test('binary updated but restart failed → updated with a warning reason', async () => {
+    const { result, calls } = await harness({
       current: '0.2.2',
       latest: '0.3.0',
       restart: { state: 'failed', detail: 'kickstart exit 1' },
@@ -155,10 +212,10 @@ describe('updateIapeer — failure paths', () => {
 })
 
 describe('updateIapeer — real-installer sandbox guard', () => {
-  test('default runInstall refuses a real install under IAPEER_TEST_SANDBOX', () => {
+  test('default runInstall refuses a real install under IAPEER_TEST_SANDBOX', async () => {
     // fetchLatest injected (newer) so the gate proceeds to the DEFAULT installer,
     // which must refuse rather than fetch+build over the prod ~/.local/bin/iapeer.
-    expect(() =>
+    await expect(
       updateIapeer({
         env: { IAPEER_TEST_SANDBOX: '1' },
         currentVersion: '0.2.2',
@@ -166,7 +223,7 @@ describe('updateIapeer — real-installer sandbox guard', () => {
         // runInstall NOT injected → exercises the real defaultRunInstall guard.
         restartDaemon: restarted,
       }),
-    ).toThrow(/IAPEER_TEST_SANDBOX/)
+    ).rejects.toThrow(/IAPEER_TEST_SANDBOX/)
   })
 })
 

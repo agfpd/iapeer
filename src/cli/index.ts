@@ -1261,7 +1261,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'default-runtime <runtime> (--peer <p> | --all)',
     desc: 'flip the PRIMARY (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command',
   },
-  { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then tmux attach' },
+  { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then attach to the pty session (Ctrl-] detaches)' },
   { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact' },
   { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
   { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
@@ -2115,7 +2115,12 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         }
 
         // ── Foundation (the core; a hard failure aborts the cascade) ──
-        const r = updateIapeer({ env, force: flags.force === true, targetVersion: pinned })
+        // updateIapeer owns the whole settle sequence now: restart → health-gate →
+        // (infra recycle + known-good stamp) — В54: infra recycles ONLY after health;
+        // В50: the healthy binary is stamped so the next install may refresh `.prev`;
+        // В53: "already-latest" also verifies the LIVE daemon runs the binary's version
+        // (an interrupted prior update heals with a restart instead of a false no-op).
+        const r = await updateIapeer({ env, force: flags.force === true, targetVersion: pinned })
         let foundationHardFail = false
         if (r.status === 'failed') {
           errOut(`update failed: ${r.reason}\n`)
@@ -2123,15 +2128,13 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         } else if (r.status === 'already-latest') {
           out(`foundation: already at version ${r.from}\n`)
         } else if (r.daemon === 'restarted') {
-          // 'updated' + daemon restarted: VERIFY it actually came back up (a binary that
-          // fails to boot must not read as a healthy deploy — it's the cue to roll back).
-          const h = await waitForDaemonHealthy({ env })
-          if (!h.healthy) {
-            errOut(`foundation: updated ${r.from} → ${r.to} but the daemon is NOT healthy after restart (${h.detail}).\nroll back now: iapeer rollback\n`)
+          if (r.healthy !== true) {
+            errOut(`foundation: updated ${r.from} → ${r.to} but ${r.reason ?? 'the daemon is NOT healthy after restart'}.\nroll back now: iapeer rollback\n`)
             foundationHardFail = true
           } else {
             const note = infraRecycleNote(r.infra)
-            ;(infraRecycleFailed(r.infra) ? errOut : out)(`foundation: updated ${r.from} → ${r.to}; daemon restarted and healthy${note}\n`)
+            const healNote = r.healedStaleDaemon ? ` (live daemon was still on ${r.healedStaleDaemon} — healed)` : ''
+            ;(infraRecycleFailed(r.infra) ? errOut : out)(`foundation: updated ${r.from} → ${r.to}; daemon restarted and healthy${healNote}${note}\n`)
           }
         } else {
           const daemonNote =
@@ -2166,7 +2169,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // daemon onto it, and verify health. ONE level deep (single .prev). Cloud is
         // still the source of truth — rollback is the local "undo the last update" while
         // a fixed version is published.
-        const { rollbackIapeer } = await import('../install/index.ts')
+        const { rollbackIapeer, stampBinaryHealthy } = await import('../install/index.ts')
         const rb = rollbackIapeer(env)
         if (rb.status === 'failed') {
           errOut(`rollback failed: ${rb.reason}\n`)
@@ -2178,6 +2181,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const infraFailed = infraRecycleFailed(infra)
         if (restart.state === 'restarted') {
           const h = await waitForDaemonHealthy({ env })
+          // В50 — a restored binary that just proved healthy is known-good: stamp it so
+          // the NEXT install may refresh `.prev` from it (sandbox never reaches here).
+          if (h.healthy) stampBinaryHealthy(env)
           const msg = h.healthy
             ? `rolled back to the previous binary; daemon restarted and healthy${infraNote}\n`
             : `rolled back, but the daemon is NOT healthy after restart (${h.detail})${infraNote}\n`
@@ -2234,7 +2240,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             return 1
           }
         }
-        const res = executeUninstall({ env, removeCodesignIdentity: removeCodesign })
+        const res = await executeUninstall({ env, removeCodesignIdentity: removeCodesign })
         for (const r of res.removed) out(`  removed: ${r}\n`)
         for (const s of res.skipped) out(`  skipped (absent): ${s}\n`)
         for (const f of res.failed) errOut(`  FAILED: ${f.what} — ${f.detail}\n`)
@@ -2276,6 +2282,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         out(
           `installed iapeer → ${r.binPath}` +
             `${r.prevPath ? ` (previous kept: ${r.prevPath})` : ''}` +
+            `${r.prevKept ? ` (.prev NOT overwritten: ${r.prevKept.reason})` : ''}` +
             `${r.size ? ` (${Math.round(r.size / 1e6)}M)` : ''}\n` +
             signingLine +
             `  scaffold: ~/.iapeer/ ensured (peers/, state, logs, cache, runtimes)\n` +

@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -546,5 +546,31 @@ describe('cycleDaemonCore (LWCR-safe bootout+bootstrap)', () => {
     const r = cycleDaemonCore('501', '/p.plist', h.deps)
     expect(r.state).toBe('failed')
     expect(r.detail).toContain('manual rescue')
+  })
+})
+
+// В46 — the plist WRITE itself is sandbox-guarded (a test that forgot
+// IAPEER_LAUNCHAGENTS_DIR must never write a real ~/Library/LaunchAgents plist —
+// the live daemon reads that file as the H4 launchd-owned marker) and atomic
+// (no truncated sentinel-less plist that the collision guard would then refuse
+// as foreign forever).
+describe('В46 — installAlwaysOnPlist sandbox guard + atomic write', () => {
+  test('REFUSES the real ~/Library/LaunchAgents under IAPEER_TEST_SANDBOX=1', () => {
+    // No IAPEER_LAUNCHAGENTS_DIR → resolves to <HOME>/Library/LaunchAgents; HOME left
+    // to the REAL home on purpose (that is exactly the forgotten-override case).
+    const env = { IAPEER_TEST_SANDBOX: '1', IAPEER_ROOT: '/tmp/nowhere-iapeer' } as NodeJS.ProcessEnv
+    expect(() =>
+      installAlwaysOnPlist({ personality: 'v46-ghost', runtime: 'notifier', cwd: '/tmp/x', env }),
+    ).toThrow(/refusing to write a REAL LaunchAgents plist/)
+  })
+
+  test('write is atomic: no .tmp residue next to the final plist', () => {
+    const root = mkTmp()
+    const laDir = join(root, 'LaunchAgents')
+    const env = { IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_ROOT: join(root, 'iapeer') } as NodeJS.ProcessEnv
+    const path = installAlwaysOnPlist({ personality: 'timer', runtime: 'notifier', cwd: join(root, 'c'), env })
+    expect(existsSync(path)).toBe(true)
+    const residue = readdirSync(laDir).filter(f => f.includes('.tmp'))
+    expect(residue).toEqual([])
   })
 })

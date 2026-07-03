@@ -55,6 +55,12 @@ export interface RuntimeManifest {
    *  `update-runtime` version-gates on it; absent → no gate, the update
    *  re-installs idempotently. */
   version?: string
+  /** OPTIONAL npm package that delivered this runtime (В52). Stamped by the
+   *  FOUNDATION after a successful install with an explicit --package override, so
+   *  a custom-packaged runtime survives the FU12 cascade and a direct
+   *  `update-runtime` (resolution order: explicit override → this stamp → the
+   *  built-in registry). A package may also self-declare it. */
+  package?: string
   /** OPTIONAL per-peer self-config hook (the shared contract both modes call). */
   selfConfig?: SelfConfigDescriptor
   /** OPTIONAL fixed peer-set (mode a). Omitted by an operator-add runtime (mode b). */
@@ -113,7 +119,14 @@ function normalizeManifest(raw: unknown, runtime: Runtime): RuntimeManifest {
     })
   }
   const version = typeof obj.version === 'string' && obj.version.trim() ? obj.version.trim() : undefined
-  return { runtime: declaredRuntime, ...(version ? { version } : {}), ...(selfConfig ? { selfConfig } : {}), ...(peers ? { peers } : {}) }
+  const pkg = typeof obj.package === 'string' && obj.package.trim() ? obj.package.trim() : undefined
+  return {
+    runtime: declaredRuntime,
+    ...(version ? { version } : {}),
+    ...(pkg ? { package: pkg } : {}),
+    ...(selfConfig ? { selfConfig } : {}),
+    ...(peers ? { peers } : {}),
+  }
 }
 
 /** Read a runtime's manifest (~/.iapeer/runtimes/<runtime>/runtime.json), or null when

@@ -13,7 +13,8 @@
 // signInstalledBinary (signing.ts) re-signs each install with the
 // stable local identity so the designated requirement — and the grants — survive.
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { createHash } from 'crypto'
 import { homedir } from 'os'
 import { basename, join, relative, sep } from 'path'
 import { spawnSync } from 'child_process'
@@ -35,11 +36,78 @@ export interface InstallResult {
   binPath: string
   /** The previous binary preserved for rollback (when one existed). */
   prevPath?: string
+  /** В50 — set when the outgoing binary was NOT copied to `.prev` because the healthy-stamp
+   *  says it never passed a post-deploy health-check: the existing `.prev` (last KNOWN-GOOD)
+   *  is preserved so a retry after a broken release cannot destroy the rollback target. */
+  prevKept?: { reason: string }
   /** Bytes of the installed binary. */
   size?: number
   /** Stable-identity re-sign outcome (TCC grants survive updates). Soft: a signing
    *  hiccup never fails the install — the binary works ad-hoc-signed. */
   signing?: SigningOutcome
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// В50 — known-good `.prev`. Without a gate, EVERY install copies the current
+// binary to `.prev`: a series of broken releases overwrites the known-good
+// rollback target with a broken binary (retry of an update destroys the recovery
+// path). The gate: `iapeer update`/`rollback` stamp `<bin>.healthy` with the
+// sha256 of the binary ONLY after the daemon passed its post-deploy health-check.
+// The next install copies the current binary to `.prev` only when the stamp
+// matches it (proven-healthy). No stamp at all → legacy behavior (copy) — first
+// update after this ships, manual `bin/iapeer install` runs, and fresh bootstraps
+// keep working unchanged. NB the stamp is CROSS-VERSION state: install runs from
+// the NEWLY-FETCHED package's source while the stamp was written by the OUTGOING
+// version — keep the format trivial (hex digest + newline).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The healthy-stamp path kept next to the binary. */
+export function iapeerHealthyStampPath(env: NodeJS.ProcessEnv = process.env): string {
+  return `${iapeerBinPath(env)}.healthy`
+}
+
+function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+/** Record the CURRENT installed binary as known-good (call ONLY after a passed
+ *  post-deploy health-check). Best-effort by design — a stamp hiccup must never
+ *  fail a successful update; it only means the next install falls back to
+ *  preserving the older `.prev`. */
+export function stampBinaryHealthy(env: NodeJS.ProcessEnv = process.env): boolean {
+  const binPath = iapeerBinPath(env)
+  assertInstallSandboxIsolated(binPath, env)
+  try {
+    writeFileSync(iapeerHealthyStampPath(env), `${sha256File(binPath)}\n`, { mode: 0o644 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The В50 decision: should the CURRENT binary become `.prev`? Copy when the
+ *  healthy-stamp matches it (proven-good) or when no stamp exists (legacy /
+ *  first stamped update / manual install); preserve the existing `.prev` when
+ *  the stamp EXISTS but does not match (the current binary never passed a
+ *  health-check — a broken release being retried). Pure read — exported for
+ *  hermetic tests (installIapeer itself runs a full compile). */
+export function shouldCopyCurrentToPrev(binPath: string): { copy: boolean; reason?: string } {
+  let stamped: string | undefined
+  try {
+    const stampPath = `${binPath}.healthy`
+    stamped = existsSync(stampPath) ? readFileSync(stampPath, 'utf8').trim() : undefined
+  } catch {
+    stamped = undefined // unreadable stamp → treat as absent (legacy copy)
+  }
+  if (stamped && stamped !== sha256File(binPath)) {
+    return {
+      copy: false,
+      reason:
+        'current binary never passed a post-deploy health-check (healthy-stamp mismatch) — ' +
+        'keeping the existing .prev as the known-good rollback target',
+    }
+  }
+  return { copy: true }
 }
 
 /**
@@ -76,14 +144,30 @@ export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = pr
     throw new Error(`iapeer build failed: ${(build.stderr ?? '').trim() || `exit ${build.status}`}`)
   }
   let prevPath: string | undefined
+  let prevKept: InstallResult['prevKept']
   if (existsSync(binPath)) {
-    prevPath = `${binPath}.prev`
-    // COPY (not move) the current binary to .prev so binPath is NEVER absent (audit
-    // #7): a move-then-move leaves no binary in the window between the two renames —
-    // if the second throws, the prod daemon + infra fleet crash-loop with no bin.
-    copyFileSync(binPath, prevPath)
+    // В50 — copy to .prev ONLY when shouldCopyCurrentToPrev says the current binary
+    // is trustworthy; otherwise preserve the existing .prev (last known-good).
+    const verdict = shouldCopyCurrentToPrev(binPath)
+    if (!verdict.copy) {
+      prevKept = { reason: verdict.reason! }
+    } else {
+      prevPath = `${binPath}.prev`
+      // COPY (not move) the current binary to .prev so binPath is NEVER absent (audit
+      // #7): a move-then-move leaves no binary in the window between the two renames —
+      // if the second throws, the prod daemon + infra fleet crash-loop with no bin.
+      copyFileSync(binPath, prevPath)
+    }
   }
   renameSync(tmp, binPath) // atomic replace in place (POSIX rename over an existing file)
+  // The stamp described the binary we just REPLACED — it must not vouch for the new
+  // bytes. Health of the new binary is proven (and re-stamped) by the update verb
+  // AFTER its health-check passes.
+  try {
+    unlinkSync(`${binPath}.healthy`)
+  } catch {
+    /* absent — fine */
+  }
   // Stable-identity re-sign (TCC grants survive updates). AFTER the rename: the
   // signature belongs to the final inode at the final path. Soft-fail by design.
   const signing = signInstalledBinary(binPath, env)
@@ -93,7 +177,7 @@ export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = pr
   } catch {
     /* best-effort */
   }
-  return { binPath, prevPath, size, signing }
+  return { binPath, prevPath, prevKept, size, signing }
 }
 
 /**

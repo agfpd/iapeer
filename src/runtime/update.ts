@@ -18,8 +18,11 @@
 // the stamp cannot be gated — the update proceeds idempotently and says so.
 
 import { spawnSync } from 'child_process'
-import { type Runtime } from '../core/constants.ts'
+import { readdirSync } from 'fs'
+import { join } from 'path'
+import { isRuntime, type Runtime } from '../core/constants.ts'
 import { readPeersIndex } from '../registry/index.ts'
+import { resolveGlobalRoot } from '../storage/index.ts'
 import { readRuntimeManifest } from './index.ts'
 import {
   deployRuntime,
@@ -106,7 +109,9 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
       detail: `no manifest for "${runtime}" — install first: iapeer install-runtime ${runtime}`,
     }
   }
-  const pkg = resolveRuntimePackage(runtime)
+  // В52 — the manifest's `package` stamp (a custom --package install) wins over the
+  // built-in registry, so a custom-packaged runtime updates from ITS package.
+  const pkg = resolveRuntimePackage(runtime, manifest.package)
   if (!pkg) {
     return { runtime, state: 'not-installed', peers: [], restarted: [], detail: `no package mapping for "${runtime}"` }
   }
@@ -122,10 +127,29 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
     return { runtime, package: pkg, state: 'already-latest', from: installed, to: latest, peers: [], restarted: [] }
   }
 
-  // Re-install (forced npx — the package self-deploys its new bin + manifest).
-  const install = installRuntimePackage({ runtime, force: true, env, runNpx: opts.runNpx })
+  // Re-install, PINNED to the version the gate resolved (В51 — an unpinned npx can
+  // serve a stale cached/propagating build while we report "updated → latest").
+  const install = installRuntimePackage({ runtime, package: manifest.package, version: latest, force: true, env, runNpx: opts.runNpx })
   if (install.state !== 'ran') {
     return { runtime, package: pkg, state: 'install-failed', from: installed, to: latest, peers: [], restarted: [], detail: install.detail ?? install.state }
+  }
+
+  // В51 — verify the DELIVERED version: re-read the manifest the package just wrote
+  // and compare its stamp against the gate's target. A mismatch = the npx cache/CDN
+  // served old code — fail LOUD, never report 'updated' for a version that did not
+  // arrive. (No stamp in the new manifest → unverifiable; reported, not fatal.)
+  const delivered = readRuntimeManifest(runtime, { env })
+  if (delivered?.version && delivered.version !== latest) {
+    return {
+      runtime,
+      package: pkg,
+      state: 'install-failed',
+      from: installed,
+      to: latest,
+      peers: [],
+      restarted: [],
+      detail: `delivered version ${delivered.version} ≠ target ${latest} (stale npx cache / CDN propagation) — retry in ~1 min`,
+    }
   }
 
   // IDEMPOTENT re-provision via the SAME deploy path install-runtime uses: blurb
@@ -157,6 +181,10 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
     )
   }
 
+  const notes = [
+    installed ? undefined : 'no version stamp in the old manifest — gate skipped, re-installed idempotently',
+    delivered?.version ? undefined : 'no version stamp in the NEW manifest — delivered version unverified',
+  ].filter(Boolean)
   return {
     runtime,
     package: pkg,
@@ -165,16 +193,32 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
     to: latest,
     peers,
     restarted,
-    detail: installed ? undefined : 'no version stamp in the old manifest — gate skipped, re-installed idempotently',
+    detail: notes.length ? notes.join('; ') : undefined,
   }
 }
 
-/** `--all`: update every KNOWN runtime that is actually installed (manifest present);
- *  the rest are reported as not-installed, never an error. */
+/** Every runtime with a manifest on THIS host (~/.iapeer/runtimes/<r>/runtime.json) —
+ *  the union the FU12 cascade must cover. В52: scanning the disk (not the frozen
+ *  built-in registry) is what keeps a custom `--package` runtime in the cascade. */
+function installedRuntimes(env: NodeJS.ProcessEnv): Runtime[] {
+  let entries: string[] = []
+  try {
+    entries = readdirSync(join(resolveGlobalRoot(env), 'runtimes'))
+  } catch {
+    /* no runtimes dir → nothing installed */
+  }
+  return entries.filter(e => isRuntime(e) && readRuntimeManifest(e as Runtime, { env }) !== null) as Runtime[]
+}
+
+/** `--all`: update every runtime that is actually installed — the disk scan (manifest
+ *  present) UNION the built-in registry (В52: a custom --package runtime has no
+ *  built-in mapping but IS installed; it must not fall out of the cascade). Known
+ *  runtimes without a manifest are reported as not-installed, never an error. */
 export async function updateAllRuntimes(opts: Omit<UpdateRuntimeOptions, 'runtime'> = {}): Promise<UpdateRuntimeResult[]> {
   const env = opts.env ?? process.env
   const out: UpdateRuntimeResult[] = []
-  for (const rt of Object.keys(RUNTIME_PACKAGES) as Runtime[]) {
+  const known = new Set<Runtime>([...(Object.keys(RUNTIME_PACKAGES) as Runtime[]), ...installedRuntimes(env)])
+  for (const rt of known) {
     if (!readRuntimeManifest(rt, { env })) {
       out.push({ runtime: rt, state: 'not-installed', peers: [], restarted: [], detail: 'not installed — skipped' })
       continue

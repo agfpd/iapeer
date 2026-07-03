@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { updateAllRuntimes, updateRuntime, type RestartedPeer } from './update.ts'
+import { installRuntimePackage } from './deploy.ts'
 import { readRuntimeManifest, writeRuntimeManifest, type RuntimeManifest } from './index.ts'
 import { upsertPeer } from '../registry/index.ts'
 
@@ -188,5 +189,114 @@ describe('updateAllRuntimes (--all)', () => {
     const byRt = Object.fromEntries(results.map(r => [r.runtime, r.state]))
     expect(byRt.telegram).toBe('already-latest')
     expect(byRt.notifier).toBe('not-installed')
+  })
+
+  test('В52 — a runtime OUTSIDE the built-in registry but installed on disk IS in the cascade', async () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    // `claude` has no built-in package mapping — only the manifest's package stamp
+    // (the custom `--package` install) makes it updatable. The frozen-map iteration
+    // used to drop it from the cascade entirely.
+    writeRuntimeManifest({ runtime: 'claude', version: '1.0.0', package: '@custom/claude-runtime' } as RuntimeManifest, { env })
+    const asked: string[] = []
+    const results = await updateAllRuntimes({
+      env,
+      runNpx: () => ({ ok: true }),
+      npmVersion: pkg => {
+        asked.push(pkg)
+        return '1.0.0'
+      },
+      restartPeer: restartOk([]),
+    })
+    const custom = results.find(r => r.runtime === 'claude')
+    expect(custom?.state).toBe('already-latest')
+    expect(asked).toContain('@custom/claude-runtime') // resolved from the manifest stamp
+  })
+})
+
+describe('В51 — delivered-version verify + pinned npx', () => {
+  test('npx serves STALE code (new manifest older than the target) → install-failed, loud', async () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    writeRuntimeManifest({ runtime: 'notifier', version: '0.1.0' }, { env })
+    const restarts: string[] = []
+    const r = await updateRuntime({
+      runtime: 'notifier',
+      env,
+      runNpx: (_pkg, e) => {
+        // the stale cache/CDN delivered 0.1.5 while the gate resolved 0.2.0
+        writeRuntimeManifest({ runtime: 'notifier', version: '0.1.5' }, { env: e })
+        return { ok: true }
+      },
+      npmVersion: () => '0.2.0',
+      restartPeer: restartOk(restarts),
+    })
+    expect(r.state).toBe('install-failed')
+    expect(r.detail).toMatch(/delivered version 0\.1\.5 ≠ target 0\.2\.0/)
+    expect(restarts).toEqual([]) // no restart onto unverified code
+  })
+
+  test('the npx spec is PINNED to the gate-resolved version', async () => {
+    const root = mkTmp()
+    const { dir, hook } = stubBins()
+    const env = envFor(root, dir)
+    writeRuntimeManifest({ runtime: 'notifier', version: '0.1.0', selfConfig: hook }, { env })
+    const specs: string[] = []
+    await updateRuntime({
+      runtime: 'notifier',
+      env,
+      runNpx: (pkg, e) => {
+        specs.push(pkg)
+        writeRuntimeManifest({ runtime: 'notifier', version: '0.2.0', selfConfig: hook }, { env: e })
+        return { ok: true }
+      },
+      npmVersion: () => '0.2.0',
+      restartPeer: restartOk([]),
+    })
+    expect(specs).toEqual(['@agfpd/notifier-runtime@0.2.0'])
+  })
+})
+
+describe('В52 — package stamp (custom --package survives)', () => {
+  test('installRuntimePackage with --package stamps the manifest after a successful run', () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    const r = installRuntimePackage({
+      runtime: 'notifier',
+      package: '@custom/notifier-fork',
+      env,
+      runNpx: (_pkg, e) => {
+        // the package self-deploys its manifest WITHOUT a package field
+        writeRuntimeManifest({ runtime: 'notifier', version: '0.9.0' }, { env: e })
+        return { ok: true }
+      },
+    })
+    expect(r.state).toBe('ran')
+    expect(readRuntimeManifest('notifier', { env })?.package).toBe('@custom/notifier-fork')
+  })
+
+  test('updateRuntime resolves the package from the manifest stamp (no --package repeat)', async () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    writeRuntimeManifest({ runtime: 'notifier', version: '0.9.0', package: '@custom/notifier-fork' } as RuntimeManifest, { env })
+    const asked: string[] = []
+    const specs: string[] = []
+    const r = await updateRuntime({
+      runtime: 'notifier',
+      env,
+      runNpx: (pkg, e) => {
+        specs.push(pkg)
+        writeRuntimeManifest({ runtime: 'notifier', version: '1.0.0', package: '@custom/notifier-fork' } as RuntimeManifest, { env: e })
+        return { ok: true }
+      },
+      npmVersion: pkg => {
+        asked.push(pkg)
+        return '1.0.0'
+      },
+      restartPeer: restartOk([]),
+    })
+    expect(r.state).toBe('updated')
+    expect(asked).toEqual(['@custom/notifier-fork'])
+    expect(specs).toEqual(['@custom/notifier-fork@1.0.0'])
   })
 })

@@ -13,7 +13,7 @@
 // here so the crashloop bound is visible and tunable, not an implicit default; raise
 // throttleIntervalSecs for a wider window). RunAtLoad+KeepAlive = always-on.
 
-import { accessSync, constants as FS, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { accessSync, constants as FS, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
@@ -631,6 +631,24 @@ export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string 
   if (!(sandbox && logDir.startsWith(`${realRoot}/`))) {
     mkdirSync(logDir, { recursive: true, mode: 0o700 })
   }
-  writeFileSync(path, renderLaunchdPlist(spec), { mode: 0o644 })
+  // В46 — fail-closed sandbox guard on the PLIST WRITE itself (symmetric to the mkdir
+  // guard above and the registry/install guards): a sandboxed test that forgot
+  // IAPEER_LAUNCHAGENTS_DIR must NEVER write a real ~/Library/LaunchAgents/
+  // com.iapeer.<p>.plist — the live daemon reads that file as the H4 launchd-owned
+  // marker, so a leaked test plist silently stops the daemon from waking the
+  // matching peer (plist present but never loaded → peer reads as dead forever).
+  const realAgents = join(homedir(), 'Library', 'LaunchAgents')
+  if (sandbox && path.startsWith(`${realAgents}/`)) {
+    throw new IapError(
+      `refusing to write a REAL LaunchAgents plist (${path}) under IAPEER_TEST_SANDBOX=1 — ` +
+        'set IAPEER_LAUNCHAGENTS_DIR to an isolated path',
+    )
+  }
+  // В46 — atomic write (tmp + rename): an interrupted direct write leaves a TRUNCATED
+  // plist without the ownership sentinel, which the collision guard above then reads
+  // as foreign — the peer becomes permanently un-provisionable ("refused-foreign").
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, renderLaunchdPlist(spec), { mode: 0o644 })
+  renameSync(tmp, path)
   return path
 }

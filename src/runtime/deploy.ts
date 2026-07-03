@@ -21,7 +21,7 @@ import { homedir } from 'os'
 import { type Runtime } from '../core/constants.ts'
 import { IapError } from '../core/errors.ts'
 import { createPeer, type CreatePeerResult } from '../create/index.ts'
-import { readRuntimeManifest, type RuntimeManifest, type RuntimePeerDecl } from './index.ts'
+import { readRuntimeManifest, writeRuntimeManifest, type RuntimeManifest, type RuntimePeerDecl } from './index.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Built-in runtime → npm package registry (§6): onboard AUTO-resolves
@@ -131,7 +131,8 @@ export interface InstallRuntimePackageResult {
 }
 
 /** Injectable npx runner (so tests / a sandbox proof can simulate the package's
- *  self-deploy without a published npm package). Default: `npx -y <package>`. */
+ *  self-deploy without a published npm package). Default: `npx -y <spec>` — the spec
+ *  may carry a version pin (`pkg@1.2.3`, В51). */
 export type NpxRunner = (pkg: string, env: NodeJS.ProcessEnv) => { ok: boolean; detail?: string }
 
 const defaultNpxRunner: NpxRunner = (pkg, env) => {
@@ -153,6 +154,10 @@ export interface InstallRuntimePackageOptions {
   runtime: Runtime
   /** Override the built-in package mapping (--package). */
   package?: string
+  /** В51 — pin the delivered version (`npx -y <pkg>@<version>`): without a pin an
+   *  unpinned npx can serve a STALE cached/propagating version while the caller
+   *  reports the npm-latest it resolved. Omit → unpinned (bootstrap convenience). */
+  version?: string
   /** Re-run npx even when a manifest is already present (force a package update). */
   force?: boolean
   env?: NodeJS.ProcessEnv
@@ -164,21 +169,39 @@ export interface InstallRuntimePackageOptions {
  * Ensure a runtime PACKAGE is installed (the package self-deploys its bin + manifest
  * via `npx`). IDEMPOTENT: when a manifest is already present (package installed) and
  * not forced, it is a no-op (`skipped`). Otherwise resolves the package (override →
- * built-in registry) and runs npx. No mapping + no --package + no manifest → `no-package`.
+ * the manifest's `package` stamp → built-in registry) and runs npx. No mapping + no
+ * --package + no manifest → `no-package`.
+ *
+ * В52 — after a successful run, the resolved package name is stamped into the
+ * manifest the package just wrote (when it differs from what the manifest carries):
+ * that is what lets a custom-packaged runtime survive the FU12 cascade and direct
+ * `update-runtime` without the operator repeating --package every time.
  */
 export function installRuntimePackage(opts: InstallRuntimePackageOptions): InstallRuntimePackageResult {
   const env = opts.env ?? process.env
-  const pkg = resolveRuntimePackage(opts.runtime, opts.package)
-  const manifestPresent = readRuntimeManifest(opts.runtime, { env }) !== null
-  if (manifestPresent && !opts.force) {
+  const existing = readRuntimeManifest(opts.runtime, { env })
+  const pkg = resolveRuntimePackage(opts.runtime, opts.package ?? existing?.package)
+  if (existing && !opts.force) {
     return { runtime: opts.runtime, package: pkg, state: 'skipped' }
   }
   if (!pkg) {
     return { runtime: opts.runtime, state: 'no-package' }
   }
   const run = opts.runNpx ?? defaultNpxRunner
-  const r = run(pkg, env)
-  return { runtime: opts.runtime, package: pkg, state: r.ok ? 'ran' : 'failed', detail: r.detail }
+  const spec = opts.version ? `${pkg}@${opts.version}` : pkg
+  const r = run(spec, env)
+  if (!r.ok) {
+    return { runtime: opts.runtime, package: pkg, state: 'failed', detail: r.detail }
+  }
+  // В52 — stamp the delivering package into the fresh manifest (best-effort: a
+  // missing manifest is the package's own contract breach, surfaced elsewhere).
+  try {
+    const fresh = readRuntimeManifest(opts.runtime, { env })
+    if (fresh && fresh.package !== pkg) writeRuntimeManifest({ ...fresh, package: pkg }, { env })
+  } catch {
+    /* malformed manifest → the read path reports it loudly on the next use */
+  }
+  return { runtime: opts.runtime, package: pkg, state: 'ran' }
 }
 
 export interface OnboardRuntimeOptions extends DeployRuntimeOptions {

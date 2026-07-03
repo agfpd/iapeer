@@ -41,6 +41,7 @@ import {
 } from '../core/constants.ts'
 import { parseSessionName } from '../core/socket.ts'
 import { IapError } from '../core/errors.ts'
+import { IAPEER_VERSION } from '../core/version.ts'
 import { pluginStateDir, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
 import { readPeersIndex, type PeersIndex } from '../registry/index.ts'
 import { resolveCallerIdentity, type CallerIdentity, type ResolvedCaller } from '../identity/index.ts'
@@ -48,7 +49,10 @@ import { routeSend, type ComposerQueueRouteDeps, type EphemeralRouteDeps, type S
 import { appendDeliveryEvent } from './deliverylog.ts'
 
 export const CALLER_HEADER = 'x-iapeer-identity'
-const SERVER_INFO = { name: 'iapeer', version: '0.0.0' }
+// В53 — the LIVE daemon's version must be observable (the update verb's
+// "already-latest" gate compares it against the installed binary to detect an
+// interrupted update: binary swapped, daemon never restarted). Baked at build time.
+const SERVER_INFO = { name: 'iapeer', version: IAPEER_VERSION }
 
 /** Does a LIVE listener answer on this unix socket path? (В28) A successful connect ⇒ a daemon is
  *  running; ECONNREFUSED ⇒ a stale socket file (safe to unlink). Bounded by a short timeout so a wedged
@@ -561,7 +565,10 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
   let discoveryPath: string | undefined
   if (opts.discovery) {
     discoveryPath = daemonDiscoveryPath(opts)
-    writeFileAtomic(discoveryPath, `${JSON.stringify({ sock: socketPath ?? null, tcp: url ?? null })}\n`)
+    // `version` (В53): the RUNNING daemon's baked version — lets `iapeer update`
+    // detect an interrupted update (binary already at latest, live daemon still on
+    // the old code) and heal it with a restart instead of a false "already-latest".
+    writeFileAtomic(discoveryPath, `${JSON.stringify({ sock: socketPath ?? null, tcp: url ?? null, version: IAPEER_VERSION })}\n`)
   }
 
   const removeArtifacts = (): void => {
