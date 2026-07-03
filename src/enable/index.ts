@@ -24,7 +24,7 @@ import { spawnSync } from 'child_process'
 import { existsSync, readFileSync, realpathSync } from 'fs'
 import { basename, join } from 'path'
 import { homedir } from 'os'
-import { MARKETPLACE_NAME, isMarketplaceRegisteredAs, refreshMarketplace, registerMarketplace } from '../onboard/index.ts'
+import { MARKETPLACE_NAME, isExecutable, isMarketplaceRegisteredAs, refreshMarketplace, registerMarketplace } from '../onboard/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import { IapError } from '../core/errors.ts'
 import { normalizeNameCandidate } from '../core/normalize.ts'
@@ -205,10 +205,14 @@ function resolvePeer(opts: EnableOptions): { personality: string; cwd: string; r
   return { personality, cwd: rec.cwd, runtimes: agentic }
 }
 
-function isExecutable(bin: string, env: NodeJS.ProcessEnv): boolean {
-  const r = spawnSync(bin, ['--version'], { stdio: 'ignore', env: env as Record<string, string> })
-  return r.error === undefined && r.status !== null
-}
+// В57 — the local `--version` ANSWER probe was removed: it spawned the runtime CLI with NO
+// timeout, so a wedged binary (the known macOS launch-approval park after a cask update —
+// onboard's live incident: probes sat 25+ min) hung `enable` forever. enable now uses
+// onboard's PRESENCE probe (accessSync X_OK / PATH scan — no spawn at all), and every real
+// runtime-CLI invocation below carries a hard timeout, mirroring onboard.
+const LIST_TIMEOUT_MS = 60_000 // read-only queries (plugin list)
+const MUTATE_TIMEOUT_MS = 120_000 // install / enable / add (may clone from GitHub)
+const SETUP_TIMEOUT_MS = 300_000 // a СЛОЖНЫЙ plugin's own installer — the longest legitimate leg
 
 /** Read the peer-scoped entry for this plugin from a fresh `claude plugin list --json`.
  *  CRITICAL: `enabled` is evaluated relative to the CURRENT cwd's project (verified
@@ -227,6 +231,7 @@ function claudeEntry(
     encoding: 'utf8',
     env: env as Record<string, string>,
     maxBuffer: 64 * 1024 * 1024,
+    timeout: LIST_TIMEOUT_MS,
   })
   return findPeerScopedEntry(parseInstalledPlugins(list.stdout ?? ''), plugin, marketplace, peerCwd)
 }
@@ -251,6 +256,7 @@ function enableClaude(plugin: string, marketplace: string, peerCwd: string, env:
       cwd: peerCwd,
       encoding: 'utf8',
       env: env as Record<string, string>,
+      timeout: MUTATE_TIMEOUT_MS,
     })
     if (inst.status !== 0) {
       return { runtime: 'claude', state: 'failed', detail: (inst.stderr || inst.stdout || `exit ${inst.status}`).trim() }
@@ -264,6 +270,7 @@ function enableClaude(plugin: string, marketplace: string, peerCwd: string, env:
       cwd: peerCwd,
       encoding: 'utf8',
       env: env as Record<string, string>,
+      timeout: MUTATE_TIMEOUT_MS,
     })
     const confirmed = claudeEntry(bin, plugin, marketplace, peerCwd, env)
     if (!confirmed?.enabled) {
@@ -300,7 +307,12 @@ export function parseCodexPluginStatus(jsonOutput: string, id: string): 'enabled
 }
 
 function codexState(bin: string, id: string, env: NodeJS.ProcessEnv): 'enabled' | 'disabled' | 'absent' {
-  const r = spawnSync(bin, ['plugin', 'list', '--json'], { encoding: 'utf8', env: env as Record<string, string>, maxBuffer: 64 * 1024 * 1024 })
+  const r = spawnSync(bin, ['plugin', 'list', '--json'], {
+    encoding: 'utf8',
+    env: env as Record<string, string>,
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: LIST_TIMEOUT_MS,
+  })
   return parseCodexPluginStatus(r.stdout ?? '', id)
 }
 
@@ -314,7 +326,11 @@ function enableCodex(plugin: string, marketplace: string, env: NodeJS.ProcessEnv
   const id = `${plugin}@${marketplace}`
   const before = codexState(bin, id, env)
   if (before === 'enabled') return { runtime: 'codex', state: 'already-enabled' }
-  const add = spawnSync(bin, ['plugin', 'add', id], { encoding: 'utf8', env: env as Record<string, string> })
+  const add = spawnSync(bin, ['plugin', 'add', id], {
+    encoding: 'utf8',
+    env: env as Record<string, string>,
+    timeout: MUTATE_TIMEOUT_MS,
+  })
   if (add.status !== 0) {
     return { runtime: 'codex', state: 'failed', detail: (add.stderr || add.stdout || `exit ${add.status}`).trim() }
   }
@@ -346,6 +362,7 @@ function callSetup(
     cwd: installPath,
     encoding: 'utf8',
     env: setupEnv as Record<string, string>,
+    timeout: SETUP_TIMEOUT_MS,
   })
   if (r.error || (r.status ?? 1) !== 0) {
     return { ok: false, detail: (r.stderr || r.stdout || r.error?.message || `exit ${r.status}`).trim() }

@@ -37,7 +37,11 @@ function oracleInline(
     PEER_PERSONALITY: spec.personality,
     PEER_RUNTIME: spec.runtime,
     PEER_IDENTITY: identity,
-    PATH: env.PATH ?? `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin`,
+    // В45 mirrored in the oracle: a per-peer launch.env PATH override wins over the base env.
+    PATH:
+      launchEnv.env.PATH ??
+      env.PATH ??
+      `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin`,
   }
   return { argv: runtimeArgv, env: childEnv }
 }
@@ -110,6 +114,28 @@ describe('buildLaunchInvocation — differential vs the verbatim pre-extraction 
       expect(got.argv).toContain('--explicit')
       expect(got.argv).toContain('--from-env-a')
       expect(got.env.EXTRA_VAR).toBe('xyz')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('В45 — a launch.env PATH override WINS over the base env PATH (was silently clobbered)', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'inv-path-'))
+    try {
+      const p = peerLaunchEnvPath(cwd, 'claude')
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, 'PATH=/peer/override/bin:/usr/bin\n')
+      const s = spec({ runtime: 'claude', identity: 'claude-p', cwd })
+      const got = buildLaunchInvocation(s, claudeAdapter, CFG)
+      expect(got.env.PATH).toBe('/peer/override/bin:/usr/bin') // NOT CFG.env.PATH ('/test/path')
+      // and without an override the base env PATH still applies
+      const plain = mkdtempSync(join(tmpdir(), 'inv-path-plain-'))
+      try {
+        const s2 = spec({ runtime: 'claude', identity: 'claude-p', cwd: plain })
+        expect(buildLaunchInvocation(s2, claudeAdapter, CFG).env.PATH).toBe('/test/path')
+      } finally {
+        rmSync(plain, { recursive: true, force: true })
+      }
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }

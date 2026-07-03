@@ -71,7 +71,10 @@ function runtimeBin(runtime: OnboardRuntime, env: NodeJS.ProcessEnv): string {
   return env.IAPEER_CODEX_BIN?.trim() || 'codex'
 }
 
-function isExecutable(binOrName: string, env: NodeJS.ProcessEnv = process.env): boolean {
+/** PRESENCE probe (no spawn) — exported for enable/ (В57): the same wedged-runtime class
+ *  (macOS launch-approval parking every invocation pre-main) hung enable's `--version`
+ *  ANSWER probe forever; presence answers "is it installed" without executing anything. */
+export function isExecutable(binOrName: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (binOrName.includes('/')) {
     try {
       accessSync(binOrName, FS.X_OK)

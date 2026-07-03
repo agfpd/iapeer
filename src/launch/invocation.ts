@@ -50,7 +50,13 @@ export function buildLaunchInvocation(
     PEER_PERSONALITY: spec.personality,
     PEER_RUNTIME: spec.runtime,
     PEER_IDENTITY: spec.identity,
-    PATH: env.PATH ?? `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin`,
+    // В45 — a per-peer launch.env PATH override WINS: this literal sits after the launchEnv
+    // spread, so `env.PATH ?? default` silently clobbered the operator's override (env.PATH
+    // is nearly always set). The legacy launcher sourced the file — there PATH took effect.
+    PATH:
+      launchEnv.env.PATH ??
+      env.PATH ??
+      `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin`,
   }
   // Strip the claude-code-internal session namespace from the inherited env. When a launch is
   // INITIATED from inside a running claude session (an operator CLI, or a claude peer shelling out),

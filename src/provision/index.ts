@@ -89,6 +89,9 @@ export async function provisionPeer(opts: ProvisionPeerOptions): Promise<Provisi
     peers,
     personality: opts.personality,
     runtimeBin,
+    // В36 — description goes into the LOCAL profile (source of truth); the registry
+    // upsert below then persists a value reindexFromLocals can no longer wipe.
+    description: opts.description,
     warn: opts.warn,
   })
   // Birth-time native-memory lever (контракт «Слот памяти» §Native-память рантаймов):

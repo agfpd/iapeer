@@ -120,6 +120,12 @@ export interface EnsurePeerProfileOptions {
    *  always-on plist so launchd's minimal PATH resolves it. Forwarded to
    *  installAlwaysOnPlist; ignored for warm-on-demand runtimes. */
   runtimeBin?: string
+  /** В36 — peer description, persisted into the LOCAL profile (the source of truth the
+   *  registry is reindexed FROM). Writing it only to the registry made it a stale copy:
+   *  the first reindexFromLocals (addRuntime on a dual-runtime create, connect telegram,
+   *  verify --fix) projected the profile's empty description over it, wiping the Layer-3
+   *  addressing signal fleet-wide. */
+  description?: string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +519,9 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
       personality,
       runtime: options.runtime,
       runtimes: discoveredRuntimes,
-      description: '',
+      // В36 — the description lands in the LOCAL profile at birth (source of truth);
+      // the registry row is a projection of this file, not the other way around.
+      description: options.description?.trim() ?? '',
       intelligence: defaultIntelligenceForRuntime(options.runtime),
     }
     ensureLocalRuntimeScopes(cwd, profile.runtimes)
@@ -573,8 +581,17 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
     })
     intelligence = defaultIntelligenceForRuntime(options.runtime)
   }
-  if (mergedRuntimes.length !== existing.runtimes.length || intelligence !== existing.intelligence) {
-    const updated = { ...existing, runtimes: mergedRuntimes, intelligence }
+  // В36 — an explicit description on RE-provision updates the local profile too (H1 in
+  // writePeerProfileAtomic still guards: absent/empty never wipes an existing value).
+  const explicitDescription = options.description?.trim()
+  const descriptionChanged = Boolean(explicitDescription) && explicitDescription !== existing.description
+  if (mergedRuntimes.length !== existing.runtimes.length || intelligence !== existing.intelligence || descriptionChanged) {
+    const updated = {
+      ...existing,
+      runtimes: mergedRuntimes,
+      intelligence,
+      ...(descriptionChanged ? { description: explicitDescription! } : {}),
+    }
     writePeerProfileAtomic(cwd, updated)
     return updated
   }

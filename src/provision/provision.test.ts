@@ -89,6 +89,29 @@ describe('provisionPeer', () => {
     expect(existsSync(launchdPlistPath('worker', env))).toBe(false)
   })
 
+  test('В36 — description persists in the LOCAL profile and SURVIVES reindexFromLocals', async () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    const cwd = join(root, 'described')
+
+    await provisionPeer({ cwd, runtime: 'claude', env, description: 'спец по каталогам Volvo' })
+
+    // (1) the local profile — the source of truth — carries it (was registry-only → wiped)
+    expect(readPeerProfile(cwd)?.description).toBe('спец по каталогам Volvo')
+    // (2) the registry row carries it
+    expect(findPeer(readPeersIndex({ env }), 'described')?.description).toBe('спец по каталогам Volvo')
+    // (3) the trigger that USED to wipe it: reindex projects locals over the registry
+    const { reindexFromLocals } = await import('../identity/profileStandard.ts')
+    await reindexFromLocals({ env })
+    expect(findPeer(readPeersIndex({ env }), 'described')?.description).toBe('спец по каталогам Volvo')
+
+    // (4) re-provision WITHOUT a description keeps it; WITH a new one updates it
+    await provisionPeer({ cwd, runtime: 'claude', env })
+    expect(readPeerProfile(cwd)?.description).toBe('спец по каталогам Volvo')
+    await provisionPeer({ cwd, runtime: 'claude', env, description: 'обновлённое описание' })
+    expect(readPeerProfile(cwd)?.description).toBe('обновлённое описание')
+  })
+
   test('provisions an infra peer when personality === cwd basename; REJECTS a mismatch (1:1 invariant)', async () => {
     const root = mkTmp()
     const { dir: bindir } = fakeBinDir()
