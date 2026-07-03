@@ -538,6 +538,39 @@ describe('parseArgs (audit #27 — value beginning with --)', () => {
   })
 })
 
+describe('parseArgs (В49 — boolean-flag schema)', () => {
+  test('a boolean flag never eats the next positional (the --force <version> incident shape)', () => {
+    const { flags, positionals } = parseArgs(['update', '--force', '0.4.31'])
+    expect(flags.force).toBe(true)
+    expect(positionals).toEqual(['update', '0.4.31'])
+  })
+  test('boolean flags before positionals and other flags parse independently', () => {
+    const { flags, positionals } = parseArgs(['stop', '--all', 'boris', '--json'])
+    expect(flags.all).toBe(true)
+    expect(flags.json).toBe(true)
+    expect(positionals).toEqual(['stop', 'boris'])
+  })
+  test('a VALUE flag still consumes the next token (schema only covers booleans)', () => {
+    const { flags, positionals } = parseArgs(['create', 'x', '--path', 'dir', '--dry-run'])
+    expect(flags.path).toBe('dir')
+    expect(flags['dry-run']).toBe(true)
+    expect(positionals).toEqual(['create', 'x'])
+  })
+})
+
+describe('В48 — stop bootout discriminates benign already-unloaded from a real error', () => {
+  test('bootout of a NOT-loaded infra job (exit 3 / No such process) is benign: no reason', async () => {
+    await register('tginfra', 'telegram', 'natural')
+    // foundation-owned plist so the fleet guard lets stop proceed
+    const { installAlwaysOnPlist } = await import('../launch/launchd.ts')
+    installAlwaysOnPlist({ personality: 'tginfra', runtime: 'telegram', cwd: '/tmp/tginfra', runtimeBin: '/bin/true', env: env() })
+    const outcomes = stopPeer('tginfra', undefined, { env: env() })
+    const bootout = outcomes.find(o => o.action === 'bootout')
+    expect(bootout).toBeDefined()
+    expect(bootout!.reason).toBeUndefined() // already-unloaded → desired state holds → benign
+  })
+})
+
 // ─── new — the UNCONDITIONAL fresh-restart control (docs/Control-команды §new) ─
 
 describe('new (unconditional fresh restart)', () => {

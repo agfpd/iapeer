@@ -244,12 +244,21 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
     const identity = buildProcessAddress(rt, personality)
     const sock = buildSocketPath(rt, personality, cfg.sockDir)
     if (isInfraRuntime(rt)) {
-      // Audit #13: do NOT swallow the launchctl result. (bootout returns non-zero when
-      // the service was already not loaded — benign for stop — but surface the detail in
-      // the reason rather than silently claiming success.)
+      // Audit #13 + В48: do NOT swallow the launchctl result — but DISCRIMINATE. An
+      // already-unloaded job (exit 3 / "No such process", verified live) is BENIGN for
+      // stop: the desired state ("not running") already holds, so it carries NO reason
+      // and must not fail the verb. Any other non-zero is a REAL error and sets reason
+      // (the CLI maps a reasoned bootout to exit 1).
       const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
       killSession(sock, identity, env)
-      out.push({ personality, runtime: rt, action: 'bootout', reason: r.status === 0 ? undefined : `launchctl bootout exited ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''}` })
+      const stderrText = (r.stderr ?? '').trim()
+      const benign = r.status === 0 || r.status === 3 || /No such process/i.test(stderrText)
+      out.push({
+        personality,
+        runtime: rt,
+        action: 'bootout',
+        reason: benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`,
+      })
     } else {
       // A deliberate stop is a CLEAN PARK, not a death (stop→start must survive ≥
       // idle-reap): park-mark BEFORE the kill so the post-`start`
@@ -1131,6 +1140,32 @@ function parseIdentity(identity: string): { personality: string; runtime: Runtim
 // CLI dispatch — `iapeer <verb> …`
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** В49 — flags that never take a value. Without the schema the look-ahead form ate the
+ *  NEXT positional: `iapeer update --force 0.4.31` parsed as flags.force='0.4.31' with NO
+ *  positionals → an UNforced full-cascade update instead of a forced version pin (live
+ *  incident shape). A boolean flag is always `true`; forcing a value onto one is only
+ *  possible via the explicit `--key=value` form (which stays verbatim). */
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+  'accept-risk',
+  'all',
+  'check',
+  'dry-run',
+  'fix',
+  'force',
+  'foundation-only',
+  'install-plist',
+  'json',
+  'no-bootstrap',
+  'no-memory',
+  'no-notifier',
+  'no-setup',
+  'no-telegram',
+  'no-voice',
+  'npx',
+  'remove-codesign-identity',
+  'yes',
+])
+
 export function parseArgs(argv: string[]): { positionals: string[]; flags: Record<string, string | true> } {
   const positionals: string[] = []
   const flags: Record<string, string | true> = {}
@@ -1145,6 +1180,11 @@ export function parseArgs(argv: string[]): { positionals: string[]; flags: Recor
         continue
       }
       const key = a.slice(2)
+      // В49 — a KNOWN boolean flag never consumes the next token as its value.
+      if (BOOLEAN_FLAGS.has(key)) {
+        flags[key] = true
+        continue
+      }
       const next = argv[i + 1]
       if (next === undefined || next.startsWith('--')) flags[key] = true
       else flags[key] = argv[++i]
@@ -1684,9 +1724,13 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         out(
           `initialized "${r.personality}" (default: ${r.runtime}; runtimes: ${allRuntimes.join(', ')}); ` +
             `mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
-            `${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
+            `${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}` +
+            `${r.selfConfig?.state === 'failed' ? '; self-config: FAILED (infra peer NOT started)' : ''}\n`,
         )
-        return 0
+        // В47 — a failed runtime self-config means initPeer deliberately did NOT bootstrap:
+        // the always-on peer is not running. Exit 0 here read as success to automation.
+        if (r.selfConfig?.state === 'failed') return 1
+        return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
       }
       case 'create': {
         // cwd-INDEPENDENT: resolve a location (default ~/.iapeer/peers/<p> or --path),
@@ -1753,8 +1797,13 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         out(
           `created "${r.personality}" (default: ${r.runtime}; runtimes: ${allRuntimes.join(', ')}) at ${r.location}; ` +
             `mcp: ${r.mcpConfigPaths.join(', ') || r.codexMcpConfigPath || 'none'}` +
-            `${r.plistPath ? `; plist: ${r.plistPath}` : ''}${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}\n`,
+            `${r.plistPath ? `; plist: ${r.plistPath}` : ''}${r.bootstrapped ? `; bootstrap: ${r.bootstrapped.state}` : ''}` +
+            `${r.selfConfig?.state === 'failed' ? '; self-config: FAILED (infra peer NOT started)' : ''}\n`,
         )
+        // В47 — selfConfig 'failed' deliberately skips the bootstrap (initPeer), so the
+        // always-on peer is NOT running; `create x --runtime telegram` with a broken hook
+        // exited 0 and automation read a dead telegram router as provisioned.
+        if (r.selfConfig?.state === 'failed') return 1
         return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
       }
       case 'list': {
@@ -1865,7 +1914,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         if (!peers) return argErr(errOut, 'stop needs a peer or --all — usage: iapeer stop <peer> [runtime] | --all')
         const outcomes = peers.flatMap(p => stopPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
-        return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
+        // В48 — a REAL bootout error (reason set; benign already-unloaded carries none) is exit 1:
+        // automation must see that an always-on peer may still be running.
+        return outcomes.some(o => o.action === 'refused-foreign-launchd' || (o.action === 'bootout' && o.reason !== undefined)) ? 1 : 0
       }
       case 'add-runtime': {
         // Fleet-switch enabler (codex-parity audit): add an agentic runtime to
@@ -1917,7 +1968,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         if (!peers) return argErr(errOut, 'start needs a peer or --all — usage: iapeer start <peer> [runtime] | --all')
         const outcomes = peers.flatMap(p => startPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
-        return outcomes.some(o => o.action === 'refused-foreign-launchd') ? 1 : 0
+        // В48 — a failed launchctl bootstrap (reason set) means the always-on peer is NOT
+        // started; exit 0 here let automation read a dead telegram/notifier as running.
+        return outcomes.some(o => o.action === 'refused-foreign-launchd' || (o.action === 'bootstrap' && o.reason !== undefined)) ? 1 : 0
       }
       case 'refresh': {
         // LAZY soft-reload (fleet doctrine refresh): arm `.fresh-next` so each agentic peer comes up FRESH
