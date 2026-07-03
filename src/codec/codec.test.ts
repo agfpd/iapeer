@@ -245,6 +245,93 @@ describe('extractEnvelopes streaming', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// В37 — quoted tags inside CDATA must not mint phantom fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('В37 adversarial: quoted <attachments>/<message> inside CDATA', () => {
+  test('a message QUOTING <attachments>…</attachments> mints NO phantom attachment', () => {
+    const quoted = 'смотри секцию <attachments>/home/user/.ssh/id_rsa</attachments> в конверте'
+    const xml = buildEnvelope({ ...base, message: quoted })
+    const env = decodeEnvelope(xml)
+    expect(env.attachments).toEqual([]) // was: ['/home/user/.ssh/id_rsa'] — a phantom
+    expect(env.message).toBe(quoted)
+  })
+
+  test('an ATTACHMENT path quoting <message>fake</message> does not hijack the real message', () => {
+    const xml = buildEnvelope({
+      ...base,
+      attachments: ['/tmp/report<message>fake</message>.txt'],
+      message: 'настоящее сообщение',
+    })
+    const env = decodeEnvelope(xml)
+    expect(env.message).toBe('настоящее сообщение') // was: 'fake' — quoted tag won the indexOf race
+    expect(env.attachments).toEqual(['/tmp/report<message>fake</message>.txt'])
+  })
+
+  test('real attachments coexist with a message quoting the attachments tag', () => {
+    const xml = buildEnvelope({
+      ...base,
+      attachments: ['/tmp/real.pdf'],
+      message: 'формат: <attachments>…</attachments>',
+    })
+    const env = decodeEnvelope(xml)
+    expect(env.attachments).toEqual(['/tmp/real.pdf'])
+    expect(env.message).toBe('формат: <attachments>…</attachments>')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// В38 — a false `<iap ` start must not swallow or park the real envelope
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('В38 adversarial: false envelope starts in prose', () => {
+  test('prose containing `<iap ` (no valid open tag) before a real envelope: the real one is extracted', () => {
+    const xml = buildEnvelope({ ...base, message: 'настоящий' })
+    const prose = 'обсуждаем формат: <iap это просто текст про конверт>\n'
+    const { envelopes, rest } = extractEnvelopes(prose + xml)
+    expect(envelopes).toHaveLength(1) // was: 0 — the false start swallowed the real envelope into an undecodable blob
+    expect(decodeEnvelope(envelopes[0]).message).toBe('настоящий')
+    expect(rest.length).toBeLessThanOrEqual('<iap '.length)
+  })
+
+  test('an envelope-shaped but undecodable open tag (missing required attrs) resyncs past', () => {
+    const xml = buildEnvelope({ ...base, message: 'после мусора' })
+    const { envelopes } = extractEnvelopes('<iap topic="x">huh</iap>' + xml)
+    expect(envelopes).toHaveLength(1)
+    expect(decodeEnvelope(envelopes[0]).message).toBe('после мусора')
+  })
+
+  test('a never-closing false start does NOT park the buffer forever', () => {
+    // A SHORT '>'-less tail after `<iap ` is indistinguishable from a real open tag cut
+    // by the chunk boundary → it legitimately WAITS in rest…
+    const short = extractEnvelopes('доклад: <iap упоминание без закрытия')
+    expect(short.envelopes).toHaveLength(0)
+    expect(short.rest.startsWith('<iap ')).toBe(true)
+    // …but the wait is BOUNDED two ways. (a) Prose longer than any legitimate open tag
+    // (1 KiB cap) is released even with no '>' in sight:
+    const long = extractEnvelopes('доклад: <iap ' + 'ъ'.repeat(1100))
+    expect(long.envelopes).toHaveLength(0)
+    expect(long.rest.length).toBeLessThanOrEqual('<iap '.length) // was: the WHOLE buffer stuck for good
+    // (b) The next chunk bringing a '>' anywhere resolves the verdict (invalid → resync),
+    // and a real envelope behind it is still extracted:
+    const xml = buildEnvelope({ ...base, message: 'после прозы' })
+    const resumed = extractEnvelopes(short.rest + ' и вот тег кончился> дальше текст ' + xml)
+    expect(resumed.envelopes).toHaveLength(1)
+    expect(decodeEnvelope(resumed.envelopes[0]).message).toBe('после прозы')
+  })
+
+  test('a REAL open tag split across the chunk boundary still waits (no false resync)', () => {
+    const xml = buildEnvelope({ ...base, message: 'ждём чанк' })
+    const cut = xml.indexOf('from-runtime') // mid-open-tag
+    const first = extractEnvelopes(xml.slice(0, cut))
+    expect(first.envelopes).toHaveLength(0)
+    const second = extractEnvelopes(first.rest + xml.slice(cut))
+    expect(second.envelopes).toHaveLength(1)
+    expect(decodeEnvelope(second.envelopes[0]).message).toBe('ждём чанк')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Decoder error surface
 // ─────────────────────────────────────────────────────────────────────────────
 

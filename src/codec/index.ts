@@ -112,7 +112,10 @@ function indexOfOutsideCdata(buffer: string, needle: string, start: number): num
 function readTagContent(xml: string, tag: string): string | undefined {
   const open = `<${tag}>`
   const close = `</${tag}>`
-  const openIdx = xml.indexOf(open)
+  // В37 — the OPEN tag must be located CDATA-aware too (the close-side already was): a
+  // message whose CDATA body QUOTES `<attachments>…</attachments>` otherwise minted
+  // phantom attachments, and a quoted `<message>` corrupted the decoded message.
+  const openIdx = indexOfOutsideCdata(xml, open, 0)
   if (openIdx < 0) return undefined
   let i = openIdx + open.length
   let out = ''
@@ -191,12 +194,36 @@ export function decodeEnvelope(xml: string): IapEnvelope {
   }
 }
 
+// В38 — a real envelope's open tag is bounded: personality/runtime ≤32 chars each,
+// topic ≤200, intelligence one word, plus attr names and escaping. 1 KiB is far above
+// any legitimate open tag; a longer '>'-less run after `<iap ` is prose, not a tag.
+const MAX_OPEN_TAG_LEN = 1024
+
+/** Classify the text at a `<iap ` occurrence: a complete VALID open tag (required attrs
+ *  present), a complete-but-INVALID one / overlong tagless run (prose that merely contains
+ *  the marker), or INCOMPLETE (no '>' yet within bounds — wait for the next chunk). */
+function openTagVerdict(candidate: string): 'valid' | 'invalid' | 'incomplete' {
+  const m = /^<iap\s+([^>]*)>/.exec(candidate)
+  if (!m) {
+    const unclosed = candidate.indexOf('>') < 0
+    return unclosed && candidate.length <= MAX_OPEN_TAG_LEN ? 'incomplete' : 'invalid'
+  }
+  if (m[0].length > MAX_OPEN_TAG_LEN) return 'invalid'
+  return m[1].includes('from-personality="') && m[1].includes('from-runtime="') ? 'valid' : 'invalid'
+}
+
 /**
  * Pull complete `<iap …>…</iap>` envelopes out of a streaming buffer.
  * The closing `</iap>` is located CDATA-aware, so an envelope whose message
  * body contains the literal text `</iap>` is not truncated. `rest` holds the
  * trailing bytes that do not yet form a complete envelope (incl. an envelope
  * still mid-CDATA), to be prepended to the next chunk.
+ *
+ * В38 — a FALSE start (prose that merely contains `<iap `, e.g. a quoted tool
+ * description) is never committed to: the open tag is validated first, and a
+ * candidate whose decode fails RESYNCS one char forward instead of being kept
+ * (which used to either swallow the NEXT real envelope into a mis-attributed
+ * blob, or park the buffer forever waiting for a close that never comes).
  */
 export function extractEnvelopes(buffer: string): { envelopes: string[]; rest: string } {
   const envelopes: string[] = []
@@ -208,10 +235,25 @@ export function extractEnvelopes(buffer: string): { envelopes: string[]; rest: s
       return { envelopes, rest: rest.slice(Math.max(0, rest.length - '<iap '.length)) }
     }
     if (start > 0) rest = rest.slice(start)
+    const verdict = openTagVerdict(rest)
+    if (verdict === 'incomplete') return { envelopes, rest } // open tag split across chunks → wait
+    if (verdict === 'invalid') {
+      rest = rest.slice(1) // false start: skip past this '<' and rescan for the next '<iap '
+      continue
+    }
     const close = indexOfOutsideCdata(rest, '</iap>', '<iap '.length)
     if (close < 0) return { envelopes, rest } // incomplete (or mid-CDATA) → wait
     const envelopeEnd = close + '</iap>'.length
-    envelopes.push(rest.slice(0, envelopeEnd))
+    const candidate = rest.slice(0, envelopeEnd)
+    try {
+      decodeEnvelope(candidate)
+    } catch {
+      // Structurally envelope-shaped but undecodable → a false start after all;
+      // resync so a REAL envelope inside/behind the candidate is still found.
+      rest = rest.slice(1)
+      continue
+    }
+    envelopes.push(candidate)
     rest = rest.slice(envelopeEnd)
   }
 }
