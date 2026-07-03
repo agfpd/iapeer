@@ -4,7 +4,11 @@
 //  - alt-screen: the dashboard is a full-screen live surface; it renders on the
 //    alternate screen so quitting restores the operator's scrollback untouched
 //    (Apple Terminal keeps no E3, so repeated in-scrollback repaints would pile up —
-//    the alt-screen sidesteps that class entirely).
+//    the alt-screen sidesteps that class entirely). The alt-screen is owned by INK
+//    (`alternateScreen: true`), NOT written manually: Ink's resize/erase heuristics
+//    (clear-on-width-shrink, fullscreen-frame clears) key on the buffer IT manages —
+//    a manual \x1b[?1049h behind Ink's back left it erasing by stale line-counts, so
+//    a window resize stacked old frames (live incident: the footer repeated ~5×).
 //  - интерактив только в реальном TTY (контракт фазы): stdin+stdout must both be
 //    TTYs, else the caller falls back to the scriptable table (never render + hang;
 //    the same fail-closed belt as the onboard wizard).
@@ -12,7 +16,10 @@
 //    dashboard fully unmounts + leaves the alt-screen + returns the terminal to
 //    cooked mode, then spawns `iapeer attach <peer>` as a CHILD with inherited stdio
 //    (the runtime TUI gets the REAL tty — the readline-class constraint), waits, and
-//    remounts. One full-screen TUI owns the terminal at any moment.
+//    remounts. One full-screen TUI owns the terminal at any moment. A child that
+//    FAILS (spawn error OR exit≠0) is surfaced and acknowledged — never silently
+//    remounted over (live incident: Enter looked dead because the attach child died
+//    instantly and the remount swallowed its error).
 //
 // Self-invocation uses the same `$bunfs` discriminator as supervisor's
 // resolveDaemonSelfArgv: compiled standalone → re-invoke the binary by verb; running
@@ -23,12 +30,10 @@ import { render } from 'ink'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { DashboardApp, type DashAction } from './app.tsx'
+import { attachFailureMessage } from './model.ts'
 
 /** Sentinel: no real interactive TTY — the caller should print the scriptable table. */
 export const DASHBOARD_NOT_INTERACTIVE = -1
-
-const ALT_SCREEN_ON = '\x1b[?1049h\x1b[H'
-const ALT_SCREEN_OFF = '\x1b[?1049l'
 
 /** argv prefix that re-invokes THIS package's CLI (compiled binary by verb / src via
  *  bun). Same discriminator as supervisor/index.ts resolveDaemonSelfArgv: `$bunfs` in
@@ -49,17 +54,16 @@ export interface DashboardOptions {
 /** Mount the dashboard once; resolve with the action that ended it. */
 async function mountOnce(env: NodeJS.ProcessEnv): Promise<DashAction> {
   let action: DashAction = { type: 'quit' }
-  process.stdout.write(ALT_SCREEN_ON)
-  try {
-    const app = render(<DashboardApp env={env} onAction={a => (action = a)} />, {
-      // the dashboard repaints in place on the alt screen; Ctrl-C is handled by the
-      // app itself (quit action) so a half-torn frame never leaks to the main screen
-      exitOnCtrlC: false,
-    })
-    await app.waitUntilExit()
-  } finally {
-    process.stdout.write(ALT_SCREEN_OFF)
-  }
+  const app = render(<DashboardApp env={env} onAction={a => (action = a)} />, {
+    // the dashboard repaints in place on the alt screen; Ctrl-C is handled by the
+    // app itself (quit action) so a half-torn frame never leaks to the main screen
+    exitOnCtrlC: false,
+    // Ink OWNS the alt-screen (enter on mount, exit+cursor-restore on unmount —
+    // BEFORE waitUntilExit resolves, so the attach child always gets the primary
+    // buffer). Manual 1049-writes behind Ink's back broke its resize erase model.
+    alternateScreen: true,
+  })
+  await app.waitUntilExit()
   return action
 }
 
@@ -87,8 +91,12 @@ export async function runDashboard(opts: DashboardOptions = {}): Promise<number>
       stdio: 'inherit',
       env,
     })
-    if (r.error) {
-      process.stdout.write(`attach failed: ${r.error.message}\npress Enter to continue…`)
+    // Surface BOTH failure shapes before remounting: a spawn error AND a child that ran but
+    // FAILED (exit≠0 / signal — its own stderr is already on the primary screen via inherit).
+    // Remounting silently over either reads as "Enter does nothing" (live incident).
+    const failure = attachFailureMessage(r)
+    if (failure) {
+      process.stdout.write(`attach ${action.personality} failed: ${failure}\npress Enter to continue…`)
       // swallow one line so the operator sees the error before the alt-screen returns
       spawnSync('sh', ['-c', 'read _'], { stdio: 'inherit' })
     }

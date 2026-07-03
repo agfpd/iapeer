@@ -2,6 +2,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   assemblePeerLog,
+  attachFailureMessage,
   clampCursor,
   ellipsize,
   eventConcernsPeer,
@@ -94,6 +95,21 @@ describe('event-log parsing', () => {
     expect(out[0]!.text).toContain('wake') // merged in ts order across files
     expect(out[1]!.text).toContain('→ boris ok')
     expect(assemblePeerLog([t2, t1], 'boris', 1)).toHaveLength(1)
+  })
+})
+
+describe('attachFailureMessage (Enter-attach live incident 03.07)', () => {
+  test('clean exit → null (no interruption)', () => {
+    expect(attachFailureMessage({ status: 0 })).toBeNull()
+  })
+  test('spawn error surfaces its message', () => {
+    expect(attachFailureMessage({ error: new Error('ENOENT'), status: null })).toBe('ENOENT')
+  })
+  test('non-zero exit surfaces — a failed child must never be silently remounted over', () => {
+    expect(attachFailureMessage({ status: 1 })).toBe('iapeer attach exited with 1')
+  })
+  test('signal death (status null, no error) surfaces', () => {
+    expect(attachFailureMessage({ status: null })).toBe('iapeer attach exited with a signal')
   })
 })
 

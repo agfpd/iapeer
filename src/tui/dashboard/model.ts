@@ -125,3 +125,14 @@ export function ellipsize(s: string, width: number): string {
   const chars = [...s]
   return chars.length <= width ? s : chars.slice(0, Math.max(0, width - 1)).join('') + '…'
 }
+
+// ─── attach-child failure surfacing ─────────────────────────────────────────
+
+/** Why a spawned `iapeer attach <peer>` run needs the operator's attention, or null when it
+ *  ended fine. PURE: a spawn error AND a non-zero/signal exit both surface — a failed child
+ *  silently remounted over reads as "Enter does nothing" to the operator (live incident 03.07). */
+export function attachFailureMessage(r: { error?: Error; status: number | null }): string | null {
+  if (r.error) return r.error.message
+  if ((r.status ?? 1) !== 0) return `iapeer attach exited with ${r.status ?? 'a signal'}`
+  return null
+}
