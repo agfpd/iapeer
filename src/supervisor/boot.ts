@@ -54,3 +54,39 @@ export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyE
   if (keys && keys.length) return { kind: 'dismiss', keys, bytes: keysToBytes(keys, enc) }
   return { kind: 'none' }
 }
+
+// ── В60 — stuck-gate for the nag-watcher (timing signal, closer to the root than text) ────────────
+// A REAL blocked modal freezes the pty: claude stops writing entirely (the dialog is static and the
+// session cannot proceed). A LIVE peer that merely RENDERS the modal text — reviewing this code,
+// quoting a bug report, editing the adapter (the В40 live incident class) — keeps WRITING (streamed
+// output, spinner frames). So "the pane has written NOTHING for a while" discriminates a genuinely
+// stuck modal from a working peer displaying the same glyphs, where any text/position match
+// structurally cannot. The gate composes WITH the В40 position match (both must pass); the watcher
+// stays load-bearing (В59 suppression-at-source is expected but unproven) — this gate just limits its
+// fire to a genuinely wedged session.
+
+/** Mutable gate state the caller owns (one per watched session). */
+export interface StuckGate {
+  /** The last write-sequence observed (any pty output bumps it). -1 = not yet baselined. */
+  lastSeq: number
+  /** Wall-clock ms when the sequence last CHANGED (progress observed). */
+  stableSinceMs: number
+}
+
+export function newStuckGate(nowMs: number): StuckGate {
+  return { lastSeq: -1, stableSinceMs: nowMs }
+}
+
+/**
+ * One gate step: feed the current write-sequence + clock; returns true iff the pane has been
+ * COMPLETELY static (no pty writes) for at least `thresholdMs`. Any progress re-arms the gate.
+ * Pure w.r.t. time (clock injected) — unit-testable.
+ */
+export function paneIsStuck(gate: StuckGate, seq: number, nowMs: number, thresholdMs: number): boolean {
+  if (seq !== gate.lastSeq) {
+    gate.lastSeq = seq
+    gate.stableSinceMs = nowMs
+    return false
+  }
+  return nowMs - gate.stableSinceMs >= thresholdMs
+}

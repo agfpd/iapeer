@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
-import { nextBootAction, nextNagAction, type BootAction, type NagAction } from './boot.ts'
+import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootAction, type NagAction } from './boot.ts'
 
 // Fed the REAL runtime adapters (codexAdapter/claudeAdapter) — not fakes — so the test proves the
 // supervisor answers the exact dialogs the launch primitive answers, with byte-correct keys.
@@ -103,5 +103,52 @@ describe('nextNagAction — mid-session upsell modals auto-declined off the mode
 
   test('codex has no known mid-session nags → always none', () => {
     expect(nextNagAction(codexAdapter, fullscreenModal).kind).toBe('none')
+  })
+})
+
+// В60 — the nag-watcher's stuck-gate: a dismiss may fire only when the pane has been COMPLETELY
+// static (no pty writes) for the threshold. A live peer rendering the modal text keeps writing →
+// the gate never opens; a genuinely blocked modal freezes the pty → it opens after the threshold.
+describe('В60 — paneIsStuck (nag-watcher stuck-gate)', () => {
+  const T = 10_000
+
+  test('first observation only baselines — never stuck immediately', () => {
+    const g = newStuckGate(1000)
+    expect(paneIsStuck(g, 42, 1000, T)).toBe(false)
+    // even a huge clock jump on the SAME tick sequence counts from the baseline moment
+    expect(paneIsStuck(g, 42, 1000 + T, T)).toBe(true)
+  })
+
+  test('progressing pane (seq moves) never opens the gate and RE-ARMS it', () => {
+    const g = newStuckGate(0)
+    expect(paneIsStuck(g, 1, 1000, T)).toBe(false)
+    expect(paneIsStuck(g, 2, 9000, T)).toBe(false) // wrote again → re-armed
+    expect(paneIsStuck(g, 3, 18_000, T)).toBe(false) // still writing
+    // stability restarts from the LAST write, not from the beginning
+    expect(paneIsStuck(g, 3, 18_000 + T - 1, T)).toBe(false)
+    expect(paneIsStuck(g, 3, 18_000 + T, T)).toBe(true)
+  })
+
+  test('static pane under the threshold stays closed; over it — open until progress resumes', () => {
+    const g = newStuckGate(0)
+    expect(paneIsStuck(g, 7, 0, T)).toBe(false) // baseline
+    expect(paneIsStuck(g, 7, T - 1, T)).toBe(false)
+    expect(paneIsStuck(g, 7, T, T)).toBe(true)
+    expect(paneIsStuck(g, 7, T + 5000, T)).toBe(true) // stays open while still frozen
+    expect(paneIsStuck(g, 8, T + 6000, T)).toBe(false) // modal answered → repaint → re-armed
+  })
+
+  test('composition: a LIVE peer rendering the modal text does NOT get keys (gate closed), a wedged one does', () => {
+    // the exact В40 false-fire pane: modal option row is the bottom-most ❯ row
+    const modalPane = ['Try the new fullscreen render' + 'er?', '❯ 1. Yes, ' + 'try it', '  2. No, keep the current renderer'].join('\n')
+    const g = newStuckGate(0)
+    // peer is actively writing (seq moves): even though the TEXT matches, the caller's gate stays shut
+    expect(paneIsStuck(g, 1, 2000, T)).toBe(false)
+    expect(paneIsStuck(g, 2, 4000, T)).toBe(false)
+    // pty froze on the real modal: gate opens after the threshold → THEN the text/position match fires
+    expect(paneIsStuck(g, 2, 4000 + T, T)).toBe(true)
+    const a = nextNagAction(claudeAdapter, modalPane)
+    expect(a.kind).toBe('dismiss')
+    expect(nagBytesOf(a)).toEqual(Buffer.from('2\r'))
   })
 })

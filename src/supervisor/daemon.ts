@@ -26,7 +26,7 @@ import {
   stripQueries,
 } from './protocol.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
-import { nextBootAction, nextNagAction, type BootPredicates, type NagPredicate } from './boot.ts'
+import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
@@ -87,6 +87,10 @@ const BOOT_DRIVE_MS = 120_000
 // survives the hold (our key did not take), the next tick re-fires, so retries stay bounded, not lost.
 const NAG_POLL_MS = 2000
 const NAG_COOLDOWN_MS = 4000
+/** В60 — how long the pane must be COMPLETELY static (no pty writes) before the nag-watcher may
+ *  fire. A genuinely blocked modal freezes the session forever, so a ~10 s delay costs nothing;
+ *  a live peer rendering the modal text keeps writing (stream/spinner) and never crosses this. */
+const NAG_STUCK_MS = 10_000
 // В25 — cap the attach-snapshot stabilization wait: under saturating output the model never goes quiet,
 // so without a budget firstAttach would never complete (frozen attach). On timeout we snapshot the
 // current model; live-forward delivers the rest once the gate lifts.
@@ -610,11 +614,17 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   const nagAdapter = BOOT_ADAPTERS[runtime] as NagPredicate | undefined
   if (nagAdapter?.nagDismissKeys) {
     let nagFiredMs = 0
+    // В60 — stuck-gate: a REAL blocked modal freezes the pty entirely, while a live peer merely
+    // RENDERING the modal text (code review / quoted report — the В40 false-fire class) keeps
+    // writing. Fire the dismiss ONLY when the pane has been completely static (writeSeq unchanged)
+    // for NAG_STUCK_MS — the timing signal composes with the adapter's position match.
+    const stuckGate = newStuckGate(Date.now())
     const nagWatch = setInterval(() => {
       if (down) {
         clearInterval(nagWatch)
         return
       }
+      if (!paneIsStuck(stuckGate, writeSeq, Date.now(), NAG_STUCK_MS)) return // progressing → not a wedged modal
       if (Date.now() - nagFiredMs < NAG_COOLDOWN_MS) return // let a just-answered modal repaint away first
       let action
       try {
