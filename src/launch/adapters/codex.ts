@@ -21,7 +21,11 @@
 //     Active 253-261) + the keys the boot loop sends (382-400),
 //     newestCodexSessionMtime + codexSessionCwd (200-234), and
 //     answerPermissionDialog's codex branch (302-306: Down then Enter) over
-//     dialogs.ts codexApprovalActive (39-45).
+//     dialogs.ts codexApprovalActive (39-45). NB the permission autopilot was
+//     NOT ported (no answerPermissionDialog in this codebase): the permission
+//     class is closed STRUCTURALLY instead — every peer runs
+//     --dangerously-bypass-approvals-and-sandbox (buildArgs below) and init
+//     bakes default_tools_approval_mode="approve", so the dialog never shows.
 //
 // The doctrine -c value is the bare `model_instructions_file=<f>` token: the
 // TOML value-side quotes in codex-start.sh:224 exist only because that string is
