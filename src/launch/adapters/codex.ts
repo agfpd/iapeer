@@ -58,8 +58,8 @@ import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, Runt
  *     option 1 ("Yes, continue") is default-highlighted → ['Enter']
  *     (watcher.ts:386-390, codex-start.sh:261-264).
  *   - 'Hooks need review' — a new/changed plugin hooks.json; "Trust all and
- *     continue" is option 2, default highlight is option 1 → ['Down','Enter']
- *     (watcher.ts:392-399, codex-start.sh:266-272).
+ *     continue" is option 2, default selector (`›`) is on option 1 → a single
+ *     '2' (select-by-number commits immediately — В41 live capture, 0.139.0).
  */
 function codexUpdatePromptActive(pane: string): boolean {
   return pane.includes('Update available!') && pane.includes('Press enter to continue')
@@ -213,12 +213,25 @@ export const codexAdapter: RuntimeAdapter = {
    * A visible startup dialog → the keys that clear it (watcher.ts:382-400), else
    * null. Update offer is matched first (it can stack ahead of the trust/hooks
    * modals): decline with ['2','Enter']; dir-trust accepts with ['Enter']; hooks
-   * -review needs ['Down','Enter'] to reach "Trust all and continue".
+   * -review selects "Trust all and continue" by NUMBER — a single '2'.
+   *
+   * В41 — hooks-review was a blind ['Down','Enter'] burst: under load a swallowed
+   * Down left Enter confirming the WRONG default ("Review hooks" — the panel opens,
+   * the wake stalls; the same class claude had and replaced with cursor-verified
+   * stepping). CAPTURED LIVE (codex-cli 0.139.0, isolated CODEX_HOME, 03.07): the
+   * modal renders numbered options with a moving `›` selector
+   *     › 1. Review hooks
+   *       2. Trust all and continue
+   *       3. Continue without trusting (hooks won't run)
+   * and a BARE DIGIT '2' selects AND commits option 2 immediately (no Enter needed;
+   * trusted_hash verified written). One key — nothing can be swallowed between two.
+   * The capture harness itself reproduced the burst failure live: a repeated Enter
+   * on a stale dir-trust frame landed on this modal and opened the review panel.
    */
   bootDialogKeys(pane: string): string[] | null {
     if (codexUpdatePromptActive(pane)) return ['2', 'Enter']
     if (codexDirTrustActive(pane)) return ['Enter']
-    if (codexHooksReviewActive(pane)) return ['Down', 'Enter']
+    if (codexHooksReviewActive(pane)) return ['2']
     return null
   },
 

@@ -22,10 +22,24 @@ describe('nextBootAction — codex startup dialogs answered off the model', () =
     expect(bytesOf(a)).toEqual(Buffer.from('2\r'))
   })
 
-  test('hooks-review → [Down,Enter]; the cursor byte follows the model cursor mode', () => {
-    const pane = 'Hooks need review\n  1. Review  2. Trust all and continue'
-    expect(bytesOf(nextBootAction(codexAdapter, pane))).toEqual(Buffer.from('\x1b[B\r')) // normal
-    expect(bytesOf(nextBootAction(codexAdapter, pane, { appCursorKeys: true }))).toEqual(Buffer.from('\x1bOB\r')) // DECCKM
+  test('hooks-review → a single "2" (В41: select-by-number commits immediately — live capture 0.139.0)', () => {
+    // fixture = the REAL modal as captured live (isolated CODEX_HOME, 03.07): numbered
+    // options, `›` selector on option 1. A bare digit selects AND commits — one key,
+    // nothing to swallow between two (the old blind ['Down','Enter'] burst class).
+    const pane = [
+      '  Hooks need review',
+      '  1 hook is new or changed.',
+      '  Hooks can run outside the sandbox after you trust them.',
+      '',
+      '› 1. Review hooks',
+      '  2. Trust all and continue',
+      "  3. Continue without trusting (hooks won't run)",
+      '',
+      '  Press enter to confirm or esc to go back',
+    ].join('\n')
+    expect(bytesOf(nextBootAction(codexAdapter, pane))).toEqual(Buffer.from('2'))
+    // digit bytes are mode-independent (no cursor keys involved anymore)
+    expect(bytesOf(nextBootAction(codexAdapter, pane, { appCursorKeys: true }))).toEqual(Buffer.from('2'))
   })
 
   test('composer rendered, no startup screen → ready', () => {
