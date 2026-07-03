@@ -8,7 +8,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runSupervisorClient, sessionAlive } from './client.ts'
-import { defaultRunDir, logPath, pidPath, pidStartToken, readPidFile, servePath, sockPath } from './paths.ts'
+import { defaultRunDir, logPath, ownershipVerdict, pidPath, pidStartToken, readPidFile, servePath, sockPath } from './paths.ts'
 
 // daemon.ts loads @xterm. It is dynamic-imported ONLY in the 'daemon' CLI case below (the detached
 // daemon process, where @xterm belongs), so importing THIS module — e.g. launch resolving
@@ -66,6 +66,46 @@ export interface StartDaemonResult {
   detail?: string
 }
 
+/** Does a unix socket at `path` ACCEPT connections right now? A dead leftover sock file refuses
+ *  instantly (ECONNREFUSED → false); the timeout only bounds a pathologically wedged listener. */
+async function sockAccepts(path: string, timeoutMs = 400): Promise<boolean> {
+  return await new Promise<boolean>(resolve => {
+    let done = false
+    const finish = (v: boolean): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      resolve(v)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    Bun.connect({
+      unix: path,
+      socket: {
+        open(s) {
+          // finish BEFORE end(): under Bun, end() re-enters close() SYNCHRONOUSLY, and a
+          // close()-first would read an accepting listener as dead (verified by probe).
+          finish(true)
+          try {
+            s.end()
+          } catch {
+            /* probe only */
+          }
+        },
+        data() {},
+        close() {
+          finish(false) // closed before open fired → not accepting
+        },
+        error() {
+          finish(false)
+        },
+        connectError() {
+          finish(false) // dead leftover sock file → connect refused
+        },
+      },
+    }).catch(() => finish(false))
+  })
+}
+
 /**
  * Re-invoke THIS module as the detached daemon (spawn-flip Ф1 serving-wiring). From SOURCE (bun) the
  * module is a real file on disk → run it directly (`bun <self> daemon …` → import.meta.main →
@@ -93,6 +133,15 @@ export async function startSupervisorDaemon(opts: StartDaemonOptions): Promise<S
   const { session, runtime, runDir } = opts
   if (sessionAlive(runDir, session)) return { state: 'already-running' }
   mkdirSync(runDir, { recursive: true })
+  // Second-instance guard (В28-class, peer-session form — split-brain live incident 03.07): NEVER unlink
+  // a sock that still ACCEPTS connections. sessionAlive above keys on the pidfile, which a transient
+  // token-read failure or a clobbered pidfile can falsify — but a live supervisor HOLDS its unix socket
+  // open, so a successful connect is proof a session exists. Spawning here would create a duplicate
+  // session (split-brain: two agents answering as one peer) and orphan the live one by overwriting its
+  // pidfile. The probe client sends no FRAME_RESIZE, so it never counts as an attached operator (В23).
+  if (existsSync(sockPath(runDir, session)) && (await sockAccepts(sockPath(runDir, session)))) {
+    return { state: 'already-running' }
+  }
   try {
     if (existsSync(sockPath(runDir, session))) unlinkSync(sockPath(runDir, session))
   } catch {
@@ -174,9 +223,10 @@ export function killSession(runDir: string, session: string): boolean {
   // В22 — verify the pid is STILL our daemon before SIGTERM. After an abnormal death + pid reuse, a bare
   // kill here would SIGTERM the INNOCENT process that inherited the pid. Skip the kill when the start-token
   // no longer matches (a legacy tokenless pidfile keeps the old behavior — no regression during rollout).
-  if (rec.token) {
-    const live = pidStartToken(rec.pid)
-    if (live !== null && live !== rec.token) return false // reused pid — NOT our session; do not signal it
+  // Same ownershipVerdict primitive as sessionAlive: refuse ONLY on a PROVEN mismatch (null = unreadable
+  // token, still ours — kill must stay possible when `ps` hiccups, or a stuck session becomes unstoppable).
+  if (rec.token && !ownershipVerdict(pidStartToken(rec.pid), rec.token)) {
+    return false // reused pid — NOT our session; do not signal it
   }
   try {
     process.kill(rec.pid, 'SIGTERM')

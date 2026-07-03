@@ -4,7 +4,7 @@
 // via writeSync which works inside a signal handler), and #2 backpressure is the daemon's side.
 import { writeSync } from 'node:fs'
 import { FRAME_DATA, FRAME_RESIZE, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
-import { pidStartToken, readPidFile, sockPath } from './paths.ts'
+import { ownershipVerdict, pidStartToken, readPidFile, sockPath } from './paths.ts'
 
 const DETACH = 0x1d // Ctrl-]
 
@@ -32,8 +32,11 @@ export function sessionAlive(runDir: string, session: string): boolean {
   const now = Date.now()
   const cached = ownerCache.get(key)
   if (cached && cached.pid === rec.pid && cached.token === rec.token && now < cached.until) return cached.verdict
+  // Fail-SAFE on a token-READ failure (split-brain live incident 03.07): a transient `ps` spawn error
+  // returns null; treating that as "dead" let one hiccup reap a LIVE session and spawn a duplicate per
+  // message. kill-0 above already proved the pid live — only a PROVEN mismatch (a reused pid) reads dead.
   const live = pidStartToken(rec.pid)
-  const verdict = live !== null && live === rec.token // same process instance, not a reused pid
+  const verdict = ownershipVerdict(live, rec.token) // same process instance unless proven otherwise
   ownerCache.set(key, { pid: rec.pid, token: rec.token, verdict, until: now + OWNER_TTL_MS })
   return verdict
 }

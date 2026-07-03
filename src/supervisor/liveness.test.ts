@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pidPath, pidStartToken, readPidFile, sockPath, writePidFile } from './paths.ts'
+import { ownershipVerdict, pidPath, pidStartToken, readPidFile, sockPath, writePidFile } from './paths.ts'
 import { sessionAlive } from './client.ts'
 import { killSession, startSupervisorDaemon } from './index.ts'
 
@@ -31,6 +31,52 @@ const mkTmp = (): string => {
 afterEach(() => {
   for (const p of procs.splice(0)) try { p.kill('SIGKILL') } catch { /* */ }
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+})
+
+describe('split-brain 03.07 — ownershipVerdict + locale-pinned token', () => {
+  test('ownershipVerdict: unreadable token (ps hiccup) → still ours; only a PROVEN mismatch reads foreign', () => {
+    expect(ownershipVerdict(null, 'Wed Jan  1 00:00:00 2020')).toBe(true) // fail-SAFE: kill-0 already proved live
+    expect(ownershipVerdict('Wed Jan  1 00:00:00 2020', 'Wed Jan  1 00:00:00 2020')).toBe(true)
+    expect(ownershipVerdict('Thu Feb  2 00:00:00 2021', 'Wed Jan  1 00:00:00 2020')).toBe(false)
+  })
+
+  test('pidStartToken is caller-locale-INDEPENDENT (ru_RU writer vs C verifier — the boris split-brain)', () => {
+    const before = process.env.LC_ALL
+    try {
+      process.env.LC_ALL = 'ru_RU.UTF-8' // the writer side: an operator terminal locale
+      const ruSide = pidStartToken(process.pid)
+      process.env.LC_ALL = 'C' // the verifier side: the launchd daemon env
+      const cSide = pidStartToken(process.pid)
+      expect(ruSide).not.toBeNull()
+      expect(ruSide).toBe(cSide!) // same STRING regardless of caller env → no false "reused pid"
+      expect(ruSide!).toMatch(/^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/) // C format
+    } finally {
+      if (before === undefined) delete process.env.LC_ALL
+      else process.env.LC_ALL = before
+    }
+  })
+
+  test('second-instance guard: a sock that still ACCEPTS wins over a falsified pidfile → already-running, no spawn', async () => {
+    const dir = mkTmp()
+    // a live listener on the session sock — a running supervisor holding its socket
+    const server = Bun.listen({ unix: sockPath(dir, 'dup'), socket: { data() {}, open() {}, close() {} } })
+    try {
+      // pidfile says "reused pid" (stale token) → sessionAlive=false → pre-guard code would unlink the
+      // LIVE sock and spawn a duplicate session. The sock-accept probe must catch it.
+      writeFileSync(pidPath(dir, 'dup'), `${process.pid} ${STALE_TOKEN}`)
+      const r = await startSupervisorDaemon({
+        session: 'dup',
+        runtime: 'tick',
+        runDir: dir,
+        timeoutMs: 400,
+        daemonArgv: ['sh', '-c', 'sleep 30'], // MUST NOT be reached
+      })
+      expect(r.state).toBe('already-running')
+      expect(existsSync(sockPath(dir, 'dup'))).toBe(true) // the live sock was NOT unlinked
+    } finally {
+      server.stop(true)
+    }
+  })
 })
 
 describe('В22 pid-ownership token', () => {

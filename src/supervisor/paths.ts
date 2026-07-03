@@ -24,16 +24,41 @@ export const pidPath = (runDir: string, session: string): string => join(runDir,
 
 /** The OS-reported start time of `pid` (a stable per-process-instance token), or null if it is not
  *  running / unreadable. `ps -o lstart=` is a single spawn — callers bound its frequency (see the
- *  liveness cache in client.ts). */
+ *  liveness cache in client.ts).
+ *
+ *  LC_ALL=C is PINNED (split-brain live incident 03.07): `lstart` output is LOCALE-DEPENDENT, and the
+ *  token is compared as a STRING between processes with different env — the writer (a supervisor
+ *  inheriting the spawning terminal's locale, e.g. an operator's ru_RU `iapeer attach`) rendered
+ *  «пятница, 3 июля …» while the verifying daemon (launchd env, C locale) rendered "Fri Jul  3 …"
+ *  for the SAME start time → a PROVEN-looking mismatch → the live session read as a reused pid,
+ *  got reaped, and the next message spawned a duplicate. Pinning the locale on BOTH the write and
+ *  the verify path makes the token format process-env-independent. */
 export function pidStartToken(pid: number): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null
   try {
-    const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+    const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+    })
     const t = (r.stdout ?? '').trim()
     return t.length > 0 ? t : null
   } catch {
     return null
   }
+}
+
+/**
+ * Ownership verdict from a live-read token vs the recorded one — the ONE semantics both liveness
+ * (`sessionAlive`) and kill (`killSession`) key on: the pid is ours unless a PROVEN mismatch.
+ * `live === null` means the token could not be READ (a transient `ps` spawn failure — EAGAIN under a
+ * post-reboot fork-storm, live incident 03.07: split-brain boris), NOT that the pid was reused; kill-0
+ * has already proven a live pid, so an unverifiable token must stay fail-SAFE (alive / still ours).
+ * Before this primitive, sessionAlive required `live !== null && live === token` (fail-open: a tool
+ * hiccup read a LIVE supervisor as dead → every wake spawned a duplicate session and orphaned the
+ * previous one by overwriting the pidfile), while killSession already treated null as "ours".
+ */
+export function ownershipVerdict(live: string | null, recorded: string): boolean {
+  return live === null ? true : live === recorded
 }
 
 /** Write the pidfile as `<pid> <startToken>` (В22). Falls back to bare `<pid>` if the token is
