@@ -41,6 +41,12 @@ function RuntimeCells({ row }: { row: PeerListing }): React.ReactElement {
   )
 }
 
+/** Absolute screen reset written on every terminal resize: erase-all + cursor-home.
+ *  Goes through Ink's OWN write path (useStdout().write → writeToStdout), which
+ *  erases Ink's frame, writes these bytes, then REPLAYS the last frame with reset
+ *  erase bookkeeping — so the replay lands at a KNOWN absolute origin (row 1). */
+const RESIZE_SCREEN_RESET = '\x1b[2J\x1b[H'
+
 export function DashboardApp({
   env,
   onAction,
@@ -49,7 +55,7 @@ export function DashboardApp({
   onAction: (a: DashAction) => void
 }): React.ReactElement {
   const { exit } = useApp()
-  const { stdout } = useStdout()
+  const { stdout, write } = useStdout()
   const [rows, setRows] = useState<PeerListing[]>(() => takePeersSnapshot(env))
   const [host, setHost] = useState<HostHeader | null>(null)
   const [now, setNow] = useState<number>(() => Date.now())
@@ -95,12 +101,26 @@ export function DashboardApp({
   }, [env])
   useEffect(() => {
     if (!stdout) return
-    const onResize = (): void => setSize({ cols: dim(stdout.columns, 80), rows: dim(stdout.rows, 24) })
+    const onResize = (): void => {
+      // Ink erases frames by RELATIVE cursor math (cursor-up × line-count), and a real
+      // terminal displaces alt-screen content on window resize (Apple Terminal shifts it
+      // on height changes; a width change can re-wrap) — after which that relative erase
+      // misses rows and stale frame fragments survive FOREVER (live incident: a drag-
+      // resize stacked 9 footers; Ink itself full-clears only on width SHRINK). So on
+      // EVERY resize force an ABSOLUTE reset: wipe the screen + home the cursor, then let
+      // Ink replay the frame from that known origin. Written through Ink's write API —
+      // never raw to stdout behind its back (the 0.4.51 lesson): writeToStdout keeps its
+      // erase model in sync (clear → our bytes → replay with reset line-counts). This
+      // listener registers AFTER Ink's own resize handler (mount effect vs render), so
+      // the absolute reset is always the LAST word on the resize tick.
+      write(RESIZE_SCREEN_RESET)
+      setSize({ cols: dim(stdout.columns, 80), rows: dim(stdout.rows, 24) })
+    }
     stdout.on('resize', onResize)
     return () => {
       stdout.off('resize', onResize)
     }
-  }, [stdout])
+  }, [stdout, write])
 
   const visible = filterRows(rows, filter)
   const cur = clampCursor(cursor, visible.length)

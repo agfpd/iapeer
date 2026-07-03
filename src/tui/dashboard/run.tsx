@@ -38,13 +38,25 @@ export const DASHBOARD_NOT_INTERACTIVE = -1
 /** argv prefix that re-invokes THIS package's CLI (compiled binary by verb / src via
  *  bun). Same discriminator as supervisor/index.ts resolveDaemonSelfArgv: `$bunfs` in
  *  the module path marks the compiled standalone (existsSync is NO discriminator —
- *  Bun intercepts bunfs reads). */
-export function resolveSelfCliArgv(execPath: string, selfPath: string): string[] {
-  return selfPath.includes('$bunfs') ? [execPath] : [execPath, selfPath]
+ *  Bun intercepts bunfs reads).
+ *
+ *  Discriminate on the MODULE's OWN url — NEVER on a `../..`-navigated path. The
+ *  compiled bundle lives at `file:///$bunfs/root/<bundle>` (depth 2), so navigating
+ *  two levels up ESCAPES /$bunfs and URL-normalization silently drops the marker
+ *  (proven: compiled probe → `new URL('../../cli/index.ts', import.meta.url)` =
+ *  `/cli/index.ts`). The prior code passed that navigated path here, so the COMPILED
+ *  dashboard took the src branch and spawned `<binary> /cli/index.ts attach <peer>`
+ *  → unknown verb → full usage + exit 2 (live incident: Enter→attach dead in
+ *  `iapeer list`; from-src runs masked it — the navigated path is real there). The
+ *  cli path is resolved lazily and ONLY on the src branch. */
+export function resolveSelfCliArgv(execPath: string, moduleUrl: string): string[] {
+  return moduleUrl.includes('$bunfs')
+    ? [execPath]
+    : [execPath, fileURLToPath(new URL('../../cli/index.ts', moduleUrl))]
 }
 
 function selfCliArgv(): string[] {
-  return resolveSelfCliArgv(process.execPath, fileURLToPath(new URL('../../cli/index.ts', import.meta.url)))
+  return resolveSelfCliArgv(process.execPath, import.meta.url)
 }
 
 export interface DashboardOptions {
