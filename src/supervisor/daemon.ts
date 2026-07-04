@@ -450,17 +450,37 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // and a busy child's tick cadence has quiet gaps — the stability loop returns in such a gap
   // BEFORE the redraw arrives (proven by the repro byte log: the \x1b[NA redraw came as frame #2,
   // after the snapshot), which re-creates the dup exactly.
-  const awaitSeqBump = async (timeoutMs: number): Promise<void> => {
+  const awaitSeqBump = async (timeoutMs: number): Promise<boolean> => {
     const seq = writeSeq
     const deadline = Date.now() + timeoutMs
     while (writeSeq === seq && Date.now() < deadline) await Bun.sleep(15)
+    return writeSeq !== seq // true = the child actually emitted its SIGWINCH redraw (vs a silent child)
   }
   const firstAttach = async (s: { write(b: Buffer): number }, c: number, r: number): Promise<void> => {
     await awaitModelParsedStable()
+    // ORPHAN-SCROLLBACK on a shrinking attach (Артур welcome-attach corruption, 04.07 — live repro):
+    // the model is hosted at HOST 220x50; a real terminal attaches NARROWER (e.g. 120x30). applyGeometry
+    // REFLOWS the model (220→120): every wide line rewraps TALLER, and with fewer rows the TOP of the
+    // pre-resize viewport SPILLS into scrollback. The child's SIGWINCH redraw repaints only the VIEWPORT
+    // (a relative-cursor TUI can't reach scrollback), so the spilled rows linger as stale, reflow-wrapped
+    // orphans ABOVE the clean repaint — the "two frames overlaid + left-clipped" screenshot. This is a
+    // DIFFERENT artifact from the 0.4.59 viewport-dup (that stacked inside the viewport; this is scrollback).
+    const preBaseY = xterm.buffer.active.baseY // committed scrollback history depth BEFORE the resize
     if (c !== cols || r !== rows) {
       applyGeometry(c, r) // model + child together — one honest SIGWINCH, BEFORE the snapshot
-      await awaitSeqBump(SIGWINCH_REDRAW_WAIT_MS) // the redraw wave ARRIVES (or the child has none)
+      const redrew = await awaitSeqBump(SIGWINCH_REDRAW_WAIT_MS) // the redraw wave ARRIVES (or the child has none)
       await awaitModelParsedStable() // …then drain it to stability (bounded, В25 cap)
+      // Erase the orphan scrollback ONLY when it is PROVABLY 100% orphan: preBaseY===0 means there was NO
+      // committed history — the ENTIRE pre-resize screen was the child's dynamic tree, which the redraw has
+      // now fully repainted into the viewport, so every post-resize scrollback row is a redundant spilled
+      // copy. Erase it server-side (ESC[3J on the MODEL → serialize then carries only the clean viewport;
+      // no clear reaches the client's native scrollback). GUARDED on an actual redraw (a silent child keeps
+      // its only copy) and on new scrollback existing. preBaseY>0 (real scroll-up history) is left intact:
+      // the history/dynamic-tree seam lives inside the child's renderer and can't be derived here, so we
+      // never risk dropping real history — that narrower case is a separate follow-up.
+      if (redrew && preBaseY === 0 && xterm.buffer.active.baseY > 0) {
+        await new Promise<void>(res => xterm.write('\x1b[3J', () => res())) // eraseScrollback + parse barrier
+      }
     }
     sendSnapshot(s) // serialize the post-redraw model → send → lift gate (synchronous, no interleave)
   }
