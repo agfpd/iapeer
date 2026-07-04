@@ -100,6 +100,35 @@ function isFullscreenNagOptionRow(row: string): boolean {
   return row.includes('❯') && (row.includes(NAG_OPTION_YES) || /❯\s*1\.\s*Yes/.test(row))
 }
 
+// Dangerous-rm circuit-breaker needles — split-literal (same В40 discipline: a peer reviewing THIS
+// adapter / the doctrine must not self-trigger). Verified verbatim against claude 2.1.201 (Mach-O
+// strings + a live pty capture): the breaker fires for `rm` AND `rmdir` on the cwd/an ancestor, above
+// the permission layer, with a `❯ 1. Yes / 2. No` select whose default cursor is on YES.
+const RM_ANCESTOR = 'working directory or its ' + 'ancestor'
+const RM_PROCEED = 'Do you want to ' + 'proceed?'
+/** FULL-signature + position match for the LIVE dangerous-rm/rmdir confirm (not a mere quote of it):
+ *  the breaker phrase + the proceed prompt + the bottom-most `❯` cursor sitting on the "1. Yes" option. */
+function isDangerousRmPrompt(pane: string): boolean {
+  if (!pane.includes(RM_ANCESTOR) || !pane.includes(RM_PROCEED)) return false
+  let lastCursorRow = ''
+  for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
+  return /❯\s*1\.\s*Yes\b/.test(lastCursorRow) // live select on Yes; a quote has the ready composer `❯` below
+}
+/** Best-effort one-line trace of WHAT the breaker guarded — the rm/rmdir command line if the pane still
+ *  shows the "Bash command" block, plus the target path printed after "…ancestor:". Owner's post-hoc
+ *  audit hook (which peer / which command / when — `when` + `who` are added by the daemon). */
+function dangerousRmDetail(pane: string): string {
+  const lines = pane.split(/\r?\n/).map(l => l.trim())
+  let target = ''
+  const ai = lines.findIndex(l => l.includes(RM_ANCESTOR))
+  if (ai >= 0) for (let j = ai + 1; j < lines.length; j++) if (lines[j]) { target = lines[j]; break }
+  // ANCHORED to a line that STARTS with rm/rmdir (the "Bash command" block's command line, e.g.
+  // "rm -rf /path"); never a mid-line match, or the composer's echoed user prompt ("…run: rm -rf")
+  // would be captured instead of the actual command.
+  const cmd = lines.find(l => /^rm(?:dir)?\s+\S/.test(l)) ?? ''
+  return [cmd && `cmd=${JSON.stringify(cmd)}`, target && `target=${JSON.stringify(target)}`].filter(Boolean).join(' ') || '(unparsed)'
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Transcript activity proxy + resume uuid (lifecycle port, claude slug fix)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -297,6 +326,21 @@ export const claudeAdapter: RuntimeAdapter = {
     // the live modal's bottom-most cursor sits on option 1 ("Yes, try it"); the ready composer's `❯` does
     // not carry the option text, so a quote (composer below) fails this.
     return isFullscreenNagOptionRow(lastCursorRow) ? ['2', 'Enter'] : null
+  },
+
+  /**
+   * Dangerous-rm/rmdir circuit-breaker (RuntimeAdapter.blockingConfirm). Unlike the fullscreen nag
+   * (benign upsell → DECLINE), this guard sits ABOVE `--dangerously-skip-permissions` and hangs a
+   * headless peer forever with no human to answer. Owner decision (Артур, 04.07): auto-press YES —
+   * peers run on bypass, so this only restores the pre-2.1.x status quo, and a hang is real recurring
+   * harm. The default cursor is already on "1. Yes" (verified live), so ['1','Enter'] is the explicit,
+   * position-robust affirmative. Returns the class tag + a one-line command/target trace so the
+   * supervisor logs a post-hoc audit line. NB deliberately NOT a "smart" safe-decline/escalation — that
+   * lands later on the vault idea "Human-approval подтверждения действий пира через Telegram-кнопки".
+   */
+  blockingConfirm(pane: string): { keys: string[]; taxonomy: string; detail: string } | null {
+    if (!isDangerousRmPrompt(pane)) return null
+    return { keys: ['1', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
   },
 
   /**

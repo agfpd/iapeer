@@ -299,6 +299,22 @@ export interface RuntimeAdapter {
    */
   nagDismissKeys?(pane: string): string[] | null
 
+  /**
+   * MID-SESSION blocking CIRCUIT-BREAKER confirm (livability + safety). A sibling of nagDismissKeys
+   * for a DIFFERENT class: an interactive confirm that even `--dangerously-skip-permissions` does NOT
+   * bypass because it sits ABOVE the permission layer — the "Dangerous rm operation on working
+   * directory or its ancestor / Do you want to proceed? 1.Yes 2.No" guard claude 2.1.x added (no env,
+   * settings, or flag disables it). A headless peer has no human to press 1/2, so it HANGS forever
+   * (live-observed on a verification session). Owner decision (Артур, 04.07): auto-press YES — peers
+   * already run on bypass, so this only restores the pre-2.1.x status quo; a hang is real recurring
+   * harm. Return `{keys, taxonomy, detail}` (the affirmative keys + a class tag + a one-line trace of
+   * WHAT was approved) so the supervisor can press it AND leave a post-hoc log; else null. Match the
+   * FULL signature + cursor position so ordinary content mentioning the phrase never fires. Optional
+   * (codex/router omit it). tui only. FUTURE: replace blind-YES with human approval via Telegram —
+   * see the vault idea "Human-approval подтверждения действий пира через Telegram-кнопки".
+   */
+  blockingConfirm?(pane: string): { keys: string[]; taxonomy: string; detail: string } | null
+
   /** Is the input surface ready for the first message? (tui: ready marker present
    *  AND startup dialogs gone). Router runtimes return true (no input surface). */
   isInputReady(pane: string): boolean

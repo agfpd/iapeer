@@ -643,7 +643,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // NAG_COOLDOWN_MS so a just-dismissed modal is never double-answered (a stray keystroke would land in
   // the now-visible composer). Only runs for a runtime whose adapter declares nagDismissKeys.
   const nagAdapter = BOOT_ADAPTERS[runtime] as NagPredicate | undefined
-  if (nagAdapter?.nagDismissKeys) {
+  if (nagAdapter?.nagDismissKeys || nagAdapter?.blockingConfirm) {
     let nagFiredMs = 0
     // В60 — stuck-gate: a REAL blocked modal freezes the pty entirely, while a live peer merely
     // RENDERING the modal text (code review / quoted report — the В40 false-fire class) keeps
@@ -667,6 +667,22 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       if (action.kind === 'dismiss') {
         child.terminal.write(action.bytes)
         nagFiredMs = Date.now()
+      } else if (action.kind === 'approve') {
+        // CIRCUIT-BREAKER confirm (e.g. dangerous-rm) — press the affirmative so a headless peer never
+        // hangs on it (owner decision: auto-YES restores the pre-2.1.x bypass status quo). Leave a
+        // post-hoc AUDIT line in the supervisor's own log (console → logPath): WHICH peer (session),
+        // WHAT (taxonomy + the parsed command/target), WHEN (ts). A rare bad rm is then at least visible
+        // after the fact — the interim before human-approval (Telegram) lands. Best-effort log, never
+        // gates the keypress.
+        child.terminal.write(action.bytes)
+        nagFiredMs = Date.now()
+        try {
+          console.warn(
+            `[supervisor] AUTO-CONFIRM ${action.taxonomy} identity=${session} ts=${new Date().toISOString()} ${action.detail}`,
+          )
+        } catch {
+          /* logging must never break the conduit */
+        }
       }
     }, NAG_POLL_MS)
     ;(nagWatch as { unref?: () => void }).unref?.()

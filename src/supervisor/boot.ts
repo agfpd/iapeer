@@ -33,23 +33,33 @@ export function nextBootAction(adapter: BootPredicates, viewport: string, enc: K
   return { kind: 'wait' }
 }
 
-/** The slice of a RuntimeAdapter the MID-SESSION nag-watcher consumes — the optional
- *  nagDismissKeys (claudeAdapter satisfies it; codex/router omit it → no nags). */
+/** The slice of a RuntimeAdapter the MID-SESSION nag-watcher consumes — the optional nagDismissKeys
+ *  (benign upsell → silent decline) + blockingConfirm (circuit-breaker → affirmative + audit log).
+ *  claudeAdapter satisfies both; codex/router omit them → no action. */
 export interface NagPredicate {
   nagDismissKeys?(pane: string): string[] | null
+  blockingConfirm?(pane: string): { keys: string[]; taxonomy: string; detail: string } | null
 }
 
-export type NagAction = { kind: 'dismiss'; keys: string[]; bytes: Buffer } | { kind: 'none' }
+export type NagAction =
+  | { kind: 'dismiss'; keys: string[]; bytes: Buffer } // benign upsell — press keys silently
+  | { kind: 'approve'; keys: string[]; bytes: Buffer; taxonomy: string; detail: string } // circuit-breaker — press keys + LOG
+  | { kind: 'none' }
 
 /**
- * MID-SESSION nag/upsell step (livability) — the persistent sibling of nextBootAction. Unlike the
- * boot-driver, which STOPS at ready, the daemon loops this for the WHOLE session: a one-time CC upsell
- * modal (e.g. "Try the new fullscreen-renderer?") can pop AFTER the session is live and BLOCK the pty on
- * a keypress no headless peer answers. If the adapter recognizes the (FULL-signature) modal it returns
- * the verified-safe DECLINE keys; the caller writes `action.bytes` to the pty (cooldown-guarded so a
- * cleared modal is never double-answered). An adapter with no nagDismissKeys → always 'none'.
+ * MID-SESSION nag/confirm step (livability) — the persistent sibling of nextBootAction. Unlike the
+ * boot-driver (which STOPS at ready), the daemon loops this for the WHOLE session for TWO classes of
+ * mid-session blocking prompt no headless peer can answer:
+ *   1. a CIRCUIT-BREAKER confirm (blockingConfirm — e.g. the dangerous-rm guard above the permission
+ *      layer) → press the affirmative AND surface a `detail`/`taxonomy` the caller logs (owner audit);
+ *   2. a benign UPSELL modal (nagDismissKeys — e.g. "Try the new fullscreen-renderer?") → decline silently.
+ * The circuit-breaker is checked FIRST (safety-relevant). The caller writes `action.bytes` (cooldown- +
+ * stuck-gate-guarded so a cleared prompt is never double-answered). An adapter with neither → 'none'.
  */
 export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyEncoding = {}): NagAction {
+  const confirm = adapter.blockingConfirm?.(viewport)
+  if (confirm && confirm.keys.length)
+    return { kind: 'approve', keys: confirm.keys, bytes: keysToBytes(confirm.keys, enc), taxonomy: confirm.taxonomy, detail: confirm.detail }
   const keys = adapter.nagDismissKeys?.(viewport)
   if (keys && keys.length) return { kind: 'dismiss', keys, bytes: keysToBytes(keys, enc) }
   return { kind: 'none' }

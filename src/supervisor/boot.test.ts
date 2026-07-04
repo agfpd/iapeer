@@ -6,7 +6,7 @@ import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootActi
 // Fed the REAL runtime adapters (codexAdapter/claudeAdapter) — not fakes — so the test proves the
 // supervisor answers the exact dialogs the launch primitive answers, with byte-correct keys.
 const bytesOf = (a: BootAction): Buffer => (a.kind === 'dialog' ? a.bytes : Buffer.alloc(0))
-const nagBytesOf = (a: NagAction): Buffer => (a.kind === 'dismiss' ? a.bytes : Buffer.alloc(0))
+const nagBytesOf = (a: NagAction): Buffer => (a.kind === 'dismiss' || a.kind === 'approve' ? a.bytes : Buffer.alloc(0))
 
 describe('nextBootAction — codex startup dialogs answered off the model', () => {
   test('dir-trust → Enter (CR)', () => {
@@ -117,6 +117,68 @@ describe('nextNagAction — mid-session upsell modals auto-declined off the mode
 
   test('codex has no known mid-session nags → always none', () => {
     expect(nextNagAction(codexAdapter, fullscreenModal).kind).toBe('none')
+  })
+})
+
+describe('nextNagAction — dangerous-rm circuit-breaker auto-confirmed (owner: press YES + log)', () => {
+  // The EXACT live pane (claude 2.1.201 pty capture): the breaker sits ABOVE bypass, default cursor on
+  // "1. Yes". Needles split-literal so THIS test file / a peer reviewing it stays inert (В40 discipline).
+  const rmPrompt = [
+    '❯ Use the Bash tool to run exactly this and nothing else: rm -rf', // composer ECHO (must NOT be taken as the cmd)
+    '  /tmp/iapeer-rmrepro-cwd-XY',
+    '',
+    ' Bash command',
+    '',
+    '   rm -rf /tmp/iapeer-rmrepro-cwd-XY', // the ACTUAL command line (Bash-command block)
+    '   Delete the temp directory (current working directory)',
+    '',
+    ' Dangerous r' + 'm operation on working directory or its ' + 'ancestor:',
+    ' /tmp/iapeer-rmrepro-cwd-XY',
+    '',
+    ' Do you want to ' + 'proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    '',
+    ' Esc to cancel · Tab to amend · ctrl+e to explain',
+  ].join('\n')
+
+  test('dangerous-rm confirm → kind approve, literal "1" then Enter (YES), never a bare guess', () => {
+    const a = nextNagAction(claudeAdapter, rmPrompt)
+    expect(a.kind).toBe('approve')
+    expect(nagBytesOf(a)).toEqual(Buffer.from('1\r')) // presses YES so a headless peer never hangs
+  })
+
+  test('approve carries the audit trace (taxonomy + parsed command/target)', () => {
+    const a = nextNagAction(claudeAdapter, rmPrompt)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('dangerous-rm')
+    expect(a.detail).toContain('cmd="rm -rf /tmp/iapeer-rmrepro-cwd-XY"') // the ACTUAL command, not the composer echo
+    expect(a.detail).not.toContain('Use the Bash tool') // the echoed prompt line is never mistaken for the command
+    expect(a.detail).toContain('target="/tmp/iapeer-rmrepro-cwd-XY"') // the guarded target path
+  })
+
+  test('affirmative bytes are cursor-mode INDEPENDENT (no arrow key)', () => {
+    expect(nagBytesOf(nextNagAction(claudeAdapter, rmPrompt, { appCursorKeys: true }))).toEqual(Buffer.from('1\r'))
+  })
+
+  test('a mere QUOTE of the breaker (ready composer ❯ below, not on "1. Yes") → none', () => {
+    const quote = [
+      'the peer explained the guard:',
+      ' Dangerous r' + 'm operation on working directory or its ' + 'ancestor: /x',
+      ' Do you want to ' + 'proceed? 1. Yes 2. No',
+      '❯ ', // the ready composer is the bottom-most ❯ row — a quote, not a live select
+      '  bypass permissions on',
+    ].join('\n')
+    expect(nextNagAction(claudeAdapter, quote).kind).toBe('none')
+  })
+
+  test('rmdir variant matches the same signature (breaker phrase shared)', () => {
+    const rmdir = rmPrompt.replace('rm -rf /tmp', 'rmdir /tmp').replace('Dangerous r' + 'm operation', 'Dangerous r' + 'mdir operation')
+    expect(nextNagAction(claudeAdapter, rmdir).kind).toBe('approve')
+  })
+
+  test('codex has no circuit-breaker confirm → none', () => {
+    expect(nextNagAction(codexAdapter, rmPrompt).kind).toBe('none')
   })
 })
 
