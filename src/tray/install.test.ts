@@ -97,7 +97,7 @@ describe('installTray — installApp path', () => {
   test('brew-installs SwiftBar, points it at the dedicated dir, launches', () => {
     let installed = false
     const { run, calls } = makeRunner([
-      ['brew install --cask swiftbar', { status: 0, stdout: '', stderr: '' }],
+      ['brew install --cask', { status: 0, stdout: '', stderr: '' }],
       ['defaults read', { status: 1, stdout: '', stderr: '' }], // unset after fresh install
     ])
     const probeApp = () => installed
@@ -111,7 +111,7 @@ describe('installTray — installApp path', () => {
     expect(r.app).toBe('installed')
     expect(r.dir).toBe('dedicated-configured')
     expect(r.launched).toBe(true)
-    expect(calls.some(c => c.startsWith('brew install --cask swiftbar'))).toBe(true)
+    expect(calls.some(c => c.startsWith('brew install --cask') && c.includes('swiftbar'))).toBe(true)
     expect(calls.some(c => c.startsWith(`defaults write com.ameba.SwiftBar PluginDirectory -string ${dedicatedPluginDir(env)}`))).toBe(true)
     expect(calls.some(c => c.includes('swiftbar://refreshallplugins'))).toBe(true)
   })

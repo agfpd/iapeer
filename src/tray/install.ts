@@ -69,7 +69,17 @@ function setSwiftBarPluginDir(dir: string, run: Runner): RunResult {
 }
 
 function installSwiftBarApp(run: Runner): RunResult {
-  return run('brew', ['install', '--cask', 'swiftbar'])
+  // --no-quarantine: an automated install has no one to click through the Gatekeeper
+  // "app downloaded from the Internet" dialog — quarantine would stall first launch.
+  return run('brew', ['install', '--cask', '--no-quarantine', 'swiftbar'])
+}
+
+/** Strip any residual quarantine xattr from the app (belt-and-suspenders: an already
+ *  brew-installed SwiftBar, or a brew that quarantined despite the flag, would else
+ *  block first launch on a headless / no-click box). Best-effort. */
+function dequarantineApp(run: Runner): void {
+  const app = SWIFTBAR_APP_PATHS.find(p => existsSync(p))
+  if (app) run('xattr', ['-dr', 'com.apple.quarantine', app])
 }
 
 function launchSwiftBar(run: Runner): void {
@@ -195,6 +205,7 @@ export function installTray(opts: InstallTrayOptions = {}): InstallTrayResult {
   // 4 — launch + refresh
   let launched = false
   if (opts.launch && present) {
+    dequarantineApp(run)
     launchSwiftBar(run)
     refreshSwiftBar(run)
     launched = true
