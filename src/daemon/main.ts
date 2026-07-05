@@ -66,6 +66,7 @@ import {
 } from '../transport/index.ts'
 import { iapeerBinPath } from '../install/index.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
+import { buildFleetHandler } from './fleet.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -362,6 +363,11 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // launchd-managed target (the daemon can't wake it, but KeepAlive revives it) → retry-
     // resolve for a bounded window instead of failing in ~16ms — bridges a router restart.
     isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
+    // Fleet-API (Ф0 iapeer-tray): the operator-client surface /fleet/v1/* — snapshot
+    // (the same listPeers truth as `iapeer list`), SSE events (tail of the durable
+    // logs), commands over the existing verb functions. Same listeners, same bearer
+    // gate; advertised in router.json as fleet:1. Contract: docs/15-fleet-api.md.
+    fleet: buildFleetHandler({ env }),
     supervise: {
       intervalMs: opts.superviseIntervalMs ?? DEFAULT_SUPERVISE_INTERVAL_MS,
       // idle-reap / zombie-sweep, THEN the eager fresh re-launch for any peer whose

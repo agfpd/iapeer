@@ -6,12 +6,12 @@
 // All paths resolve through the injected env → the same IAPEER_ROOT isolation as
 // every other side-effect (sandbox rule). Reads only — the dashboard mutates nothing.
 
-import { closeSync, openSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { listPeers, type PeerListing } from '../../cli/index.ts'
 import { loadLifecycleConfig } from '../../lifecycle/index.ts'
 import { deliveryLogPath } from '../../daemon/deliverylog.ts'
 import { lifecycleLogPath } from '../../lifecycle/eventlog.ts'
+import { readLogTail } from '../../storage/rotatelog.ts'
 import { assemblePeerLog } from './model.ts'
 
 /** One peers snapshot (the poll unit). listPeers is synchronous and cheap: registry
@@ -42,26 +42,10 @@ export async function takeHostHeader(env: NodeJS.ProcessEnv): Promise<HostHeader
   }
 }
 
-/** Read the last `bytes` of a file without loading the whole log (delivery.log can
- *  be MBs before rotation). Missing/unreadable file → ''. */
-export function readTail(path: string, bytes = 64 * 1024): string {
-  try {
-    const size = statSync(path).size
-    const fd = openSync(path, 'r')
-    try {
-      const start = Math.max(0, size - bytes)
-      const buf = Buffer.alloc(size - start)
-      readSync(fd, buf, 0, buf.length, start)
-      // drop the leading partial line when we started mid-file
-      const s = buf.toString('utf8')
-      return start > 0 ? s.slice(s.indexOf('\n') + 1) : s
-    } finally {
-      closeSync(fd)
-    }
-  } catch {
-    return ''
-  }
-}
+/** Read the last `bytes` of a file without loading the whole log. Promoted to the
+ *  storage layer (readLogTail — the fleet-API replay reader shares it); kept as a
+ *  re-export so dashboard call sites/tests are untouched. */
+export const readTail: (path: string, bytes?: number) => string = readLogTail
 
 /** The per-peer log panel content: newest `limit` events concerning the peer from
  *  delivery.log + lifecycle.log (merged by timestamp). */

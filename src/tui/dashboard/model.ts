@@ -8,6 +8,7 @@
 // under `bun test` with zero terminal plumbing.
 
 import type { PeerListing } from '../../cli/index.ts'
+import { eventConcernsPeer as concernsPeer, parseEventLine as parseLogfmtLine } from '../../storage/rotatelog.ts'
 
 // ─── row filtering ───────────────────────────────────────────────────────────
 
@@ -55,36 +56,22 @@ export interface LogEvent {
   fields: Record<string, string>
 }
 
-/** Parse one `ts=<iso> ev=<kind> k=v …` line; null for anything else (corrupt tail). */
+/** Parse one `ts=<iso> ev=<kind> k=v …` line; null for anything else (corrupt tail).
+ *  Delegates to the storage-layer QUOTE-AWARE parser (the writer's symmetric read
+ *  half) and adds the display time — the earlier display-only tokenizer split quoted
+ *  multi-word values (reason="idle 3700s") mid-value. */
 export function parseEventLine(line: string): LogEvent | null {
-  if (!line.startsWith('ts=')) return null
-  const fields: Record<string, string> = {}
-  // k=v tokens; values are token-atomic in our append format (no embedded spaces).
-  for (const tok of line.split(' ')) {
-    const i = tok.indexOf('=')
-    if (i > 0) fields[tok.slice(0, i)] = tok.slice(i + 1)
-  }
-  const ts = fields.ts
-  const ev = fields.ev
-  if (!ts || !ev) return null
-  const tsMs = Date.parse(ts)
-  if (!Number.isFinite(tsMs)) return null
-  const d = new Date(tsMs)
+  const p = parseLogfmtLine(line)
+  if (!p) return null
+  const d = new Date(p.tsMs)
   const pad = (n: number): string => String(n).padStart(2, '0')
-  return { tsMs, time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`, ev, fields }
+  return { tsMs: p.tsMs, time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`, ev: p.ev, fields: p.fields }
 }
 
 /** Does this event concern the peer? Matches bare personality and any `<rt>-<personality>`
- *  identity in the fields the two logs actually carry (to/caller/via/personality/identity). */
-export function eventConcernsPeer(e: LogEvent, personality: string): boolean {
-  const idSuffix = `-${personality}`
-  for (const key of ['to', 'caller', 'via', 'personality', 'identity', 'from', 'peer'] as const) {
-    const v = e.fields[key]
-    if (!v) continue
-    if (v === personality || v.endsWith(idSuffix)) return true
-  }
-  return false
-}
+ *  identity in the fields the two logs actually carry (to/caller/via/personality/identity).
+ *  Re-exported from the storage layer (the fleet peer-detail endpoint shares it). */
+export const eventConcernsPeer: (e: LogEvent, personality: string) => boolean = concernsPeer
 
 /** One display line per event — compact, the interesting fields only. */
 export function formatEvent(e: LogEvent): { text: string; tone: 'ok' | 'fail' | 'info' } {

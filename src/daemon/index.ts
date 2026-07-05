@@ -359,6 +359,23 @@ export interface DaemonHandle {
   close: () => Promise<void>
 }
 
+/**
+ * The fleet-API request handler seam (Ф0 iapeer-tray) — the OPERATOR-CLIENT HTTP
+ * surface (/fleet/v1/*: snapshot + SSE events + commands), served on the SAME
+ * listeners behind the SAME bearer gate as the MCP path. Injected by the
+ * composition point (daemon/main.ts wires daemon/fleet.ts's buildFleetHandler) so
+ * the daemon library never imports lifecycle/CLI — the same seam pattern as
+ * wake/supervise. `ctx.deps` is the daemon's wired CallToolDeps: the fleet send
+ * command routes through the SAME callTool path as the MCP tool (delivery.log +
+ * post-delivery hooks included). OFF by default (library/tests): without the seam,
+ * /fleet/* URLs fall through to the MCP handler like any other request.
+ */
+export type FleetRequestHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: { deps: CallToolDeps },
+) => Promise<void>
+
 export interface StartDaemonOptions extends StorageOptions {
   /**
    * Unix-socket path (H8 base: 0600, same-uid local callers — CLI / pane /
@@ -440,6 +457,12 @@ export interface StartDaemonOptions extends StorageOptions {
    *  delivery retry. OFF by default (library/tests); production main wires the real one. */
   isLaunchdManaged?: (personality: string) => boolean
   /**
+   * Fleet-API handler (see FleetRequestHandler) — serves /fleet/v1/* on both
+   * listeners, behind the bearer gate. OFF by default; the production main wires
+   * daemon/fleet.ts's buildFleetHandler. Advertised in router.json as `fleet: 1`.
+   */
+  fleet?: FleetRequestHandler
+  /**
    * Write the discovery file (router.json) at <root>/state/iapeer/router.json with
    * the active addresses `{sock, tcp}` — atomically on listen, removed on close.
    * This is the contract a daemon-aware `iap send` reads to route through the
@@ -456,27 +479,51 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
   const host = opts.host ?? '127.0.0.1'
   const bearer = opts.bearerToken?.trim() || undefined
 
-  // ONE MCP request handler, shared by EVERY listener (socket + TCP). Stateless:
+  // The ONE wired CallToolDeps object — shared by the per-request MCP servers AND
+  // the fleet-API handler (its send command routes through the SAME callTool path,
+  // so a fleet-originated send gets the identical delivery.log line + hooks).
+  const callDeps: CallToolDeps = {
+    env: opts.env, // Б7 — thread the daemon's storage env into the request path (registry read + routeSend)
+    wake: opts.wake,
+    deliveryLogDir: opts.deliveryLogDir,
+    onDelivered: opts.onDelivered,
+    ephemeral: opts.ephemeral,
+    noteLiveTopic: opts.noteLiveTopic,
+    noteDelivered: opts.noteDelivered,
+    composerQueue: opts.composerQueue,
+    isLaunchdManaged: opts.isLaunchdManaged,
+  }
+
+  // ONE HTTP request handler, shared by EVERY listener (socket + TCP): the bearer
+  // gate first, then the fleet-API branch (when wired), then stateless MCP —
   // a fresh Server + transport per request, fully isolated.
   const handle = (req: IncomingMessage, res: ServerResponse): void => {
-    // H8 bearer layer (FIRST, before any MCP work): when a token is configured,
+    // H8 bearer layer (FIRST, before any MCP/fleet work): when a token is configured,
     // reject anything not carrying `Authorization: Bearer <token>`. Off when unset.
     if (bearer && req.headers.authorization !== `Bearer ${bearer}`) {
       res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer' })
       res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'unauthorized' } }))
       return
     }
-    const server = createMcpServer({
-      env: opts.env, // Б7 — thread the daemon's storage env into the request path (registry read + routeSend)
-      wake: opts.wake,
-      deliveryLogDir: opts.deliveryLogDir,
-      onDelivered: opts.onDelivered,
-      ephemeral: opts.ephemeral,
-      noteLiveTopic: opts.noteLiveTopic,
-      noteDelivered: opts.noteDelivered,
-      composerQueue: opts.composerQueue,
-      isLaunchdManaged: opts.isLaunchdManaged,
-    })
+    // Fleet-API branch (Ф0 iapeer-tray): /fleet/* is the operator-client surface.
+    // Deliberately AFTER the bearer gate and BEFORE MCP — the two surfaces share
+    // listeners but never overlap in URL space.
+    if (opts.fleet && req.url && (req.url === '/fleet' || req.url.startsWith('/fleet/'))) {
+      void opts.fleet(req, res, { deps: callDeps }).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'internal error' }))
+        } else {
+          try {
+            res.end()
+          } catch {
+            /* connection already gone */
+          }
+        }
+      })
+      return
+    }
+    const server = createMcpServer(callDeps)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       transport.close()
@@ -568,7 +615,12 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     // `version` (В53): the RUNNING daemon's baked version — lets `iapeer update`
     // detect an interrupted update (binary already at latest, live daemon still on
     // the old code) and heal it with a restart instead of a false "already-latest".
-    writeFileAtomic(discoveryPath, `${JSON.stringify({ sock: socketPath ?? null, tcp: url ?? null, version: IAPEER_VERSION })}\n`)
+    // `fleet` (Ф0 iapeer-tray): the fleet-API capability marker — a client reads it
+    // to know this daemon serves /fleet/v1/* (absent on pre-fleet daemons).
+    writeFileAtomic(
+      discoveryPath,
+      `${JSON.stringify({ sock: socketPath ?? null, tcp: url ?? null, version: IAPEER_VERSION, ...(opts.fleet ? { fleet: 1 } : {}) })}\n`,
+    )
   }
 
   const removeArtifacts = (): void => {
