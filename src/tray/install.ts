@@ -103,6 +103,11 @@ export function buildPluginShim(binPath: string): string {
     '# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>',
     '# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>',
     '# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>',
+    // The dashboard ONLY ever talks to the local daemon (unix socket / loopback), so it
+    // must never route through an HTTP proxy. Bun's fetch caches proxy config at process
+    // start and ignores NO_PROXY for loopback, so clearing the vars must happen in the
+    // ENV before the binary launches (a runtime delete is too late). unset here.
+    'unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy',
     `exec "${binPath}" tray render --stream`,
     '',
   ].join('\n')

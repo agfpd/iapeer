@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { parseSseFrame, resolveFleetAddress } from './client.ts'
+import { fleetGetJson, fleetPostJson, parseSseFrame, resolveFleetAddress, type FleetAddress } from './client.ts'
 
 describe('parseSseFrame', () => {
   test('parses event/id/data', () => {
@@ -72,5 +72,44 @@ describe('resolveFleetAddress', () => {
     const a = resolveFleetAddress({ env })
     expect(a.sock).toBe('/tmp/router.sock')
     expect(a.tcp).toBeUndefined()
+  })
+})
+
+describe('transport fallback (fleetGetJson / fleetPostJson)', () => {
+  const ADDR: FleetAddress = { sock: '/tmp/r.sock', tcp: 'http://127.0.0.1:8765', fleet: 1 }
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  /** Mock fetch: unix attempt (init.unix present) → `unixStatus`; tcp → `tcpStatus`. */
+  function mockFetch(unixStatus: number, tcpStatus: number): { calls: string[] } {
+    const calls: string[] = []
+    globalThis.fetch = (async (url: string, init: { unix?: string } = {}) => {
+      const transport = init.unix ? 'unix' : 'tcp'
+      calls.push(transport)
+      const status = transport === 'unix' ? unixStatus : tcpStatus
+      return new Response(status < 400 ? JSON.stringify({ ok: transport }) : JSON.stringify({ error: 'nope' }), { status })
+    }) as unknown as typeof fetch
+    return { calls }
+  }
+
+  test('GET: a bad unix status falls back to TCP (a proxied/misrouting transport cannot sink it)', async () => {
+    const { calls } = mockFetch(406, 200)
+    const r = await fleetGetJson<{ ok: string }>(ADDR, '/fleet/v1/snapshot', {})
+    expect(r.ok).toBe('tcp') // fell back to TCP
+    expect(calls).toEqual(['unix', 'tcp'])
+  })
+
+  test('GET: both transports bad → throws with the actual URL + transport', async () => {
+    mockFetch(406, 406)
+    await expect(fleetGetJson(ADDR, '/fleet/v1/snapshot', {})).rejects.toThrow(/406/)
+  })
+
+  test('POST: a bad status does NOT fall back (a command must never re-execute)', async () => {
+    const { calls } = mockFetch(502, 200)
+    const r = await fleetPostJson(ADDR, '/fleet/v1/peers/x/wake', {}, {})
+    expect(r.status).toBe(502) // returned the first (unix) response, no retry
+    expect(calls).toEqual(['unix'])
   })
 })

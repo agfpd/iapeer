@@ -80,6 +80,7 @@ export class FleetUnreachableError extends Error {
 }
 
 interface FetchAttempt {
+  transport: 'unix' | 'tcp'
   url: string
   init: RequestInit & { unix?: string }
 }
@@ -89,36 +90,66 @@ interface FetchAttempt {
 function attempts(addr: FleetAddress, path: string, base: RequestInit, env: NodeJS.ProcessEnv): FetchAttempt[] {
   const headers = { ...(base.headers as Record<string, string> | undefined), ...bearerHeader(env) }
   const list: FetchAttempt[] = []
-  if (addr.sock) list.push({ url: `http://iapeer${path}`, init: { ...base, headers, unix: addr.sock } })
-  if (addr.tcp) list.push({ url: `${addr.tcp}${path}`, init: { ...base, headers } })
+  if (addr.sock) list.push({ transport: 'unix', url: `http://iapeer${path}`, init: { ...base, headers, unix: addr.sock } })
+  if (addr.tcp) list.push({ transport: 'tcp', url: `${addr.tcp}${path}`, init: { ...base, headers } })
   return list
 }
 
+function debug(env: NodeJS.ProcessEnv, msg: string): void {
+  if (env.IAPEER_TRAY_DEBUG === '1') process.stderr.write(`[tray] ${msg}\n`)
+}
+
+/** The response of a fleet request, carrying the ACTUAL wire transport + URL used —
+ *  so a failure surfaces where the request really went (a proxied request lands on a
+ *  different route than the client's intended path). */
+export interface FleetResponse {
+  res: Response
+  transport: string
+  url: string
+}
+
+/**
+ * Try each transport (unix first, TCP second) until one answers. On a THROW, move to
+ * the next transport. On a NON-OK status the behavior depends on `retryBadStatus`:
+ * GETs (idempotent) retry on the OTHER transport (a single misrouting transport — e.g.
+ * one behind a proxy — cannot then sink the client); POSTs do NOT (never re-execute a
+ * command). Returns the actual transport+URL for honest diagnostics.
+ */
 async function fetchFleet(
   addr: FleetAddress,
   path: string,
   init: RequestInit,
   env: NodeJS.ProcessEnv,
-): Promise<Response> {
+  opts: { retryBadStatus?: boolean } = {},
+): Promise<FleetResponse> {
   const tries = attempts(addr, path, init, env)
   if (tries.length === 0) throw new FleetUnreachableError('no advertised address (router.json missing sock/tcp)')
   let lastErr = ''
+  let firstBad: FleetResponse | undefined
   for (const a of tries) {
+    let res: Response
     try {
-      const res = await fetch(a.url, a.init as RequestInit)
-      return res
+      res = await fetch(a.url, a.init as RequestInit)
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
-      // try the next transport
+      debug(env, `${a.transport} ${a.url} → THREW ${lastErr}`)
+      continue
     }
+    debug(env, `${a.transport} ${a.url} → ${res.status}`)
+    const wrapped: FleetResponse = { res, transport: a.transport, url: a.url }
+    if (res.ok) return wrapped
+    if (!firstBad) firstBad = wrapped
+    if (!opts.retryBadStatus) return wrapped // POST: return the error as-is (no re-execute)
+    // GET: fall through to the next transport; firstBad is returned if none succeed
   }
-  throw new FleetUnreachableError(lastErr || 'all transports failed')
+  if (firstBad) return firstBad
+  throw new FleetUnreachableError(`${lastErr || 'all transports failed'} (tried ${tries.map(t => `${t.transport}=${t.url}`).join(', ')})`)
 }
 
 export async function fleetGetJson<T = unknown>(addr: FleetAddress, path: string, env: NodeJS.ProcessEnv): Promise<T> {
-  const res = await fetchFleet(addr, path, { method: 'GET' }, env)
+  const { res, transport, url } = await fetchFleet(addr, path, { method: 'GET' }, env, { retryBadStatus: true })
   const text = await res.text()
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}: ${text.slice(0, 300)}`)
+  if (!res.ok) throw new Error(`GET ${url} (${transport}) → ${res.status}: ${text.slice(0, 300)}`)
   return JSON.parse(text) as T
 }
 
@@ -128,11 +159,12 @@ export async function fleetPostJson<T = unknown>(
   body: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
 ): Promise<{ status: number; body: T }> {
-  const res = await fetchFleet(
+  const { res } = await fetchFleet(
     addr,
     path,
     { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
     env,
+    { retryBadStatus: false }, // a command must never re-execute on the other transport
   )
   const text = await res.text()
   let parsed: T
@@ -170,13 +202,14 @@ export async function streamFleetEvents(
   opts: { replay?: number; signal?: AbortSignal; env: NodeJS.ProcessEnv },
 ): Promise<void> {
   const replay = Math.max(0, Math.min(500, opts.replay ?? 0))
-  const res = await fetchFleet(
+  const { res, transport, url } = await fetchFleet(
     addr,
     `/fleet/v1/events?replay=${replay}`,
     { method: 'GET', headers: { accept: 'text/event-stream' }, signal: opts.signal },
     opts.env,
+    { retryBadStatus: true },
   )
-  if (!res.ok || !res.body) throw new Error(`events stream → ${res.status}`)
+  if (!res.ok || !res.body) throw new Error(`events stream ${url} (${transport}) → ${res.status}`)
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''

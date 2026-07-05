@@ -351,6 +351,26 @@ export function daemonDiscoveryPath(options: StorageOptions = {}): string {
   return join(pluginStateDir('iapeer', options), 'router.json')
 }
 
+/**
+ * Normalize an HTTP request-target to origin-form (path[+query]) for path routing.
+ * A request that traversed an HTTP proxy arrives in ABSOLUTE-FORM (RFC 7230 §5.3.2:
+ * "GET http://host/path"), and Node exposes the whole target as `req.url` — so a
+ * path check like `req.url.startsWith('/fleet/')` misses and the request wrongly
+ * falls to the MCP catch-all (→ 406). Any client with HTTP(S)_PROXY set is affected
+ * (Bun's fetch proxies loopback even when NO_PROXY lists 127.0.0.1). Origin-form and
+ * unparseable targets pass through unchanged. Exported for tests. */
+export function normalizeRequestTarget(url: string | undefined): string | undefined {
+  if (url && /^https?:\/\//i.test(url)) {
+    try {
+      const u = new URL(url)
+      return u.pathname + u.search
+    } catch {
+      /* unparseable — leave as received */
+    }
+  }
+  return url
+}
+
 export interface DaemonHandle {
   socketPath?: string
   host?: string
@@ -498,6 +518,18 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
   // gate first, then the fleet-API branch (when wired), then stateless MCP —
   // a fresh Server + transport per request, fully isolated.
   const handle = (req: IncomingMessage, res: ServerResponse): void => {
+    // RFC 7230 §5.3.2 request-target hygiene (FIRST — before ANY path routing). A
+    // request that traversed an HTTP proxy carries the ABSOLUTE-FORM target
+    // ("GET http://127.0.0.1:8765/fleet/v1/snapshot"), and Node puts that whole string
+    // in req.url — so path routing (/fleet vs /mcp) would miss and fall through to MCP
+    // (→ a 406 "must accept text/event-stream" for a plain GET). This bites any client
+    // whose environment has HTTP(S)_PROXY set: Bun's fetch (and others) route loopback
+    // through the proxy even when NO_PROXY lists 127.0.0.1 (Bun ignores NO_PROXY). We
+    // can't fix every client, so the daemon normalizes to origin-form here — a proxied
+    // request then routes identically to a direct one, for BOTH the fleet and MCP
+    // surfaces. (live-proven: HTTP_PROXY pointed at the daemon itself reproduced the
+    // 406; normalization restores /fleet routing.)
+    req.url = normalizeRequestTarget(req.url)
     // H8 bearer layer (FIRST, before any MCP/fleet work): when a token is configured,
     // reject anything not carrying `Authorization: Bearer <token>`. Off when unset.
     if (bearer && req.headers.authorization !== `Bearer ${bearer}`) {

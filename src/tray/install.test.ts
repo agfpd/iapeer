@@ -54,6 +54,13 @@ describe('buildPluginShim', () => {
     expect(shim).toContain('<swiftbar.type>streamable</swiftbar.type>')
     expect(shim).toContain('exec "/x/iapeer" tray render --stream')
   })
+
+  test('clears proxy env before exec (loopback must not route through a VPN proxy)', () => {
+    const shim = buildPluginShim('/x/iapeer')
+    expect(shim).toContain('unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy')
+    // the unset must come BEFORE the exec (env cleared before the binary starts)
+    expect(shim.indexOf('unset HTTP_PROXY')).toBeLessThan(shim.indexOf('exec '))
+  })
 })
 
 describe('installTray — plugin-only (SwiftBar absent)', () => {
