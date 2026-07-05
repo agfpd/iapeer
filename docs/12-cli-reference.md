@@ -94,3 +94,15 @@ Commands an agent runs in its own session (require `PEER_IDENTITY` in the enviro
 | `run-infra <name> <runtime>` | An infrastructure peer's entry point; launched from its launchd plist. |
 
 These two commands are invoked by launchd, not the operator directly.
+
+## Tray (menu-bar dashboard)
+
+| Command | What it does |
+|---|---|
+| `tray install [--plugin-only]` | Install the SwiftBar fleet dashboard: install SwiftBar.app when absent (owner-sanctioned), write the plugin, launch + refresh. `--plugin-only` writes just the plugin file. Idempotent. |
+| `tray uninstall` | Remove the plugin file + refresh SwiftBar. Never touches the fleet; leaves SwiftBar.app installed. |
+| `tray render [--stream]` | Print the SwiftBar plugin output (`--stream` = the streamable loop the plugin runs). |
+| `tray cmd <command> <peer> [runtime]` | POST a fleet command (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — the menu's lifecycle actions. |
+| `tray status` | Read-only: fleet API reachability, SwiftBar install + plugin dir, plugin file presence. |
+
+The tray is the first external [Fleet API](15-fleet-api.md) client — see [16 — Tray](16-tray.md).

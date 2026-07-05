@@ -1165,7 +1165,9 @@ const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   'no-telegram',
   'no-voice',
   'npx',
+  'plugin-only',
   'remove-codesign-identity',
+  'stream',
   'yes',
 ])
 
@@ -1274,6 +1276,10 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   {
     sig: 'supervisor up|start|attach|list|kill <sess> [runtime]',
     desc: 'DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)',
+  },
+  {
+    sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|status',
+    desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; install activates it (installs SwiftBar when absent). See docs/16.',
   },
 ]
 
@@ -2275,6 +2281,19 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // docs on its OWN install, version = its binary). install runs from source, so
         // docs/ sits at <entry>/../../docs. Best-effort: never fails the install.
         const docs = scaffoldHostDocs('iapeer', join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs'), env)
+        // Ship the tray face WITH the foundation (owner decision — same class as the
+        // `iapeer list` TUI). Plugin-file ONLY: drop/refresh the SwiftBar plugin shim
+        // (into a configured SwiftBar dir if present, else the dedicated ~/.iapeer dir).
+        // Inert without SwiftBar; NEVER auto-installs the GUI here (that is the explicit
+        // `iapeer tray install`). Best-effort — a hiccup never fails the foundation install.
+        let trayLine = ''
+        try {
+          const { installTray } = await import('../tray/index.ts')
+          const t = installTray({ env, installApp: false, launch: false })
+          trayLine = `  tray plugin: ${t.wrote ? 'written' : 'unchanged'} → ${t.pluginFile} (${t.dir})\n`
+        } catch (e) {
+          trayLine = `  tray plugin: skipped (${e instanceof Error ? e.message : String(e)})\n`
+        }
         const { path: plist, changed: plistChanged } = installDaemonPlist({ env })
         const signingLine =
           r.signing == null
@@ -2291,6 +2310,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             `  scaffold: ~/.iapeer/ ensured (peers/, state, logs, cache, runtimes)\n` +
             `  host doctrine: ${hostDoctrine.path}${hostDoctrine.created ? ' (stub created — fill it in)' : ' (kept)'}\n` +
             `  docs: ${docs.copied ? docs.dest : `skipped (${docs.reason})`}\n` +
+            trayLine +
             `  daemon plist ${plistChanged ? 'written' : 'unchanged (byte-identical — no write, no BTM notification)'}: ${plist}\n` +
             `  (NOT loaded — a live daemon migration is a separate step: launchctl bootstrap gui/$(id -u) ${plist})\n`,
         )
@@ -2468,6 +2488,82 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // (the daemon never loads this). Sub-commands: up|start|attach|list|kill|daemon.
         const { runSupervisorCli } = await import('../supervisor/index.ts')
         return await runSupervisorCli(rest)
+      }
+      case 'tray': {
+        // Ф1 of iapeer-tray — the SwiftBar fleet dashboard, an EXTERNAL fleet-API
+        // client (docs/15). Subcommands: render[--stream] · cmd · install · uninstall
+        // · status. The plugin file is a shim that execs `tray render --stream`; all
+        // rendering/streaming lives here (tested TS), the .sh carries only metadata.
+        const tray = await import('../tray/index.ts')
+        const sub = positionals[0]
+        switch (sub) {
+          case 'render': {
+            if (flags.stream === true) {
+              await tray.streamTray(env) // SwiftBar streamable loop — runs until the process is killed
+              return 0
+            }
+            out(await tray.renderTrayOnce(env))
+            return 0
+          }
+          case 'cmd': {
+            const command = positionals[1]
+            const peer = positionals[2]
+            const runtime = positionals[3]
+            if (!command || !peer) {
+              return argErr(errOut, 'usage: iapeer tray cmd <wake|stop|start|new|refresh|interrupt|compact> <peer> [runtime]')
+            }
+            let r: Awaited<ReturnType<typeof tray.trayCmd>>
+            try {
+              r = await tray.trayCmd(env, command, peer, runtime)
+            } catch (e) {
+              errOut(`tray cmd: ${e instanceof Error ? e.message : String(e)}\n`)
+              return 1
+            }
+            out(`${JSON.stringify(r.body)}\n`)
+            return r.ok ? 0 : 1
+          }
+          case 'install': {
+            // Explicit activation verb: installs SwiftBar.app when absent
+            // (owner-sanctioned) + launches, unless --plugin-only (file only).
+            const pluginOnly = flags['plugin-only'] === true
+            const r = tray.installTray({ env, installApp: !pluginOnly, launch: !pluginOnly })
+            out(
+              `tray plugin ${r.wrote ? 'written' : 'unchanged'}: ${r.pluginFile}\n` +
+                `  plugin dir: ${r.pluginDir} (${r.dir})\n` +
+                `  SwiftBar: ${r.app}${r.appReason ? ` — ${r.appReason}` : ''}\n` +
+                (r.launched ? '  launched + refreshed SwiftBar\n' : '') +
+                (r.app === 'absent' || r.app === 'install-failed'
+                  ? '  (SwiftBar not active — run `iapeer tray install` to install it, then it appears in the menu bar)\n'
+                  : ''),
+            )
+            return 0
+          }
+          case 'uninstall': {
+            const r = tray.uninstallTray({ env, launch: true })
+            out(
+              (r.removed.length ? `removed:\n${r.removed.map(f => `  ${f}`).join('\n')}\n` : 'no tray plugin file found\n') +
+                (r.refreshed ? '  refreshed SwiftBar\n' : '') +
+                '  fleet untouched (daemon / TUI / delivery unaffected)\n',
+            )
+            return 0
+          }
+          case 'status': {
+            const s = tray.trayStatus({ env })
+            out(
+              `daemon fleet API: ${s.daemon.fleet ? `up (v${s.daemon.version ?? '?'})` : 'DOWN / no fleet:1'}\n` +
+                `  sock: ${s.daemon.sock ?? '—'}\n` +
+                `  tcp:  ${s.daemon.tcp ?? '—'}\n` +
+                `SwiftBar: ${s.swiftbar.installed ? `installed (plugin dir: ${s.swiftbar.pluginDir ?? 'unset'})` : 'not installed'}\n` +
+                `plugin: ${s.plugin.installed ? s.plugin.path : 'not installed'}\n`,
+            )
+            return 0
+          }
+          default:
+            return argErr(
+              errOut,
+              'usage: iapeer tray <render [--stream] | cmd <command> <peer> [runtime] | install [--plugin-only] | uninstall | status>',
+            )
+        }
       }
       default: {
         // `iapeer <runtime>` (launch) — folder-launch the cwd's peer, ALWAYS fresh. On a TTY this is

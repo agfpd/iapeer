@@ -77,6 +77,7 @@ The sections are layered: from "install and use" to "understand the architecture
 - [13 — Architecture and contract](13-architecture-and-contract.md) — for plugin and runtime-package developers
 - [14 — Configuration and logs](14-configuration-and-logs.md) — environment variables, logs, diagnostics
 - [15 — Fleet API](15-fleet-api.md) — the daemon's HTTP surface for operator clients (dashboards, tray apps, scripts): snapshot, event stream, commands
+- [16 — Tray](16-tray.md) — the macOS menu-bar fleet dashboard (SwiftBar plugin), the first external Fleet API client
 
 ## Status
 
