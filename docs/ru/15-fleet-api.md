@@ -106,9 +106,9 @@ GET /fleet/v1/events?replay=50
 - Комментарий `: connected` отмечает переход от replay к live; комментарии `: hb` каждые ~15 с держат соединение.
 - Латентность: живые события всплывают в пределах ~0.5 с (поллинг хвоста лога).
 
-Текущий словарь `ev` (растёт со временем — см. обязанность 1): `wake`, `supervise` (с `action`: `reaped-idle` = парковка, `reaped-ephemeral`, классификация `dead`→fresh/resume, `eager-orphan-fresh`, `skipped-error`…), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (из `exits.log`, с `dead_status`/`dead_signal`).
+Текущий словарь `ev` (растёт со временем — см. обязанность 1): `wake`, `supervise` (с `action`: `reaped-idle` = парковка, `reaped-ephemeral`, классификация `dead`→fresh/resume, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (verb'ы stop/start — оператор изменил ✕/○-состояние пира; `action` — `stopped`/`started` для warm-рантаймов, `bootout`/`bootstrap` для always-on, с `reason` при неудаче), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (из `exits.log`: `cause=child-exit` с `dead_status`/`dead_signal`, когда процесс сессии умер сам; `cause=shutdown-sigterm`/`shutdown-sigint`, когда супервизор был погашен — reap/stop/new), `supervisor-uncaught` (пережитый сбой супервизора, оставленный как форензика; сессия продолжает работать).
 
-Как выглядят главные состояния на потоке: **пробуждение** пира — `ev=wake`; **парковка в сон** — `ev=supervise action=reaped-idle`; **смерть** — `ev=session-exit` (немедленно, от супервизора), затем классификация демона на его следующем проходе.
+Как выглядят главные состояния на потоке: **пробуждение** пира — `ev=wake`; **парковка в сон** — `ev=supervise action=reaped-idle`; операторский **stop/start** — `ev=stopped` / `ev=started`; **смерть** — `ev=session-exit` (немедленно, от супервизора), затем классификация демона на его следующем проходе.
 
 ## Команды
 

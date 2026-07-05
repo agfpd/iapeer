@@ -253,12 +253,9 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       killSession(sock, identity, env)
       const stderrText = (r.stderr ?? '').trim()
       const benign = r.status === 0 || r.status === 3 || /No such process/i.test(stderrText)
-      out.push({
-        personality,
-        runtime: rt,
-        action: 'bootout',
-        reason: benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`,
-      })
+      const reason = benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`
+      out.push({ personality, runtime: rt, action: 'bootout', reason })
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'bootout', reason }, { env })
     } else {
       // A deliberate stop is a CLEAN PARK, not a death (stop→start must survive ≥
       // idle-reap): park-mark BEFORE the kill so the post-`start`
@@ -270,6 +267,12 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       killSession(sock, identity, env)
       removeSessionState(cfg, identity)
       out.push({ personality, runtime: rt, action: 'stopped' })
+      // Durable trace (fleet-API follow-up): the verb was SILENT in lifecycle.log — a
+      // CLI stop changed the fleet state (● → ✕) with no event, so an SSE-fed client
+      // (tray class) showed a stale status indefinitely (no event ⇒ no snapshot
+      // re-read; only the initiator knew). One line per state-changing outcome; the
+      // refused-foreign-launchd branch changes nothing and stays silent.
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'stopped' }, { env })
     }
   }
   return out
@@ -301,17 +304,17 @@ export function startPeer(personality: string, runtime: string | undefined, opts
       // sentinel fleet-guard + sandbox guard the raw spawn never had.)
       const r = launchctlBootstrap(personality, plist, env)
       const ok = r.state === 'loaded' || r.state === 'already-loaded' || r.state === 'skipped-sandbox'
-      out.push({
-        personality,
-        runtime: rt,
-        action: 'bootstrap',
-        reason: ok
-          ? undefined
-          : `launchctl bootstrap FAILED${r.detail ? `: ${r.detail}` : ''} — peer not started; manual rescue: launchctl bootstrap gui/$(id -u) ${plist}`,
-      })
+      const reason = ok
+        ? undefined
+        : `launchctl bootstrap FAILED${r.detail ? `: ${r.detail}` : ''} — peer not started; manual rescue: launchctl bootstrap gui/$(id -u) ${plist}`
+      out.push({ personality, runtime: rt, action: 'bootstrap', reason })
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'started', identity, personality, runtime: rt, action: 'bootstrap', reason }, { env })
     } else {
       clearStopped(cfg, identity)
       out.push({ personality, runtime: rt, action: 'started' })
+      // Durable trace — mirror of the `stopped` event in stopPeer (✕ → ○ is a state
+      // change an SSE-fed client must hear about).
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'started', identity, personality, runtime: rt, action: 'started' }, { env })
     }
   }
   return out

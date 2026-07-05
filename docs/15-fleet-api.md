@@ -106,9 +106,9 @@ GET /fleet/v1/events?replay=50
 - A comment `: connected` marks the transition from replay to live; `: hb` comments every ~15 s keep the connection alive.
 - Latency: live events surface within ~0.5 s (log-tail poll).
 
-Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`, with `dead_status`/`dead_signal`).
+Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (the stop/start verbs — an operator changed a peer's ✕/○ state; `action` is `stopped`/`started` for warm runtimes, `bootout`/`bootstrap` for always-on, with `reason` on failure), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`: `cause=child-exit` with `dead_status`/`dead_signal` when the session's process died on its own, `cause=shutdown-sigterm`/`shutdown-sigint` when the supervisor was torn down — reap/stop/new), `supervisor-uncaught` (a survivable supervisor fault left as forensics; the session keeps serving).
 
-What the headline states look like on the stream: a peer **waking** is `ev=wake`; a peer **parked to sleep** is `ev=supervise action=reaped-idle`; a **death** is `ev=session-exit` (immediately, from the supervisor) followed by the daemon's classification on its next pass.
+What the headline states look like on the stream: a peer **waking** is `ev=wake`; a peer **parked to sleep** is `ev=supervise action=reaped-idle`; an operator **stop/start** is `ev=stopped` / `ev=started`; a **death** is `ev=session-exit` (immediately, from the supervisor) followed by the daemon's classification on its next pass.
 
 ## Commands
 

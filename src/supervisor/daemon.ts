@@ -25,6 +25,7 @@ import {
   splitDanglingEscape,
   stripQueries,
 } from './protocol.ts'
+import { formatEventLine } from '../storage/rotatelog.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
 import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
@@ -289,6 +290,30 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     return ok
   }
 
+  // ── death-trace (fleet-API follow-up, 05.07) ──────────────────────────────────
+  // exits.log is the durable «why did this session end» record. Before this, ONLY a
+  // child that died on its own (exit callback below) wrote a line; a SIGTERM'd
+  // supervisor (reap / stop / new / self-fresh — EVERY daemon-initiated teardown)
+  // killed the child and process.exit'ed before the callback could run, and a
+  // supervisor crash left nothing at all — exits.log stayed silent for weeks while
+  // sessions died (live gap: claude-boris server-dead 04.07 23:59 with ZERO forensics;
+  // the supervise classification even points the investigator at exits.log). Now every
+  // in-process exit path writes exactly one line: `exitLogged` dedups the child-exit
+  // callback vs the shutdown path. logfmt via the shared writer (quoted values parse
+  // intact in the fleet SSE stream). Out-of-process deaths (SIGKILL / OOM / Bun panic)
+  // remain unrecordable from here by nature — for those the supervise-tick reaped-gone
+  // classification in lifecycle.log stays the only trace.
+  let exitLogged = false
+  const appendExitEvent = (fields: Record<string, string | number | undefined>): void => {
+    if (!opts.exitLogPath) return
+    try {
+      mkdirSync(dirname(opts.exitLogPath), { recursive: true, mode: 0o700 })
+      appendFileSync(opts.exitLogPath, `${formatEventLine(Date.now(), fields)}\n`)
+    } catch {
+      /* best-effort — the trace must never block serving/teardown */
+    }
+  }
+
   const child = Bun.spawn(CMD, {
     cwd: opts.cwd ?? runDir,
     env,
@@ -337,20 +362,18 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         // supervise-tick death classification + crash-loop accounting have the cause. host=supervisor
         // distinguishes the source. The Bun-native pty exit callback passes (exitCode, signalCode) like
         // onExit; fall back to the subprocess props. Best-effort — never blocks shutdown.
-        if (opts.exitLogPath) {
-          try {
-            mkdirSync(dirname(opts.exitLogPath), { recursive: true, mode: 0o700 }) // ensure the exits.log dir exists
-            const c = child as { exitCode?: number | null; signalCode?: number | null }
-            const status = exitCode ?? c.exitCode ?? ''
-            const signal = signalCode ?? c.signalCode ?? ''
-            appendFileSync(
-              opts.exitLogPath,
-              `ts=${new Date().toISOString()} ev=session-exit identity=${session} dead_status=${status} dead_signal=${signal} host=supervisor\n`,
-            )
-          } catch {
-            /* best-effort */
-          }
-        }
+        const c = child as { exitCode?: number | null; signalCode?: number | null }
+        const status = exitCode ?? c.exitCode
+        const signal = signalCode ?? c.signalCode
+        exitLogged = true // this IS the death record — shutdown below must not write a second one
+        appendExitEvent({
+          ev: 'session-exit',
+          identity: session,
+          dead_status: status ?? '',
+          dead_signal: signal ?? '',
+          cause: 'child-exit',
+          host: 'supervisor',
+        })
         shutdown()
       },
     },
@@ -554,9 +577,17 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   writeGeometry(runDir, session, serveCols, serveRows) // initial geometry sidecar (= serve); updated on every real child resize
 
   let down = false
-  function shutdown(): void {
+  function shutdown(cause = 'shutdown'): void {
     if (down) return
     down = true
+    // Death-trace: a signalled shutdown kills the child below and process.exit()s
+    // immediately — the child exit callback never runs, so THIS is the only chance
+    // to record the session's end. `exitLogged` is already set when the child died
+    // on its own (the callback wrote the authoritative dead_status/dead_signal line).
+    if (!exitLogged) {
+      exitLogged = true
+      appendExitEvent({ ev: 'session-exit', identity: session, cause, host: 'supervisor' })
+    }
     if (paneLogFd >= 0)
       try {
         closeSync(paneLogFd)
@@ -582,18 +613,31 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     }
     process.exit(0)
   }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => shutdown('shutdown-sigterm'))
+  process.on('SIGINT', () => shutdown('shutdown-sigint'))
   process.on('SIGHUP', () => {
     /* daemon survives client window close */
   })
-  process.on('uncaughtException', e => {
+  // A survivable fault must still leave a trace: the console.error goes to the
+  // detached daemon's session log, which sat at 0 bytes for weeks on the live fleet —
+  // effectively invisible. Record it in exits.log too (ev=supervisor-uncaught; the
+  // session keeps serving — killing it here would regress the detach-crash robustness),
+  // so a later wedge/death postmortem can see the fault that preceded it.
+  const traceFault = (kind: string, e: unknown): void => {
     try {
-      console.error('[supervisor-daemon] uncaught', (e && (e as Error).stack) || e)
+      console.error(`[supervisor-daemon] ${kind}`, (e && (e as Error).stack) || e)
     } catch {
       /* */
     }
-  })
+    appendExitEvent({
+      ev: 'supervisor-uncaught',
+      identity: session,
+      kind,
+      reason: String((e as Error)?.stack ?? e).replace(/\s+/g, ' ').slice(0, 300),
+    })
+  }
+  process.on('uncaughtException', e => traceFault('exception', e))
+  process.on('unhandledRejection', e => traceFault('rejection', e))
 
   // ── boot-dialog driver (serving slice a) ────────────────────────────────────────
   // For a real runtime, answer the startup dialogs (codex trust/update/hooks, claude trust/resume)

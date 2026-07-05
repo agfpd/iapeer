@@ -11,6 +11,7 @@ import { addRuntime, compactPeer, defaultRuntime, formatListTable, listPeers, ne
 import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
 import { transcriptSlug } from '../launch/adapters/claude.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
+import { lifecycleLogPath } from '../lifecycle/eventlog.ts'
 import { launchdPlistPath } from '../launch/launchd.ts'
 import { err, ok } from '../core/errors.ts'
 
@@ -117,6 +118,19 @@ describe('stop / start (C1 durable flag, warm runtime)', () => {
   })
   test('stop an unregistered peer → throws', () => {
     expect(() => stopPeer('nobody', undefined, { env: env() })).toThrow(/not registered/)
+  })
+  test('stop/start leave the ev=stopped/ev=started trace in lifecycle.log (fleet-SSE trigger)', async () => {
+    // The verbs used to change fleet state (● → ✕ → ○) SILENTLY — an SSE-fed client
+    // (tray class) had no event to trigger a snapshot re-read and showed a stale
+    // status indefinitely. One line per state-changing outcome.
+    await register('traced')
+    const e = env()
+    const cfg = loadLifecycleConfig(e)
+    stopPeer('traced', undefined, { env: e })
+    startPeer('traced', undefined, { env: e })
+    const log = readFileSync(lifecycleLogPath(cfg.eventLogDir), 'utf8')
+    expect(log).toMatch(/ev=stopped identity=claude-traced personality=traced runtime=claude action=stopped/)
+    expect(log).toMatch(/ev=started identity=claude-traced personality=traced runtime=claude action=started/)
   })
   test('stop is a CLEAN PARK: leaves the resume marker and drops the session-state (boris 10.06)', async () => {
     await register('parked')

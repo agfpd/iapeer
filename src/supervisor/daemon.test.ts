@@ -212,6 +212,40 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
       process.kill(Number(readFileSync(childPidFile, 'utf8').trim()), 'SIGKILL')
       const recorded = await waitFor(() => existsSync(exitLog) && /ev=session-exit identity=ptsexit.*host=supervisor/.test(readFileSync(exitLog, 'utf8')))
       expect(recorded).toBe(true) // the death cause is in exits.log → crash-loop accounting has it
+      expect(readFileSync(exitLog, 'utf8')).toContain('cause=child-exit') // discriminates from a signalled teardown
+    } finally {
+      try {
+        killSession(runDir, exSession)
+      } catch {
+        /* */
+      }
+    }
+  })
+
+  // Death-trace (fleet-API follow-up 05.07): a SIGTERM'd supervisor (reap / stop / new /
+  // self-fresh — EVERY daemon-initiated teardown) used to exit SILENTLY: child.kill +
+  // process.exit ran before the child exit callback, so exits.log stayed empty for all
+  // supervised teardowns (live gap: claude-boris server-dead 04.07 with zero forensics).
+  // Now shutdown() itself writes the session-exit line — SIGTERM the daemon, assert it lands.
+  test('death-trace: a SIGTERM teardown records ev=session-exit cause=shutdown-sigterm (not silent)', async () => {
+    const exSession = 'ptsterm'
+    const exitLog = join(runDir, 'exits-term.log')
+    try {
+      const r = await startSupervisorDaemon({
+        session: exSession,
+        runtime: 'tick',
+        runDir,
+        serve: { argv: ['sleep', '30'], env: { PATH: process.env.PATH ?? '' }, cwd: runDir, exitLogPath: exitLog },
+      })
+      expect(r.state).toBe('started')
+      killSession(runDir, exSession) // SIGTERM to the supervisor daemon — the reap/stop teardown path
+      const recorded = await waitFor(
+        () => existsSync(exitLog) && /ev=session-exit identity=ptsterm cause=shutdown-sigterm host=supervisor/.test(readFileSync(exitLog, 'utf8')),
+      )
+      expect(recorded).toBe(true) // the teardown left a durable trace — exits.log is no longer silent
+      // exactly ONE line: the shutdown write and the child exit callback must not double-record
+      const lines = readFileSync(exitLog, 'utf8').trim().split('\n').filter(l => l.includes('identity=ptsterm'))
+      expect(lines).toHaveLength(1)
     } finally {
       try {
         killSession(runDir, exSession)
