@@ -26,17 +26,25 @@ activation that also installs SwiftBar.app when it is absent.
     `●` live · `○` asleep · `✕` stopped — green when any runtime is live. Badges: `👤`
     a human is attached, `🔒` launchd-managed (H4 read-only), `⏳N` an ephemeral peer's
     queue depth.
-  - **Click a peer → Terminal.app running `iapeer attach <peer>`.** Attach is a terminal
-    handoff the API deliberately keeps client-side (a PTY inside a GUI is out of scope);
-    the same row's submenu carries the lifecycle actions (Wake / Stop / Start / New /
-    Interrupt / Refresh / Compact), each a `POST /fleet/v1/peers/<peer>/<cmd>` via
-    `iapeer tray cmd`.
+  - **Click an agent peer → Terminal.app running `iapeer attach <peer>`.** The row itself is
+    the attach action (no submenu, so a click attaches rather than merely expanding). The
+    handoff goes through `iapeer tray attach-term`, which writes a per-peer `.command`
+    launcher and `open`s it — `open <file>.command` hands the file to Terminal.app with
+    **no Automation/Accessibility permission prompt**. This deliberately avoids SwiftBar's
+    own `terminal=true`, whose Terminal launch drives a `Cmd-T` System-Events keystroke that
+    silently no-ops unless SwiftBar holds Accessibility permission. **Launchd-managed infra
+    peers (telegram / notifier, `🔒`) are not pty-attachable** — their rows are plain status
+    lines. Lifecycle actions (Wake / Stop / Start / New / Interrupt / Refresh / Compact) live
+    in the **Manage** submenu, each a `POST /fleet/v1/peers/<peer>/<cmd>` via `iapeer tray cmd`.
 
 The list updates itself: the plugin is **streamable** — it subscribes to the event stream
 and re-fetches the snapshot on every change (a peer waking, an operator stop/start, a
-death), coalescing bursts. A ~15 s heartbeat keeps ages fresh and self-heals a missed
-event; the stream reconnects across daemon restarts. No manual refresh needed (there is a
-Refresh item anyway).
+death), coalescing bursts. A heartbeat keeps ages fresh and self-heals a missed event; the
+stream reconnects across daemon restarts. Every emitted menu block is prefixed with the
+`~~~` stream separator (SwiftBar's default leading-separator mode = replace), including the
+first — otherwise a manual Refresh, which `terminate()`s and re-`invoke()`s the plugin
+without clearing SwiftBar's held content, would append the restarted block and render the
+whole dashboard twice.
 
 ## Verbs
 

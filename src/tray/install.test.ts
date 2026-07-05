@@ -12,6 +12,7 @@ import {
   dedicatedPluginDir,
   installTray,
   PLUGIN_BASENAME,
+  trayAttachTerm,
   trayStatus,
   uninstallTray,
   type RunResult,
@@ -154,6 +155,28 @@ describe('trayStatus', () => {
     const after = trayStatus({ env, run: makeRunner().run, probeApp: () => false })
     expect(after.plugin.installed).toBe(true)
     expect(after.plugin.path).toBe(join(dedicatedPluginDir(env), PLUGIN_BASENAME))
+  })
+})
+
+describe('trayAttachTerm', () => {
+  test('writes a .command launcher (exec iapeer attach <peer>) and opens it — no TCC path', () => {
+    const { run, calls } = makeRunner()
+    const r = trayAttachTerm({ env, personality: 'boris', run })
+    expect(r.cmdFile).toBe(join(root, 'tray', 'attach-boris.command'))
+    const content = readFileSync(r.cmdFile, 'utf8')
+    expect(content).toContain(`exec "${binPath(env)}" attach boris`)
+    expect(content.startsWith('#!/bin/bash')).toBe(true)
+    // launched via `open <file>.command` (Terminal handoff, no Automation/Accessibility)
+    expect(calls).toContain(`open ${r.cmdFile}`)
+  })
+
+  test('threads an explicit runtime', () => {
+    const r = trayAttachTerm({ env, personality: 'boris', runtime: 'codex', run: makeRunner().run })
+    expect(readFileSync(r.cmdFile, 'utf8')).toContain(`attach boris codex`)
+  })
+
+  test('rejects an invalid peer name (shell-injection guard)', () => {
+    expect(() => trayAttachTerm({ env, personality: 'boris; rm -rf ~', run: makeRunner().run })).toThrow(/invalid peer/)
   })
 })
 

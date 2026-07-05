@@ -79,11 +79,6 @@ function line(depth: number, text: string, p: Record<string, string | number | b
   return `${'--'.repeat(depth)}${text}${params(p)}`
 }
 
-/** A menu separator at submenu `depth`: the `--`×depth prefix + `---` (SwiftBar: a
- *  top-level separator is `---`, a depth-1 one is `-----`, etc.). */
-function separator(depth: number): string {
-  return `${'--'.repeat(depth)}---`
-}
 
 // ── time helpers ────────────────────────────────────────────────────────────────
 
@@ -154,13 +149,18 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
   if (providers) lines.push(line(0, providers, { color: COLOR.meta }))
   lines.push('---')
 
-  // ── peers ──
+  // ── peers (each row is a DIRECT attach action — click → Terminal) ──
   if (peers.length === 0) {
     lines.push(line(0, 'no peers registered', { color: COLOR.meta }))
   }
   for (const p of peers) {
-    lines.push(...renderPeerRow(p, bin, now))
+    lines.push(renderPeerRow(p, bin, now))
   }
+
+  // ── Manage submenu (lifecycle commands per peer; kept off the rows so a row click
+  //    attaches instead of just expanding a submenu) ──
+  lines.push('---')
+  lines.push(...renderManage(peers, bin))
 
   // ── footer ──
   lines.push('---')
@@ -184,7 +184,23 @@ function renderProviders(host: TraySnapshot['host']): string {
   return seg.join(' · ')
 }
 
-function renderPeerRow(p: TrayPeer, bin: string, now: number): string[] {
+/** A peer is attachable when it is NOT launchd-managed: launchd-owned infra peers
+ *  (telegram / notifier) have no attachable pty session, so their rows carry no attach
+ *  action (a plain status line). Agent peers (claude / codex) are attachable. */
+function attachable(p: TrayPeer): boolean {
+  return !p.launchd_managed
+}
+
+/**
+ * One peer row. For an ATTACHABLE peer the row IS a DIRECT attach action (no submenu,
+ * so a click attaches instead of merely expanding): clicking runs `iapeer tray
+ * attach-term <peer>` in the BACKGROUND (terminal=false), which opens a `.command` via
+ * `open` — a system-Terminal handoff that needs NO Accessibility/Automation TCC. This
+ * deliberately AVOIDS SwiftBar's own `terminal=true`, whose Terminal.app launch drives a
+ * `Cmd-T` System-Events keystroke that silently no-ops without Accessibility permission.
+ * Infra (launchd) rows are plain status lines. Lifecycle lives in the Manage submenu.
+ */
+function renderPeerRow(p: TrayPeer, bin: string, now: number): string {
   const agg = aggregate(p)
   const detail = p.runtimes.map(r => `${r.runtime}${GLYPH[r.status]}`).join(' ')
   const badges =
@@ -194,36 +210,30 @@ function renderPeerRow(p: TrayPeer, bin: string, now: number): string[] {
   const ageStr = p.last_active_ms ? `  ${fmtAge(p.last_active_ms, now)}` : ''
   const label = `${p.personality}  ${detail}${badges}${ageStr}`
   const rowColor = agg === 'live' ? COLOR.live : COLOR.meta
+  if (!attachable(p)) return line(0, label, { color: rowColor })
+  return line(0, label, { color: rowColor, bash: bin, param1: 'tray', param2: 'attach-term', param3: p.personality, terminal: false })
+}
 
-  const out: string[] = []
-  // The peer row IS the attach action: click → Terminal.app running `iapeer attach
-  // <peer>` (attach resolves its own runtime — default-anchored last-active, same as
-  // the CLI). terminal=true is the terminal-handoff docs/15 keeps client-side.
-  out.push(
-    line(0, label, {
-      color: rowColor,
-      bash: bin,
-      param1: 'attach',
-      param2: p.personality,
-      terminal: true,
-    }),
-  )
-  // Lifecycle controls live in a submenu (they route through the fleet command
-  // endpoints via `iapeer tray cmd …` — dogfooding POST /fleet/v1/peers/<p>/<cmd>).
-  out.push(line(1, 'Attach…', { bash: bin, param1: 'attach', param2: p.personality, terminal: true, sfimage: 'terminal' }))
-  out.push(separator(1))
-  for (const c of MANAGE_COMMANDS) {
-    out.push(
-      line(1, c.label, {
-        bash: bin,
-        param1: 'tray',
-        param2: 'cmd',
-        param3: c.cmd,
-        param4: p.personality,
-        terminal: false,
-        refresh: true,
-      }),
-    )
+/** The Manage submenu: one sub-submenu per peer with its lifecycle commands, each a
+ *  `iapeer tray cmd <c> <peer>` → POST /fleet/v1/peers/<peer>/<c> (terminal=false,
+ *  refresh to reflect the outcome). Kept OFF the peer rows so a row click attaches. */
+function renderManage(peers: TrayPeer[], bin: string): string[] {
+  const out: string[] = [line(0, 'Manage', { sfimage: 'slider.horizontal.3' })]
+  for (const p of peers) {
+    out.push(line(1, p.personality))
+    for (const c of MANAGE_COMMANDS) {
+      out.push(
+        line(2, c.label, {
+          bash: bin,
+          param1: 'tray',
+          param2: 'cmd',
+          param3: c.cmd,
+          param4: p.personality,
+          terminal: false,
+          refresh: true,
+        }),
+      )
+    }
   }
   return out
 }

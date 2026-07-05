@@ -61,26 +61,38 @@ describe('renderSwiftBar', () => {
     expect(out).toContain('mem ● 0.4.17 · voice ○ 0.2.0 | color=#8b949e')
   })
 
-  test('live peer row is green + attaches on click (terminal handoff)', () => {
+  test('attachable row is a DIRECT attach action (terminal=false, no submenu) — click → attach', () => {
     const row = lines.find(l => l.startsWith('boris '))!
     expect(row).toContain('claude● codex○')
     expect(row).toContain('color=#3fb950')
-    expect(row).toContain(`bash=${BIN} param1=attach param2=boris terminal=true`)
+    // routed through tray attach-term (opens a .command via `open`), terminal=false
+    expect(row).toContain(`bash=${BIN} param1=tray param2=attach-term param3=boris terminal=false`)
     expect(row).toContain('👤') // a human is attached
+    // the row must NOT be a submenu parent (the line right after is another top-level row)
+    const i = lines.indexOf(row)
+    expect(lines[i + 1]!.startsWith('--')).toBe(false)
   })
 
-  test('badges: launchd lock, ephemeral queue depth', () => {
-    expect(lines.find(l => l.startsWith('timer '))!).toContain('🔒')
+  test('NO row uses terminal=true (SwiftBar Cmd-T keystroke needs Accessibility — avoided)', () => {
+    expect(out).not.toContain('terminal=true')
+  })
+
+  test('launchd/infra peers are NOT attachable (plain status row, no bash action)', () => {
+    const timerRow = lines.find(l => l.startsWith('timer '))!
+    expect(timerRow).toContain('🔒')
+    expect(timerRow).not.toContain('bash=')
+    expect(timerRow).not.toContain('attach-term')
+  })
+
+  test('badges: ephemeral queue depth on an attachable peer', () => {
     expect(lines.find(l => l.startsWith('scriber '))!).toContain('⏳3')
   })
 
-  test('per-peer submenu: Attach, a depth-1 separator, and fleet commands', () => {
-    const i = lines.findIndex(l => l.startsWith('boris '))
-    expect(lines[i + 1]).toContain('--Attach…')
-    // regression: a submenu separator is EXACTLY 5 dashes (-- prefix + ---), not 7
-    expect(lines[i + 2]).toBe('-----')
-    expect(lines[i + 3]).toBe(
-      `--Wake | bash=${BIN} param1=tray param2=cmd param3=wake param4=boris terminal=false refresh=true`,
+  test('Manage submenu carries per-peer lifecycle commands (kept off the rows)', () => {
+    expect(lines.some(l => l.startsWith('Manage'))).toBe(true)
+    expect(out).toContain('\n--boris\n') // a peer sub-submenu parent at depth 1
+    expect(out).toContain(
+      `----Wake | bash=${BIN} param1=tray param2=cmd param3=wake param4=boris terminal=false refresh=true`,
     )
     expect(out).toContain('param3=interrupt param4=boris')
   })

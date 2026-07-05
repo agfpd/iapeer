@@ -72,14 +72,20 @@ export async function streamTray(
   out: (s: string) => void = s => process.stdout.write(s),
   signal?: AbortSignal,
 ): Promise<void> {
-  let first = true
   // Serialize all emits through a promise chain so a `~~~`+block is never interleaved.
   let chain: Promise<void> = Promise.resolve()
   const emit = (): Promise<void> => {
     chain = chain.then(async () => {
       const block = await renderTrayOnce(env)
-      out(first ? block : `~~~\n${block}`)
-      first = false
+      // EVERY block — including the first — is prefixed with the `~~~` stream separator.
+      // SwiftBar's default (leading-separator) handler sets content = <text after the
+      // last ~~~>, i.e. REPLACE; a block WITHOUT a leading ~~~ is APPENDED to the
+      // current content. On a refresh (SwiftBar terminate()s the process WITHOUT
+      // clearing content, then re-invoke()s), the restarted process's first block would
+      // otherwise append to the stale pre-refresh menu → the whole dashboard renders
+      // twice. Always leading with ~~~ makes every emit a clean replace. (root: SwiftBar
+      // v2.0.1 StreamablePlugin.onOutputUpdate.)
+      out(`~~~\n${block}`)
     })
     return chain
   }

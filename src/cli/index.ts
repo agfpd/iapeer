@@ -2505,6 +2505,21 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             out(await tray.renderTrayOnce(env))
             return 0
           }
+          case 'attach-term': {
+            // Terminal handoff for a tray click: open a system Terminal running
+            // `iapeer attach <peer>` via an `open`ed `.command` (no Accessibility/
+            // Automation TCC — unlike SwiftBar's own terminal=true).
+            const peer = positionals[1]
+            if (!peer) return argErr(errOut, 'usage: iapeer tray attach-term <peer> [runtime]')
+            try {
+              const r = tray.trayAttachTerm({ env, personality: peer, runtime: positionals[2] })
+              out(`opening Terminal → iapeer attach ${peer} (${r.cmdFile})\n`)
+            } catch (e) {
+              errOut(`tray attach-term: ${e instanceof Error ? e.message : String(e)}\n`)
+              return 1
+            }
+            return 0
+          }
           case 'cmd': {
             const command = positionals[1]
             const peer = positionals[2]

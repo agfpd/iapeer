@@ -259,6 +259,36 @@ export function uninstallTray(
   return { removed, refreshed }
 }
 
+/**
+ * Open a system Terminal attached to a peer WITHOUT SwiftBar's `terminal=true`. SwiftBar
+ * v2's Terminal.app launch drives a `Cmd-T` keystroke via System Events, which silently
+ * no-ops unless SwiftBar holds Accessibility permission — so tray attach clicks appeared
+ * dead even after the Automation→Terminal grant. Instead: write a per-peer `.command`
+ * launcher and `open` it. `open <file>.command` hands the file to Terminal.app (its
+ * default handler) and runs it — a document-open, needing NO Automation/Accessibility
+ * TCC. This is the tray's terminal handoff (docs/15: attach is client-side). The peer
+ * name is validated (it is interpolated into a shell script). Returns the launcher path.
+ */
+export function trayAttachTerm(opts: {
+  env?: NodeJS.ProcessEnv
+  personality: string
+  runtime?: string
+  run?: Runner
+}): { cmdFile: string } {
+  const env = opts.env ?? process.env
+  const run = opts.run ?? defaultRun
+  const p = opts.personality
+  if (!/^[a-z][a-z0-9-]*$/.test(p)) throw new Error(`invalid peer name "${p}"`)
+  const rt = opts.runtime && /^[a-z][a-z0-9-]*$/.test(opts.runtime) ? opts.runtime : undefined
+  const binPath = iapeerBinPath(env)
+  const dir = join(resolveGlobalRoot(env), 'tray')
+  mkdirSync(dir, { recursive: true })
+  const cmdFile = join(dir, `attach-${p}.command`)
+  writeFileSync(cmdFile, `#!/bin/bash\nexec "${binPath}" attach ${p}${rt ? ` ${rt}` : ''}\n`, { mode: 0o755 })
+  run('open', [cmdFile])
+  return { cmdFile }
+}
+
 export interface TrayStatus {
   daemon: { fleet: boolean; version?: string; sock?: string; tcp?: string }
   swiftbar: { installed: boolean; pluginDir?: string }
