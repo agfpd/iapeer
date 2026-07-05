@@ -91,9 +91,9 @@ describe('renderSwiftBar', () => {
   test('Manage submenu carries per-peer lifecycle commands (kept off the rows)', () => {
     expect(lines.some(l => l.startsWith('Manage'))).toBe(true)
     expect(out).toContain('\n--boris\n') // a peer sub-submenu parent at depth 1
-    expect(out).toContain(
-      `----Wake | bash=${BIN} param1=tray param2=cmd param3=wake param4=boris terminal=false refresh=true`,
-    )
+    // no refresh=true — the SSE stream reflects the outcome (streamable is always fresh)
+    expect(out).toContain(`----Wake | bash=${BIN} param1=tray param2=cmd param3=wake param4=boris terminal=false`)
+    expect(out).not.toContain('refresh=true')
     expect(out).toContain('param3=interrupt param4=boris')
   })
 
@@ -103,8 +103,8 @@ describe('renderSwiftBar', () => {
     expect(peerRows).toEqual(['boris', 'nova', 'timer', 'scriber', 'zeno', 'aida'])
   })
 
-  test('footer has a Refresh action', () => {
-    expect(out).toContain('Refresh | refresh=true sfimage=arrow.clockwise')
+  test('no explicit Refresh item in the reachable-daemon menu (streamable is always fresh)', () => {
+    expect(out).not.toContain('Refresh | refresh=true')
   })
 
   test('unknown snapshot fields do not break rendering', () => {

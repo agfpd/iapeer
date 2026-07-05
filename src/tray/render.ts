@@ -163,8 +163,11 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
   lines.push(...renderManage(peers, bin))
 
   // ── footer ──
+  // No explicit "Refresh" item: the plugin is streamable + SSE-driven, so the menu is
+  // always current on open — a manual refresh gives the user nothing and (being a
+  // SwiftBar refresh) just closes the dropdown. The emergency "restart the plugin" lever
+  // lives in SwiftBar's own service menu (right-click → Refresh).
   lines.push('---')
-  lines.push(line(0, 'Refresh', { refresh: true, sfimage: 'arrow.clockwise' }))
   lines.push(line(0, `iapeer · fleet dashboard`, { color: COLOR.meta, size: 11 }))
   return lines.join('\n') + '\n'
 }
@@ -222,6 +225,8 @@ function renderManage(peers: TrayPeer[], bin: string): string[] {
   for (const p of peers) {
     out.push(line(1, p.personality))
     for (const c of MANAGE_COMMANDS) {
+      // No refresh=true: the SSE stream reflects the command's lifecycle event on its
+      // own (streamable is always fresh); a refresh would only restart the stream.
       out.push(
         line(2, c.label, {
           bash: bin,
@@ -230,7 +235,6 @@ function renderManage(peers: TrayPeer[], bin: string): string[] {
           param3: c.cmd,
           param4: p.personality,
           terminal: false,
-          refresh: true,
         }),
       )
     }

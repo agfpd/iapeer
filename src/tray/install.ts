@@ -100,9 +100,10 @@ export function buildPluginShim(binPath: string): string {
     '# <xbar.author>iapeer</xbar.author>',
     '# <xbar.desc>iapeer multi-agent fleet — live peer dashboard over the daemon fleet API.</xbar.desc>',
     '# <swiftbar.type>streamable</swiftbar.type>',
-    '# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>',
-    '# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>',
-    '# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>',
+    // NB: deliberately NOT hiding SwiftBar's own service items (Run-in-Terminal /
+    // Disable / Last-Updated / Preferences / Refresh). They are the right-click "do
+    // stuff" menu the owner expects; hiding them made the icon feel dead. Minimalism is
+    // for OUR content (status + peer rows), not SwiftBar's utility menu.
     // The dashboard ONLY ever talks to the local daemon (unix socket / loopback), so it
     // must never route through an HTTP proxy. Bun's fetch caches proxy config at process
     // start and ignores NO_PROXY for loopback, so clearing the vars must happen in the
