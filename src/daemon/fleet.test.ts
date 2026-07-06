@@ -129,6 +129,17 @@ describe('GET /fleet/v1/snapshot', () => {
     expect(snap.peers.map(p => p.runtimes.map(s => s.status))).toEqual(rows.map(r => r.runtimes.map(s => s.status)))
   })
 
+  test('approvals: omitted when empty (absence ⇒ empty queue), included additively when pending', () => {
+    const empty = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
+    expect(empty.approvals).toBeUndefined() // client MUST read absence as an empty queue
+    const withPending = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now(), undefined, [
+      { id: 'a1', personality: 'boris', runtime: 'claude', kind: 'circuit-breaker', tool: 'dangerous-rm', summary: 'rm -rf /x', content: 'rm -rf /x', createdMs: 1, expiresMs: 2 },
+    ])
+    expect(withPending.approvals).toHaveLength(1)
+    expect(withPending.approvals![0]!.tool).toBe('dangerous-rm')
+    expect(withPending.approvals![0]!.content).toBe('rm -rf /x') // verbatim content rides along (criterion #7)
+  })
+
   test('POST to a GET endpoint → 405', async () => {
     const r = await fetch(`${base()}/fleet/v1/snapshot`, { method: 'POST' })
     expect(r.status).toBe(405)

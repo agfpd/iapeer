@@ -150,3 +150,28 @@ export async function trayCmd(
   const { status, body } = await fleetPostJson(addr, path, runtime ? { runtime } : {}, env)
   return { ok: status < 400, status, body }
 }
+
+export type ApprovalVerb = 'approve' | 'deny'
+
+/**
+ * Resolve a pending human-approval from the tray: POST /fleet/v1/approvals/<id>/(approve|deny) over
+ * the SAME unix-first fleet client trayCmd uses — the proxy-safe transport (the absolute-form-misroute
+ * grabli: a peer's Happ proxy would otherwise mangle a loopback POST). Tags `via:'tray'` for the audit
+ * trail; the single-queue invariant means this resolution is seen by every channel (CLI/telegram). A
+ * 404 (already resolved / expired) surfaces as ok=false with the daemon's message — the caller reports
+ * it (the request the user saw was answered elsewhere first).
+ */
+export async function trayResolveApproval(
+  env: NodeJS.ProcessEnv,
+  decision: ApprovalVerb,
+  id: string,
+  reason?: string,
+): Promise<TrayCmdResult> {
+  const addr = resolveFleetAddress({ env })
+  if (addr.fleet !== 1 || (!addr.sock && !addr.tcp)) {
+    return { ok: false, status: 0, body: { error: 'fleet daemon unreachable (no fleet:1 in router.json)' } }
+  }
+  const path = `/fleet/v1/approvals/${encodeURIComponent(id)}/${decision}`
+  const { status, body } = await fleetPostJson(addr, path, { via: 'tray', ...(reason ? { reason } : {}) }, env)
+  return { ok: status < 400, status, body }
+}

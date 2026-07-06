@@ -58,6 +58,11 @@ The full fleet state. The peer rows are produced by the **same in-process functi
       "wake_policy": "warm",
       "approval_mode": "yolo"
     }
+  ],
+  "approvals": [
+    { "id": "a1", "personality": "boris", "runtime": "claude", "kind": "circuit-breaker",
+      "tool": "dangerous-rm", "summary": "rm -rf /tmp/x",
+      "content": "cmd=\"rm -rf /tmp/x\" target=\"/tmp/x\"", "createdMs": 1751731100000, "expiresMs": 1751731400000 }
   ]
 }
 ```
@@ -75,6 +80,7 @@ Field notes:
 - `host.fda` — Full Disk Access of the binary: `true` / `false` / `null` (undeterminable).
 - The daemon answering **is** the health signal: there is no `healthy` boolean. A dashboard that cannot reach any advertised address should render the daemon as down (this is also why a purely API-fed dashboard is insufficient when the daemon itself is broken — the built-in TUI keeps its direct in-process read path for exactly that case).
 - The peer's **LLM model is deliberately absent**: the effective model of a live session is not an observable registry fact (static launch pins exist, but reporting a pin as «the model» would lie under runtime auto-switching). If it ever becomes observable, it will appear as an additive field.
+- `approvals` (top-level, docs/17-approval) — the pending human-approval queue, the SAME items `GET /fleet/v1/approvals` returns, carried in the snapshot so a client that already re-fetches `/snapshot` on every event renders the queue with no extra call. **ADDITIVE + OMITTED when the queue is empty** — a client MUST treat its absence as an empty queue (the same rule as `approval_mode`). Each item: `id` (broker id, the target of `POST /fleet/v1/approvals/<id>/(approve|deny)`), `personality` + `runtime` (whose action), `kind` (`tool`|`plan`|`question`|`circuit-breaker`), `tool` (the tool / breaker name), `summary` (a one-line badge string), `content` (the FULL verbatim action — command / diff / plan; criterion #7), `createdMs` / `expiresMs`. The broker's item is a superset — unknown extra fields (`title`, `approvers`) MUST be ignored (obligation 2).
 
 ## GET /fleet/v1/peers/&lt;personality&gt;
 
@@ -134,7 +140,7 @@ What the headline states look like on the stream: a peer **waking** is `ev=wake`
 
 `from` is optional: a full `<runtime>-<personality>`, or a bare personality (its default runtime). Default: the **single natural-intelligence peer** of the registry — a GUI-originated message is the human's. With zero or several natural peers the request is refused (`400`) with an instruction to pass `from`.
 
-Not part of the API, deliberately: **attach** (a terminal handoff — a client opens the system terminal with `iapeer attach <peer>`), registry/host **admin verbs** (`create`/`remove`/`update`/`uninstall` — will be added when a client actually needs them), **approve** (no approval broker exists yet; it will arrive as new endpoints + `ev` kinds under this same contract).
+Not part of the *command* API, deliberately: **attach** (a terminal handoff — a client opens the system terminal with `iapeer attach <peer>`), registry/host **admin verbs** (`create`/`remove`/`update`/`uninstall` — will be added when a client actually needs them). The **human-approval broker** now lives under `/fleet/v1/approvals*` (`GET` the queue / one item, `POST /<id>/(approve|deny)`) with the `approval-request` / `approval-resolved` SSE `ev` kinds and the `approvals` snapshot field above — the full contract is **docs/17-approval**.
 
 Errors are always `{"error": "…"}` with an honest status: `400` malformed request, `401` bearer required, `404` unknown peer/endpoint, `405` wrong method, `502` the verb itself failed, `500` internal.
 

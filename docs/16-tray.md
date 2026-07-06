@@ -16,10 +16,13 @@ activation that also installs SwiftBar.app when it is absent.
 
 ## What you see
 
-- **Menu bar:** an antenna glyph + the count of peers with a live session. When no
-  advertised daemon address answers, a red warning triangle instead (the daemon is down —
-  a purely API-fed dashboard cannot show a broken daemon any other way; the built-in TUI
-  keeps its direct read path for that case, see [15](15-fleet-api.md)).
+- **Menu bar:** an antenna glyph + the count of peers with a live session. When one or more
+  **human-approval** requests are pending, the menu bar instead shows a **red `N.circle.fill`
+  badge** (the iOS-notification look — a red circle with the count) so the owner sees an
+  awaiting request at a glance. When no advertised daemon address answers, a red warning
+  triangle instead (the daemon is down — a purely API-fed dashboard cannot show a broken
+  daemon any other way; the built-in TUI keeps its direct read path for that case, see
+  [15](15-fleet-api.md)).
 - **Dropdown:** a host header (`iapeer <version> · up <uptime>`) and the memory/voice
   provider heartbeats, then one row per peer:
   - `<peer>  <runtime><glyph> …  <age>` with the same glyph semantics as the CLI —
@@ -36,6 +39,16 @@ activation that also installs SwiftBar.app when it is absent.
     peers (telegram / notifier, `🔒`) are not pty-attachable** — their rows are plain status
     lines. Lifecycle actions (Wake / Stop / Start / New / Interrupt / Refresh / Compact) live
     in the **Manage** submenu, each a `POST /fleet/v1/peers/<peer>/<cmd>` via `iapeer tray cmd`.
+- **Pending approvals (docs/17):** when the queue is non-empty, the **top of the dropdown** shows
+  each pending request **expanded, with no extra clicks** — a header (`<peer> · <tool>`), the
+  **verbatim action content** (the command / diff / plan, monospace, capped for the menu; the FULL
+  content stays in `iapeer approvals`), then **Allow** / **Deny** items directly below. Clicking runs
+  `iapeer tray approve|deny <id>` in the background → the broker resolves → the stream re-renders (the
+  badge clears). The peer with a pending request is **highlighted in the fleet list** (a `⚠` prefix, a
+  red `🔴N` count, the row painted red) so the owner sees *which* peer is waiting. This channel is
+  **always on** — the approval queue is reflected whenever it is non-empty, independent of everything
+  else; an empty queue shows no section and no badge. (A true *pulse* animation is not possible in a
+  static SwiftBar menu — the highlight + badge is its equivalent.)
 
 The list updates itself: the plugin is **streamable** — it subscribes to the event stream
 and re-fetches the snapshot on every change (a peer waking, an operator stop/start, a
@@ -54,6 +67,7 @@ whole dashboard twice.
 | `iapeer tray uninstall` | Remove the plugin file and refresh SwiftBar. **Never touches the fleet** — the daemon, TUI and delivery keep running; SwiftBar.app is left installed (it may host other plugins). |
 | `iapeer tray render [--stream]` | Print the SwiftBar plugin output. `--stream` is the streamable loop the plugin runs; the one-shot form is the poll fallback and the test surface. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST a fleet command (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — the menu's lifecycle actions call this. |
+| `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Resolve a pending human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` over the same unix-first fleet client. The menu's Allow/Deny items call these; the single-queue invariant means the resolution is seen by every channel (CLI, telegram). |
 | `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present. Repairs nothing. |
 
 ## How it is wired

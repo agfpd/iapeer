@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { fleetGetJson, fleetPostJson, parseSseFrame, resolveFleetAddress, type FleetAddress } from './client.ts'
+import { trayResolveApproval } from './index.ts'
 
 describe('parseSseFrame', () => {
   test('parses event/id/data', () => {
@@ -111,5 +112,53 @@ describe('transport fallback (fleetGetJson / fleetPostJson)', () => {
     const r = await fleetPostJson(ADDR, '/fleet/v1/peers/x/wake', {}, {})
     expect(r.status).toBe(502) // returned the first (unix) response, no retry
     expect(calls).toEqual(['unix'])
+  })
+})
+
+describe('trayResolveApproval (Ф2 — resolve a pending approval over the unix-first client)', () => {
+  let root: string
+  let env: NodeJS.ProcessEnv
+  const realFetch = globalThis.fetch
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'iapeer-trayapp-'))
+    const dir = join(root, 'state', 'iapeer')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'router.json'), JSON.stringify({ sock: '/tmp/r.sock', tcp: 'http://127.0.0.1:8765/mcp', fleet: 1 }))
+    env = { HOME: process.env.HOME, IAPEER_ROOT: root }
+  })
+  afterEach(() => {
+    globalThis.fetch = realFetch
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test('approve → POST /approvals/<id>/approve with via:tray; ok on 200', async () => {
+    let captured: { url: string; body: unknown } = { url: '', body: undefined }
+    globalThis.fetch = (async (url: string, init: { body?: string }) => {
+      captured = { url, body: init.body ? JSON.parse(init.body) : undefined }
+      return new Response(JSON.stringify({ id: 'a1', action: 'approve', ok: true }), { status: 200 })
+    }) as unknown as typeof fetch
+    const r = await trayResolveApproval(env, 'approve', 'a1')
+    expect(r.ok).toBe(true)
+    expect(captured.url).toContain('/fleet/v1/approvals/a1/approve')
+    expect(captured.body).toEqual({ via: 'tray' })
+  })
+
+  test('deny carries the reason; a 404 (already resolved elsewhere) → ok=false, no throw', async () => {
+    let body: unknown
+    globalThis.fetch = (async (_url: string, init: { body?: string }) => {
+      body = init.body ? JSON.parse(init.body) : undefined
+      return new Response(JSON.stringify({ error: 'no pending approval "a9"' }), { status: 404 })
+    }) as unknown as typeof fetch
+    const r = await trayResolveApproval(env, 'deny', 'a9', 'too risky')
+    expect(body).toEqual({ via: 'tray', reason: 'too risky' })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(404)
+  })
+
+  test('daemon unreachable (no router.json) → ok=false, never throws', async () => {
+    rmSync(join(root, 'state', 'iapeer', 'router.json'))
+    const r = await trayResolveApproval(env, 'approve', 'a1')
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(0)
   })
 })

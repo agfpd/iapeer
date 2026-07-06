@@ -1278,8 +1278,8 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)',
   },
   {
-    sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|status',
-    desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; install activates it (installs SwiftBar when absent). See docs/16.',
+    sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|approve <id>|deny <id> [reason]|status',
+    desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; renders the approval queue (badge + Allow/Deny), install activates it (installs SwiftBar when absent). See docs/16.',
   },
   { sig: 'approval-mode <peer> [gated|yolo]', desc: 'read/flip a peer\'s human-approval mode (docs/17): yolo=current bypass; gated=blocking runtime approvals routed to a human. Persists + brings runtime surfaces to the mode; applies on next fresh session' },
   { sig: 'approvals [--json]', desc: 'list pending human-approval requests (verbatim action content); the host answer channel to the daemon broker' },
@@ -2537,6 +2537,23 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
               r = await tray.trayCmd(env, command, peer, runtime)
             } catch (e) {
               errOut(`tray cmd: ${e instanceof Error ? e.message : String(e)}\n`)
+              return 1
+            }
+            out(`${JSON.stringify(r.body)}\n`)
+            return r.ok ? 0 : 1
+          }
+          case 'approve':
+          case 'deny': {
+            // Tray click → resolve a pending approval over the unix-first fleet client (docs/17). The
+            // menu Allow/Deny items run these; the broker resolution is seen by every channel.
+            const id = positionals[1]
+            if (!id) return argErr(errOut, `usage: iapeer tray ${sub} <approval-id> [reason]`)
+            const reason = sub === 'deny' ? positionals.slice(2).join(' ') || undefined : undefined
+            let r: Awaited<ReturnType<typeof tray.trayResolveApproval>>
+            try {
+              r = await tray.trayResolveApproval(env, sub, id, reason)
+            } catch (e) {
+              errOut(`tray ${sub}: ${e instanceof Error ? e.message : String(e)}\n`)
               return 1
             }
             out(`${JSON.stringify(r.body)}\n`)

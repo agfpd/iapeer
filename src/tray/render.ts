@@ -18,7 +18,14 @@ const COLOR = {
   meta: '#8b949e',
   live: '#3fb950',
   down: '#f85149',
+  warn: '#d29922',
 } as const
+
+// Approval content shown INLINE in the menu is capped (a big diff must not blow up the
+// dropdown); the FULL verbatim content stays available via `iapeer approvals` + GET
+// /fleet/v1/approvals/<id> (criterion #7 holds on the payload, the menu is its truncated view).
+const APPROVAL_CONTENT_MAX_LINES = 20
+const APPROVAL_CONTENT_MAX_CHARS = 8000
 
 // ── docs/15 snapshot shape (only the fields the tray reads) ───────────────────
 
@@ -40,6 +47,16 @@ export interface TrayPeer {
   queue_depth?: number
 }
 
+export interface TrayApproval {
+  id: string
+  personality: string
+  runtime?: string
+  kind?: string
+  tool: string
+  summary?: string
+  content?: string
+}
+
 export interface TraySnapshot {
   version?: string
   host?: {
@@ -50,6 +67,8 @@ export interface TraySnapshot {
     fda?: boolean | null
   }
   peers: TrayPeer[]
+  /** Pending human-approval requests (docs/15/17). ABSENT ⇒ empty queue (client obligation). */
+  approvals?: TrayApproval[]
 }
 
 export interface RenderOptions {
@@ -135,11 +154,27 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
     return r !== 0 ? r : a.personality.localeCompare(b.personality)
   })
   const liveCount = snapshot.peers.filter(p => aggregate(p) === 'live').length
+  const pending = snapshot.approvals ?? []
+  const pendingByPeer = new Map<string, number>()
+  for (const a of pending) pendingByPeer.set(a.personality, (pendingByPeer.get(a.personality) ?? 0) + 1)
 
   const lines: string[] = []
-  // ── menu-bar title: antenna icon + live-peer count ──
-  lines.push(line(0, String(liveCount), { sfimage: 'antenna.radiowaves.left.and.right' }))
+  // ── menu-bar title ──
+  // Pending approvals TAKE OVER the menu-bar as a red iOS-style badge so the owner sees an awaiting
+  // request at a glance; an empty queue is the normal antenna + live-peer count.
+  if (pending.length > 0) {
+    lines.push(renderBadge(pending.length))
+  } else {
+    lines.push(line(0, String(liveCount), { sfimage: 'antenna.radiowaves.left.and.right' }))
+  }
   lines.push('---')
+
+  // ── pending approvals (ALWAYS-ON: whenever the queue is non-empty, at the TOP of the dropdown;
+  //    each request expanded with verbatim content + Allow/Deny at depth 0 — no extra clicks) ──
+  if (pending.length > 0) {
+    lines.push(...renderApprovals(pending, bin))
+    lines.push('---')
+  }
 
   // ── host header ──
   const ver = snapshot.host?.version ?? snapshot.version ?? '?'
@@ -154,7 +189,7 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
     lines.push(line(0, 'no peers registered', { color: COLOR.meta }))
   }
   for (const p of peers) {
-    lines.push(renderPeerRow(p, bin, now))
+    lines.push(renderPeerRow(p, bin, now, pendingByPeer.get(p.personality) ?? 0))
   }
 
   // ── Manage submenu (lifecycle commands per peer; kept off the rows so a row click
@@ -203,7 +238,7 @@ function attachable(p: TrayPeer): boolean {
  * `Cmd-T` System-Events keystroke that silently no-ops without Accessibility permission.
  * Infra (launchd) rows are plain status lines. Lifecycle lives in the Manage submenu.
  */
-function renderPeerRow(p: TrayPeer, bin: string, now: number): string {
+function renderPeerRow(p: TrayPeer, bin: string, now: number, pendingCount = 0): string {
   const agg = aggregate(p)
   const detail = p.runtimes.map(r => `${r.runtime}${GLYPH[r.status]}`).join(' ')
   const badges =
@@ -211,8 +246,13 @@ function renderPeerRow(p: TrayPeer, bin: string, now: number): string {
     (p.launchd_managed ? ' 🔒' : '') +
     (p.wake_policy === 'ephemeral' && (p.queue_depth ?? 0) > 0 ? ` ⏳${p.queue_depth}` : '')
   const ageStr = p.last_active_ms ? `  ${fmtAge(p.last_active_ms, now)}` : ''
-  const label = `${p.personality}  ${detail}${badges}${ageStr}`
-  const rowColor = agg === 'live' ? COLOR.live : COLOR.meta
+  // HIGHLIGHT a peer with a pending approval: a ⚠ prefix + a red count badge + the row painted red
+  // so the owner sees WHICH peer is waiting (owner criterion — the static-menu equivalent of a pulse;
+  // SwiftBar cannot animate). The highlight wins over the live/meta color.
+  const prefix = pendingCount > 0 ? '⚠ ' : ''
+  const pendingBadge = pendingCount > 0 ? ` 🔴${pendingCount}` : ''
+  const label = `${prefix}${p.personality}  ${detail}${badges}${pendingBadge}${ageStr}`
+  const rowColor = pendingCount > 0 ? COLOR.down : agg === 'live' ? COLOR.live : COLOR.meta
   if (!attachable(p)) return line(0, label, { color: rowColor })
   return line(0, label, { color: rowColor, bash: bin, param1: 'tray', param2: 'attach-term', param3: p.personality, terminal: false })
 }
@@ -238,6 +278,67 @@ function renderManage(peers: TrayPeer[], bin: string): string[] {
         }),
       )
     }
+  }
+  return out
+}
+
+// ── approval renderers (docs/17 — the always-on approval channel in the bar) ─────
+
+/** Menu-bar pending badge: a red `N.circle.fill` SF Symbol (the iOS-notification look — a red circle
+ *  with the number inside). SF Symbols carries numbered circles 0…50; past that, a red
+ *  exclamation-circle + the count as text. `sfcolor` tints the symbol red; `color` is set too as a
+ *  fallback for SwiftBar builds that read `color` for the tint. The numbered symbol carries the count,
+ *  so no text is needed for ≤50. */
+function renderBadge(count: number): string {
+  if (count <= 50) return line(0, '', { sfimage: `${count}.circle.fill`, sfcolor: COLOR.down, color: COLOR.down })
+  return line(0, String(count), { sfimage: 'exclamationmark.circle.fill', sfcolor: COLOR.down, color: COLOR.down })
+}
+
+/** Defuse SwiftBar STRUCTURAL injection from verbatim content: ` | ` is the param separator (replace
+ *  with a broken bar) and a leading `--` nests a submenu (defused by the `│ ` prefix in capContent).
+ *  Display-only — the FULL verbatim content stays in `iapeer approvals` (criterion #7 on the payload;
+ *  the menu is its truncated, structurally-safe view). */
+function sanitizeMenuText(s: string): string {
+  return s.replace(/ \| /g, ' ¦ ')
+}
+
+/** Cap the inline content (a big diff must not blow up the dropdown) and prefix each row with `│ ` so
+ *  it reads as quoted content AND never begins with `--`. Full verbatim content stays in `iapeer
+ *  approvals`. */
+function capContent(content: string): string[] {
+  const clipped = content.length > APPROVAL_CONTENT_MAX_CHARS ? content.slice(0, APPROVAL_CONTENT_MAX_CHARS) : content
+  let rows = clipped.split('\n')
+  let truncated = content.length > APPROVAL_CONTENT_MAX_CHARS
+  if (rows.length > APPROVAL_CONTENT_MAX_LINES) {
+    rows = rows.slice(0, APPROVAL_CONTENT_MAX_LINES)
+    truncated = true
+  }
+  const out = rows.map(r => `│ ${sanitizeMenuText(r)}`)
+  if (truncated) out.push('│ …[truncated — full content: iapeer approvals]')
+  return out
+}
+
+/** The pending-approval section (top of the dropdown). Each request is FLAT (depth 0, no submenu): a
+ *  header (peer · tool), the verbatim content (monospace, capped), then Allow / Deny click actions —
+ *  both visible + clickable with NO extra clicks. A click runs `iapeer tray approve|deny <id>` in the
+ *  background (unix-first fleet POST) → the broker resolves → the streaming plugin re-renders off the
+ *  approval-resolved SSE event (no refresh=true — the stream is always fresh). */
+function renderApprovals(approvals: TrayApproval[], bin: string): string[] {
+  const out: string[] = [
+    line(0, `${approvals.length} pending approval${approvals.length === 1 ? '' : 's'}`, {
+      sfimage: 'bell.badge.fill',
+      sfcolor: COLOR.down,
+      color: COLOR.down,
+    }),
+  ]
+  for (let i = 0; i < approvals.length; i++) {
+    if (i > 0) out.push('---') // separate multiple requests
+    const a = approvals[i]!
+    out.push(line(0, `${a.personality} · ${a.tool}`, { sfimage: 'hand.raised.fill', sfcolor: COLOR.warn, color: COLOR.warn }))
+    const content = a.content ?? a.summary ?? ''
+    if (content) for (const cl of capContent(content)) out.push(line(0, cl, { font: 'Menlo', size: 12, color: COLOR.meta }))
+    out.push(line(0, 'Allow', { sfimage: 'checkmark.circle.fill', sfcolor: COLOR.live, color: COLOR.live, bash: bin, param1: 'tray', param2: 'approve', param3: a.id, terminal: false }))
+    out.push(line(0, 'Deny', { sfimage: 'xmark.circle.fill', sfcolor: COLOR.down, color: COLOR.down, bash: bin, param1: 'tray', param2: 'deny', param3: a.id, terminal: false }))
   }
   return out
 }

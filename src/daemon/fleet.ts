@@ -111,12 +111,32 @@ export interface FleetHost {
   fda: boolean | null
 }
 
+/** A pending human-approval request as the snapshot exposes it (docs/17). The SAME items
+ *  `GET /fleet/v1/approvals` returns (broker.list()) — carried in the snapshot so a client
+ *  that already fetches `/snapshot` on every event renders the queue with no extra call. The
+ *  compact `summary` fuels a badge/one-liner; the verbatim `content` (criterion #7 — the full
+ *  command / diff / plan) rides along for inline display, capped by the client if it wishes. */
+export interface FleetApproval {
+  id: string
+  personality: string
+  runtime: string
+  kind: string
+  tool: string
+  summary: string
+  content: string
+  createdMs: number
+  expiresMs: number
+}
+
 export interface FleetSnapshot {
   api: typeof FLEET_API_VERSION
   version: string
   ts: string
   host: FleetHost
   peers: FleetPeer[]
+  /** Pending human-approval requests (docs/17). ADDITIVE + omitted when the queue is empty —
+   *  a client MUST treat its absence as an empty queue (same rule as `approval_mode`). */
+  approvals?: FleetApproval[]
 }
 
 // The CLI op functions, injectable for tests. Defaults LAZY-load cli/index.ts at
@@ -152,6 +172,7 @@ export function buildFleetSnapshot(
   ops: Pick<FleetOps, 'listPeers'>,
   startedAtMs: number,
   nowMs: number = Date.now(),
+  approvals: FleetApproval[] = [],
 ): FleetSnapshot {
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {
@@ -208,6 +229,10 @@ export function buildFleetSnapshot(
       fda: probeFullDiskAccess(env),
     },
     peers,
+    // ADDITIVE + omitted when empty (absence ⇒ empty queue, docs/15). broker.list() is a
+    // superset of FleetApproval — the named fields are the contract; extras ride along and
+    // clients ignore them (obligation 2).
+    ...(approvals.length ? { approvals } : {}),
   }
 }
 
@@ -484,7 +509,9 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
       // ── reads ────────────────────────────────────────────────────────────
       if (path === '/fleet/v1/snapshot') {
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/snapshot' })
-        return sendJson(res, 200, buildFleetSnapshot(env, cfg, await getOps(), startedAtMs))
+        // broker.list() is PendingApproval[] — structurally a superset of FleetApproval, so it
+        // satisfies the snapshot contract (extra fields serialize + are ignored by clients).
+        return sendJson(res, 200, buildFleetSnapshot(env, cfg, await getOps(), startedAtMs, undefined, broker.list()))
       }
       if (path === '/fleet/v1/events') {
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/events' })
