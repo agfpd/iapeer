@@ -88,26 +88,49 @@ export function actionContent(toolName: string, toolInput: Record<string, unknow
   }
 }
 
+/** The two hook events we intercept. `PermissionRequest` (claude, and codex) fires ONLY when
+ *  the runtime's permission config DECIDED to prompt — the primary, matcher-free interceptor
+ *  (verified live 2.1.201: fires + suppresses the prompt + returns a decision, policy stays
+ *  100% at the runtime). `PreToolUse` fires on every matched tool (codex structural path). */
+export type HookEvent = 'PermissionRequest' | 'PreToolUse'
+
 export interface HookInput {
+  event: HookEvent
   toolName: string
   toolInput: Record<string, unknown> | undefined
 }
 
-/** Parse the runtime's PreToolUse stdin JSON to the fields we need. Throws on non-JSON /
- *  missing tool_name (the caller turns a throw into a fail-safe deny). */
+/** Parse the runtime's hook stdin JSON. Throws on non-JSON / unknown event / missing tool_name
+ *  (the caller turns a throw into a fail-safe exit-2 deny, which both events honor). */
 export function parseHookInput(stdin: string): HookInput {
   const raw = JSON.parse(stdin) as Record<string, unknown>
+  const evName = raw.hook_event_name
+  const event: HookEvent =
+    evName === 'PermissionRequest' ? 'PermissionRequest' : evName === 'PreToolUse' ? 'PreToolUse' : throwEvent(evName)
   const toolName = raw.tool_name
   if (typeof toolName !== 'string' || !toolName) throw new Error('hook stdin has no tool_name')
   const toolInput =
     raw.tool_input && typeof raw.tool_input === 'object' && !Array.isArray(raw.tool_input)
       ? (raw.tool_input as Record<string, unknown>)
       : undefined
-  return { toolName, toolInput }
+  return { event, toolName, toolInput }
+}
+function throwEvent(v: unknown): never {
+  throw new Error(`hook stdin has an unexpected hook_event_name "${String(v)}"`)
 }
 
-/** The PreToolUse decision JSON both runtimes accept. A deny carries the reason to the model. */
-export function formatHookDecision(d: ApprovalDecision): string {
+/** The decision JSON in the shape the given event accepts. A deny carries the reason to the
+ *  model. PermissionRequest uses `decision.behavior` (+ `message`); PreToolUse uses
+ *  `permissionDecision` (+ `permissionDecisionReason`) — both verified live 2.1.201 / codex 0.142.5. */
+export function formatHookDecision(d: ApprovalDecision, event: HookEvent): string {
+  if (event === 'PermissionRequest') {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: d.decision, ...(d.decision === 'deny' && d.reason ? { message: d.reason } : {}) },
+      },
+    })
+  }
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -145,17 +168,37 @@ export interface RunHookDeps {
   timeoutMs?: number
 }
 
+export interface HookRunResult {
+  /** Decision JSON for the runtime (empty on the exit-2 hard fail-safe). */
+  stdout: string
+  /** Reason fed to the model on the exit-2 path (empty otherwise). */
+  stderr: string
+  /** 0 = decision expressed in stdout JSON; 2 = hard fail-safe deny (both events honor it). */
+  exitCode: number
+}
+
 /**
- * Full hook run: stdin JSON → broker → decision JSON. Returns the string to print on
- * stdout (always valid JSON) and an exit code (always 0 — the DENY is expressed in the
- * JSON, not the exit code, so the reason reaches the model). Never throws.
+ * Full hook run: stdin JSON → broker → decision JSON in the shape the event accepts. Never
+ * throws. Two fail-safe layers: once the event is known, any downstream failure (no identity,
+ * daemon down, timeout, broker deny) returns an event-appropriate DENY JSON (exit 0, reason to
+ * the model); a stdin we cannot even parse (unknown event) returns exit 2 + stderr, which
+ * DENIES under BOTH PermissionRequest and PreToolUse — so a gated peer is never allowed
+ * unapproved and never hangs, even on a malformed hook payload.
  */
-export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Promise<{ output: string; exitCode: number }> {
+export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Promise<HookRunResult> {
   const env = deps.env ?? process.env
   const doFetch = deps.fetch ?? fetch
   const timeoutMs = deps.timeoutMs ?? HOOK_FETCH_TIMEOUT_MS
+  let event: HookEvent
+  let toolName: string
+  let toolInput: Record<string, unknown> | undefined
   try {
-    const { toolName, toolInput } = parseHookInput(stdin)
+    ;({ event, toolName, toolInput } = parseHookInput(stdin))
+  } catch (e) {
+    // Cannot determine the event → exit 2 denies in BOTH events (stderr → model).
+    return { stdout: '', stderr: `iapeer approval-hook: ${e instanceof Error ? e.message : String(e)} — denied fail-safe`, exitCode: 2 }
+  }
+  try {
     const personality = env.PEER_PERSONALITY?.trim()
     if (!personality) throw new Error('no PEER_PERSONALITY in the hook environment')
     const runtime = env.PEER_RUNTIME?.trim() || 'claude'
@@ -178,14 +221,15 @@ export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Pr
       const data = (await resp.json()) as ApprovalDecision
       const decision: ApprovalDecision =
         data.decision === 'allow' ? { decision: 'allow' } : { decision: 'deny', reason: data.reason || 'denied' }
-      return { output: formatHookDecision(decision), exitCode: 0 }
+      return { stdout: formatHookDecision(decision, event), stderr: '', exitCode: 0 }
     } finally {
       clearTimeout(timer)
     }
   } catch (e) {
-    // FAIL-SAFE: deny with a reason (never allow-by-accident, never hang).
+    // Event known → event-appropriate DENY JSON (never allow-by-accident, never hang).
     return {
-      output: formatHookDecision({ decision: 'deny', reason: `iapeer approval unavailable (${e instanceof Error ? e.message : String(e)}) — denied fail-safe` }),
+      stdout: formatHookDecision({ decision: 'deny', reason: `iapeer approval unavailable (${e instanceof Error ? e.message : String(e)}) — denied fail-safe` }, event),
+      stderr: '',
       exitCode: 0,
     }
   }

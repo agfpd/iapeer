@@ -18,11 +18,14 @@ import { iapeerBinPath } from '../install/index.ts'
 import { readPeerProfile, writePeerProfileAtomic, type ApprovalMode } from '../identity/index.ts'
 import { preSeedCodexHooksTrust, removeCodexHooksTrustUnder, type HooksTrustOutcome } from '../launch/codexHooksTrust.ts'
 
-/** The default coarse matcher iapeer seeds — the mutation/plan tool classes (reads are
- *  auto-allowed in default mode, so they never prompt). User-editable on the runtime surface. */
-export const CLAUDE_APPROVAL_MATCHER = 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode'
-/** codex tool-name regex. NB the exact codex tool names are a live-verify item (codex may
- *  name its shell tool differently) — the user can widen/narrow this on the runtime surface. */
+// claude gated uses a matcher-FREE PermissionRequest hook (docs/17, Option D — verified live
+// 2.1.201): PermissionRequest fires ONLY when the runtime's permission config DECIDED to prompt
+// (a tool call not covered by an allow/deny rule), so the policy of "what to ask" stays 100% at
+// the runtime — the user tunes it with ordinary permission rules (a tool in permissions.allow is
+// never asked → the hook never fires → auto-allowed). No class matcher, no drift, no hang: a new
+// tool the runtime prompts for is intercepted the same way. iapeer only seeds the hook + the
+// allow-rule for its own MCP tool (else the runtime would prompt on the peer's own IAP channel).
+/** codex tool-name regex (codex PreToolUse path — structural, live-verify pending). */
 export const CODEX_APPROVAL_MATCHER = '^(Bash|Shell|shell|local_shell|exec|apply_patch|ApplyPatch)$'
 /** The peer's own IAP tool — allow-listed so a gated peer's send_to_peer is not itself gated. */
 export const IAPEER_MCP_ALLOW = 'mcp__iapeer__send_to_peer'
@@ -44,7 +47,8 @@ function isIapeerGroup(group: unknown): boolean {
 }
 
 function iapeerClaudeGroup(env: NodeJS.ProcessEnv): Record<string, unknown> {
-  return { matcher: CLAUDE_APPROVAL_MATCHER, hooks: [{ type: 'command', command: approvalHookCommand(env), timeout: HOOK_TIMEOUT_SECS }] }
+  // Matcher-free: PermissionRequest already fires only on prompt-worthy calls (Option D).
+  return { hooks: [{ type: 'command', command: approvalHookCommand(env), timeout: HOOK_TIMEOUT_SECS }] }
 }
 
 function readJsonObject(path: string): Record<string, unknown> | null {
@@ -66,11 +70,11 @@ export function installClaudeApproval(cwd: string, env: NodeJS.ProcessEnv = proc
   const path = claudeSettingsPath(cwd)
   const obj = readJsonObject(path)
   if (obj === null) return null
-  // hooks.PreToolUse — push OUR group iff absent (respect a user-tuned existing one).
+  // hooks.PermissionRequest — push OUR group iff absent (respect a user-added one).
   const hooks = (obj.hooks && typeof obj.hooks === 'object' && !Array.isArray(obj.hooks) ? obj.hooks : {}) as Record<string, unknown>
-  const pre = (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []) as unknown[]
+  const pre = (Array.isArray(hooks.PermissionRequest) ? hooks.PermissionRequest : []) as unknown[]
   if (!pre.some(isIapeerGroup)) pre.push(iapeerClaudeGroup(env))
-  hooks.PreToolUse = pre
+  hooks.PermissionRequest = pre
   obj.hooks = hooks
   // permissions.allow — allow-list the peer's own MCP tool (idempotent).
   const perms = (obj.permissions && typeof obj.permissions === 'object' && !Array.isArray(obj.permissions) ? obj.permissions : {}) as Record<string, unknown>
@@ -91,9 +95,9 @@ export function removeClaudeApproval(cwd: string): string | null {
   const obj = readJsonObject(path)
   if (obj === null) return null
   const hooks = obj.hooks as Record<string, unknown> | undefined
-  if (hooks && Array.isArray(hooks.PreToolUse)) {
-    hooks.PreToolUse = (hooks.PreToolUse as unknown[]).filter(g => !isIapeerGroup(g))
-    if ((hooks.PreToolUse as unknown[]).length === 0) delete hooks.PreToolUse
+  if (hooks && Array.isArray(hooks.PermissionRequest)) {
+    hooks.PermissionRequest = (hooks.PermissionRequest as unknown[]).filter(g => !isIapeerGroup(g))
+    if ((hooks.PermissionRequest as unknown[]).length === 0) delete hooks.PermissionRequest
     if (Object.keys(hooks).length === 0) delete obj.hooks
   }
   const perms = obj.permissions as Record<string, unknown> | undefined

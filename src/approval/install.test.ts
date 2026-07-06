@@ -2,13 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import {
-  CLAUDE_APPROVAL_MATCHER,
-  IAPEER_MCP_ALLOW,
-  installClaudeApproval,
-  removeClaudeApproval,
-  setApprovalMode,
-} from './install.ts'
+import { IAPEER_MCP_ALLOW, installClaudeApproval, removeClaudeApproval, setApprovalMode } from './install.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
@@ -39,8 +33,8 @@ describe('claude approval install / remove — the toggle idempotency invariant'
 
     installClaudeApproval(cwd, env)
     const s = readSettings()
-    const group = (s.hooks as { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> }).PreToolUse[0]!
-    expect(group.matcher).toBe(CLAUDE_APPROVAL_MATCHER)
+    const group = (s.hooks as { PermissionRequest: Array<{ matcher?: string; hooks: Array<{ command: string }> }> }).PermissionRequest[0]!
+    expect(group.matcher).toBeUndefined() // matcher-FREE (Option D: PermissionRequest fires only on prompts)
     expect(group.hooks[0]!.command).toContain('approval-hook')
     expect((s.permissions as { allow: string[] }).allow).toContain(IAPEER_MCP_ALLOW)
     // foreign keys preserved
@@ -74,7 +68,9 @@ describe('claude approval install / remove — the toggle idempotency invariant'
 
     installClaudeApproval(cwd, env)
     const s = readSettings()
-    expect((s.hooks as { PreToolUse: unknown[] }).PreToolUse).toHaveLength(2) // foreign + ours
+    // our hook lands under PermissionRequest; the foreign PreToolUse hook is untouched
+    expect((s.hooks as { PreToolUse: unknown[] }).PreToolUse).toHaveLength(1) // foreign preserved
+    expect((s.hooks as { PermissionRequest: unknown[] }).PermissionRequest).toHaveLength(1) // ours
     expect((s.permissions as { allow: string[] }).allow).toEqual(['Bash(ls)', IAPEER_MCP_ALLOW])
 
     removeClaudeApproval(cwd)

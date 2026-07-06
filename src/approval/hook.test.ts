@@ -2,14 +2,17 @@ import { describe, expect, test } from 'bun:test'
 import { actionContent, formatHookDecision, parseHookInput, runApprovalHook } from './hook.ts'
 
 describe('parseHookInput', () => {
-  test('extracts tool_name + tool_input', () => {
-    const r = parseHookInput(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' }, permission_mode: 'bypassPermissions' }))
+  test('extracts event + tool_name + tool_input', () => {
+    const r = parseHookInput(JSON.stringify({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } }))
+    expect(r.event).toBe('PermissionRequest')
     expect(r.toolName).toBe('Bash')
     expect(r.toolInput).toEqual({ command: 'ls' })
+    expect(parseHookInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: {} })).event).toBe('PreToolUse')
   })
-  test('throws on non-JSON and on missing tool_name', () => {
+  test('throws on non-JSON, unknown event, and missing tool_name', () => {
     expect(() => parseHookInput('not json')).toThrow()
-    expect(() => parseHookInput(JSON.stringify({ tool_input: {} }))).toThrow()
+    expect(() => parseHookInput(JSON.stringify({ hook_event_name: 'Bogus', tool_name: 'Bash' }))).toThrow()
+    expect(() => parseHookInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_input: {} }))).toThrow()
   })
 })
 
@@ -50,14 +53,20 @@ describe('actionContent (verbatim content per tool — criterion #7)', () => {
   })
 })
 
-describe('formatHookDecision', () => {
-  test('allow → no reason', () => {
-    expect(JSON.parse(formatHookDecision({ decision: 'allow' }))).toEqual({
-      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+describe('formatHookDecision (per-event shape — verified live)', () => {
+  test('PermissionRequest → decision.behavior (+ message on deny)', () => {
+    expect(JSON.parse(formatHookDecision({ decision: 'allow' }, 'PermissionRequest'))).toEqual({
+      hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+    })
+    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'too risky' }, 'PermissionRequest'))).toEqual({
+      hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'too risky' } },
     })
   })
-  test('deny → carries the reason to the model', () => {
-    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'too risky' }))).toEqual({
+  test('PreToolUse → permissionDecision (+ permissionDecisionReason on deny)', () => {
+    expect(JSON.parse(formatHookDecision({ decision: 'allow' }, 'PreToolUse'))).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    })
+    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'too risky' }, 'PreToolUse'))).toEqual({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'too risky' },
     })
   })
@@ -67,47 +76,49 @@ const env = { PEER_PERSONALITY: 'boris', PEER_RUNTIME: 'claude', IAPEER_TEST_SAN
 const okFetch = (payload: unknown): typeof fetch =>
   (async () => ({ ok: true, status: 200, json: async () => payload })) as unknown as typeof fetch
 
+const PREQ = (tool_input: Record<string, unknown>, tool_name = 'Bash'): string =>
+  JSON.stringify({ hook_event_name: 'PermissionRequest', tool_name, tool_input })
+
 describe('runApprovalHook (fail-safe orchestration)', () => {
-  test('broker allow → allow JSON; the request body carries verbatim content', async () => {
+  test('broker allow → PermissionRequest decision.behavior=allow; body carries verbatim content', async () => {
     let sentBody: Record<string, unknown> = {}
     const spyFetch = (async (_url: string, init: { body: string }) => {
       sentBody = JSON.parse(init.body)
       return { ok: true, status: 200, json: async () => ({ decision: 'allow' }) }
     }) as unknown as typeof fetch
-    const r = await runApprovalHook(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo hi' } }), { env, fetch: spyFetch })
-    expect(JSON.parse(r.output).hookSpecificOutput.permissionDecision).toBe('allow')
+    const r = await runApprovalHook(PREQ({ command: 'echo hi' }), { env, fetch: spyFetch })
+    expect(JSON.parse(r.stdout).hookSpecificOutput.decision.behavior).toBe('allow')
+    expect(r.exitCode).toBe(0)
     expect(sentBody.personality).toBe('boris')
     expect(sentBody.tool).toBe('Bash')
     expect(sentBody.content).toContain('echo hi')
   })
-  test('broker deny → deny JSON with the reason', async () => {
-    const r = await runApprovalHook(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'rm -rf /' } }), {
-      env,
-      fetch: okFetch({ decision: 'deny', reason: 'obviously no' }),
-    })
-    const out = JSON.parse(r.output).hookSpecificOutput
-    expect(out.permissionDecision).toBe('deny')
-    expect(out.permissionDecisionReason).toBe('obviously no')
+  test('broker deny → PermissionRequest decision.behavior=deny + message to model', async () => {
+    const r = await runApprovalHook(PREQ({ command: 'rm -rf /' }), { env, fetch: okFetch({ decision: 'deny', reason: 'obviously no' }) })
+    const out = JSON.parse(r.stdout).hookSpecificOutput.decision
+    expect(out.behavior).toBe('deny')
+    expect(out.message).toBe('obviously no')
   })
-  test('daemon unreachable → FAIL-SAFE deny (never allow-by-accident)', async () => {
+  test('PreToolUse event → permissionDecision shape (codex path)', async () => {
+    const r = await runApprovalHook(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), { env, fetch: okFetch({ decision: 'allow' }) })
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+  test('daemon unreachable → FAIL-SAFE deny (event-appropriate, exit 0)', async () => {
     const deadFetch = (async () => {
       throw new Error('ECONNREFUSED')
     }) as unknown as typeof fetch
-    const r = await runApprovalHook(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'x' } }), { env, fetch: deadFetch })
-    const out = JSON.parse(r.output).hookSpecificOutput
-    expect(out.permissionDecision).toBe('deny')
-    expect(out.permissionDecisionReason).toContain('unavailable')
+    const r = await runApprovalHook(PREQ({ command: 'x' }), { env, fetch: deadFetch })
+    expect(JSON.parse(r.stdout).hookSpecificOutput.decision.behavior).toBe('deny')
     expect(r.exitCode).toBe(0)
   })
   test('no PEER_PERSONALITY → FAIL-SAFE deny', async () => {
-    const r = await runApprovalHook(JSON.stringify({ tool_name: 'Bash', tool_input: {} }), {
-      env: { IAPEER_TEST_SANDBOX: '1' } as unknown as NodeJS.ProcessEnv,
-      fetch: okFetch({ decision: 'allow' }),
-    })
-    expect(JSON.parse(r.output).hookSpecificOutput.permissionDecision).toBe('deny')
+    const r = await runApprovalHook(PREQ({}), { env: { IAPEER_TEST_SANDBOX: '1' } as unknown as NodeJS.ProcessEnv, fetch: okFetch({ decision: 'allow' }) })
+    expect(JSON.parse(r.stdout).hookSpecificOutput.decision.behavior).toBe('deny')
   })
-  test('non-JSON stdin → FAIL-SAFE deny', async () => {
+  test('unparseable stdin → exit 2 (denies under BOTH events, no stdout JSON)', async () => {
     const r = await runApprovalHook('garbage', { env, fetch: okFetch({ decision: 'allow' }) })
-    expect(JSON.parse(r.output).hookSpecificOutput.permissionDecision).toBe('deny')
+    expect(r.exitCode).toBe(2)
+    expect(r.stdout).toBe('')
+    expect(r.stderr).toContain('denied fail-safe')
   })
 })

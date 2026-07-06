@@ -2592,7 +2592,8 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const { runApprovalHook } = await import('../approval/hook.ts')
         const stdin = await Bun.stdin.text()
         const r = await runApprovalHook(stdin, { env })
-        out(`${r.output}\n`)
+        if (r.stdout) out(`${r.stdout}\n`)
+        if (r.stderr) errOut(`${r.stderr}\n`)
         return r.exitCode
       }
       case 'approvals': {
