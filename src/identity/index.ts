@@ -56,6 +56,14 @@ import {
  *  Enum (not bool) to leave room for future policies. */
 export type WakePolicy = 'ephemeral'
 
+/** Per-peer human-approval mode (foundation lifecycle-owned; docs/17-approval).
+ *  `yolo` (default, absent) = current fleet behavior — runtime bypass flag + the
+ *  supervisor auto-confirms circuit-breakers. `gated` = launch WITHOUT bypass, the
+ *  runtime's blocking approval requests are routed to a human through the daemon
+ *  approval broker. Only `gated` is persisted (yolo = field absent, byte-identical to
+ *  a never-toggled profile — mirrors wake_policy). */
+export type ApprovalMode = 'yolo' | 'gated'
+
 export interface PeerProfile {
   personality: string
   runtime: Runtime
@@ -69,6 +77,9 @@ export interface PeerProfile {
   interfaces?: PeerInterfaces
   /** Per-peer wake policy (lifecycle-owned). Absent = normal warm-on-demand. */
   wake_policy?: WakePolicy
+  /** Per-peer human-approval mode (lifecycle-owned). Absent = `yolo` (default). Only
+   *  `gated` is persisted; see ApprovalMode. */
+  approval_mode?: ApprovalMode
 }
 
 // Write shape: intelligence/description optional so a caller can write a profile
@@ -241,7 +252,17 @@ export function readPeerProfile(cwd: string = process.cwd()): PeerProfile | null
     // Wake policy — only the known enum value is honored; anything else → omitted
     // (treated as normal warm-on-demand, never throws on an unknown future value).
     ...(obj.wake_policy === 'ephemeral' ? { wake_policy: 'ephemeral' as const } : {}),
+    // Approval mode — only `gated` is persisted/honored; absent / `yolo` / unknown →
+    // omitted (treated as the default `yolo`, never throws on an unknown future value).
+    ...(obj.approval_mode === 'gated' ? { approval_mode: 'gated' as const } : {}),
   }
+}
+
+/** The effective approval mode of a profile: `gated` iff persisted, else the default
+ *  `yolo`. The ONE place the "absent ⇒ yolo" default lives — every reader (launch,
+ *  supervisor, fleet snapshot, CLI) resolves the mode through this, never re-derives it. */
+export function approvalModeOf(profile: PeerProfile | null | undefined): ApprovalMode {
+  return profile?.approval_mode === 'gated' ? 'gated' : 'yolo'
 }
 
 /**
@@ -375,6 +396,13 @@ function writePeerProfileMerged(path: string, profile: PeerProfileWrite): void {
   if (typeof profile.initial_prompt === 'string' && profile.initial_prompt) {
     merged.initial_prompt = profile.initial_prompt
   }
+  // Approval mode (lifecycle-owned toggle). `gated` persists the field; `yolo` REMOVES
+  // it (default = absence, so a gated→yolo flip restores a byte-identical pristine
+  // profile — the toggle idempotency invariant). An ABSENT approval_mode in the write
+  // (any non-toggle writer: verify --fix, rename, re-provision) preserves the existing
+  // value verbatim via `...existing` — a caller that does not own the toggle never flips it.
+  if (profile.approval_mode === 'gated') merged.approval_mode = 'gated'
+  else if (profile.approval_mode === 'yolo') delete merged.approval_mode
   writeFileAtomic(path, `${JSON.stringify(merged, null, 2)}\n`)
 }
 

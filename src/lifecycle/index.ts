@@ -28,7 +28,7 @@ import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/
 import { err, ok, type Result } from '../core/errors.ts'
 import { capPaneLogs } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
-import { readPeerProfile, resolveIdentity } from '../identity/index.ts'
+import { approvalModeOf, readPeerProfile, resolveIdentity, type ApprovalMode } from '../identity/index.ts'
 import {
   ephemeralQueueDepth,
   listQueuedIdentities,
@@ -597,6 +597,18 @@ export function isEphemeralPeer(cwd: string): boolean {
     return readPeerProfile(cwd)?.wake_policy === 'ephemeral'
   } catch {
     return false
+  }
+}
+
+/** The effective human-approval mode of the peer at `cwd` — `gated` iff its profile
+ *  persists it, else the default `yolo`. A profile read hiccup → `yolo` (safe default:
+ *  the current-fleet behavior; never gates a peer we cannot read). The single cwd-level
+ *  reader the launch/supervisor/fleet paths call (default lives in approvalModeOf). */
+export function peerApprovalMode(cwd: string): ApprovalMode {
+  try {
+    return approvalModeOf(readPeerProfile(cwd))
+  } catch {
+    return 'yolo'
   }
 }
 

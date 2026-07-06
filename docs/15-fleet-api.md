@@ -55,7 +55,8 @@ The full fleet state. The peer rows are produced by the **same in-process functi
       "last_active_ms": 1751731100000,
       "attached": true,
       "launchd_managed": false,
-      "wake_policy": "warm"
+      "wake_policy": "warm",
+      "approval_mode": "yolo"
     }
   ]
 }
@@ -68,6 +69,7 @@ Field notes:
 - `attached` — any runtime attached (peer-level convenience).
 - `launchd_managed` — launchd owns this peer's lifecycle (H4): the daemon never wakes/reaps it, and wake/stop/start commands are guarded accordingly.
 - `wake_policy` — `warm` (default: wake-on-message, idle-reap, resume) or `ephemeral` (stateless worker: serial task queue, die-after-reply).
+- `approval_mode` — the peer's human-approval mode (docs/17-approval): `yolo` (default — launched with the runtime bypass flag, the supervisor auto-confirms circuit-breakers) or `gated` (launched without bypass; the runtime's blocking approval requests are routed to a human through the daemon approval broker). Additive field; a pre-approval daemon omits it — clients MUST treat its absence as `yolo`.
 - `queue_depth` — ephemeral peers only: pending tasks across the peer's serial queues.
 - `host.memory` / `host.voice` — the provider slots (`null` = empty slot); `heartbeatAgeSecs: null` with a non-null slot = provider declared but its daemon isn't heartbeating.
 - `host.fda` — Full Disk Access of the binary: `true` / `false` / `null` (undeterminable).

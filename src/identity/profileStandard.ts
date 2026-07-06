@@ -115,6 +115,9 @@ export function validateProfileStandard(raw: unknown, cwd: string): ProfileIssue
   if (obj.wake_policy !== undefined && obj.wake_policy !== 'ephemeral') {
     issues.push({ severity: 'warn', field: 'wake_policy', message: `unknown value "${String(obj.wake_policy)}" — only 'ephemeral' is honored` })
   }
+  if (obj.approval_mode !== undefined && obj.approval_mode !== 'gated' && obj.approval_mode !== 'yolo') {
+    issues.push({ severity: 'warn', field: 'approval_mode', message: `unknown value "${String(obj.approval_mode)}" — only 'gated'|'yolo' honored (absent = yolo default)` })
+  }
 
   // Owner sections — well-typed only; foundation never restructures them.
   if (obj.interfaces !== undefined && (typeof obj.interfaces !== 'object' || obj.interfaces === null || Array.isArray(obj.interfaces))) {

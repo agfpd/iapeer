@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  approvalModeOf,
   ensurePeerProfile,
   readPeerProfile,
   writePeerProfileAtomic,
@@ -42,6 +43,73 @@ function oldMerged(existing: Record<string, unknown>, profile: {
     intelligence: profile.intelligence, // unconditional overwrite
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// approval_mode — the human-approval toggle field (docs/17-approval)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('approval_mode profile field', () => {
+  const seed = (extra: Record<string, unknown> = {}): void => {
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      peerProfilePath(cwd),
+      JSON.stringify({
+        personality: 'tester',
+        default_runtime: 'claude',
+        runtimes: ['claude'],
+        description: 'Test peer.',
+        intelligence: 'artificial',
+        ...extra,
+      }),
+    )
+  }
+
+  test('absent approval_mode ⇒ default yolo (approvalModeOf + read omit it)', () => {
+    seed()
+    const p = readPeerProfile(cwd)!
+    expect(p.approval_mode).toBeUndefined()
+    expect(approvalModeOf(p)).toBe('yolo')
+    expect(approvalModeOf(null)).toBe('yolo')
+  })
+
+  test('gated is honored on read; an unknown/yolo on-disk value is treated as default yolo', () => {
+    seed({ approval_mode: 'gated' })
+    expect(approvalModeOf(readPeerProfile(cwd))).toBe('gated')
+    seed({ approval_mode: 'yolo' })
+    expect(readPeerProfile(cwd)!.approval_mode).toBeUndefined() // yolo is the default → not stored
+    seed({ approval_mode: 'nonsense' })
+    expect(approvalModeOf(readPeerProfile(cwd))).toBe('yolo') // unknown never throws → default
+  })
+
+  test('write gated persists the field; write yolo REMOVES it; repeated flips are byte-identical each way (toggle idempotency invariant)', () => {
+    seed()
+
+    // → gated
+    writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, approval_mode: 'gated' })
+    expect(readDisk().approval_mode).toBe('gated')
+    expect(approvalModeOf(readPeerProfile(cwd))).toBe('gated')
+    const gatedBytes = readFileSync(peerProfilePath(cwd), 'utf8')
+
+    // gated → yolo REMOVES the field (returns to the default = absence)
+    writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, approval_mode: 'yolo' })
+    expect(readDisk().approval_mode).toBeUndefined()
+    expect(approvalModeOf(readPeerProfile(cwd))).toBe('yolo')
+    const yoloBytes = readFileSync(peerProfilePath(cwd), 'utf8')
+
+    // gated→yolo→gated→yolo lands byte-identical to the first gated / first yolo respectively
+    writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, approval_mode: 'gated' })
+    expect(readFileSync(peerProfilePath(cwd), 'utf8')).toBe(gatedBytes)
+    writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, approval_mode: 'yolo' })
+    expect(readFileSync(peerProfilePath(cwd), 'utf8')).toBe(yoloBytes)
+  })
+
+  test('a non-toggle write (approval_mode absent) preserves an existing gated value verbatim', () => {
+    seed({ approval_mode: 'gated' })
+    // a runtimes-only update that does NOT own the toggle must never flip it
+    writePeerProfileAtomic(cwd, { personality: 'tester', runtime: 'claude', runtimes: ['claude'] })
+    expect(readDisk().approval_mode).toBe('gated')
+  })
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // writePeerProfileAtomic — H1 preserve + unknown-field preservation

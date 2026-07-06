@@ -42,6 +42,7 @@ import {
   isEphemeralPeer,
   isLaunchdManaged,
   loadLifecycleConfig,
+  peerApprovalMode,
   wakeOrSpawn,
   type LifecycleConfig,
 } from '../lifecycle/index.ts'
@@ -93,6 +94,9 @@ export interface FleetPeer {
   wake_policy: 'warm' | 'ephemeral'
   /** Ephemeral peers only: pending serial-queue tasks across declared runtimes. */
   queue_depth?: number
+  /** Human-approval mode (docs/17-approval): `yolo` (default — bypass + auto-confirm
+   *  circuit-breakers) or `gated` (blocking runtime approvals routed to a human). */
+  approval_mode: 'yolo' | 'gated'
 }
 
 export interface FleetHost {
@@ -163,6 +167,9 @@ export function buildFleetSnapshot(
     if (ephemeral) {
       for (const s of r.runtimes) queueDepth += ephemeralQueueDepth(cfg, buildProcessAddress(s.runtime, r.personality))
     }
+    // Approval mode from the LOCAL profile (same source as ephemeral); a read hiccup →
+    // the safe `yolo` default (peerApprovalMode swallows it).
+    const approvalMode = peerApprovalMode(r.cwd)
     return {
       personality: r.personality,
       description: r.description,
@@ -176,6 +183,7 @@ export function buildFleetSnapshot(
       launchd_managed: isLaunchdManaged(r.personality, env),
       wake_policy: ephemeral ? ('ephemeral' as const) : ('warm' as const),
       ...(ephemeral ? { queue_depth: queueDepth } : {}),
+      approval_mode: approvalMode,
     }
   })
   const mem = readMemoryProvider(env)

@@ -112,6 +112,7 @@ describe('GET /fleet/v1/snapshot', () => {
     expect(s.peers.map(p => p.personality)).toEqual(['boris', 'nova'])
     const boris = s.peers[0]!
     expect(boris.wake_policy).toBe('warm')
+    expect(boris.approval_mode).toBe('yolo') // no on-disk profile at the fixture cwd → the safe default
     expect(boris.launchd_managed).toBe(false)
     expect(boris.attached).toBe(false)
     expect((boris.runtimes as Array<{ runtime: string; status: string }>).map(x => x.status)).toEqual(['asleep', 'stopped'])
