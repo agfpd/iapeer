@@ -182,6 +182,122 @@ describe('nextNagAction — dangerous-rm circuit-breaker auto-confirmed (owner: 
   })
 })
 
+describe('nextNagAction — command-approval circuit-breaker (standard 3-option prompt, auto-YES + log)', () => {
+  // The EXACT live render (claude 2.1.201, captured via a nested pty in default mode — the SAME prompt a
+  // yolo peer sees when the runtime disables its bypass mid-session, or a gated peer whose hook missed).
+  // A THREE-option select ("1. Yes / 2. Yes,… / 3. No") under "Do you want to proceed?" — distinct from
+  // the dangerous-rm breaker's TWO-option "1. Yes / 2. No". Prose needles split-literal (В40).
+  const cmdApprovalPrompt = [
+    '❯ Yes, run it now. Just invoke the Bash tool with: env | grep -c PATH', // composer ECHO (❯ ABOVE the live select)
+    '',
+    '⏺ Bash(env | grep -c PATH)',
+    '  ⎿  Waiting…',
+    '',
+    ' Bash command',
+    '',
+    '   env | grep -c PATH', // the ACTUAL command line (Bash-command block)
+    '   Count env vars containing PATH',
+    '',
+    ' This command requires appr' + 'oval',
+    '',
+    ' Do you want to ' + 'proceed?',
+    ' ❯ 1. Yes',
+    '   2. Yes, and don' + "'t ask again for: env",
+    '   3. No',
+    '',
+    ' Esc to cancel · Tab to amend · ctrl+e to explain',
+  ].join('\n')
+
+  test('command-approval → kind approve, literal "1" then Enter (YES) so a headless peer never hangs', () => {
+    const a = nextNagAction(claudeAdapter, cmdApprovalPrompt)
+    expect(a.kind).toBe('approve')
+    expect(nagBytesOf(a)).toEqual(Buffer.from('1\r'))
+  })
+
+  test('approve carries a DISTINCT taxonomy + the parsed command (not the composer echo)', () => {
+    const a = nextNagAction(claudeAdapter, cmdApprovalPrompt)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('command-approval') // NOT dangerous-rm — the broker/audit tells them apart
+    expect(a.detail).toContain('cmd="env | grep -c PATH"')
+    expect(a.detail).not.toContain('Just invoke the Bash tool') // the echoed prompt is never the command
+  })
+
+  test('affirmative bytes are cursor-mode INDEPENDENT (no arrow key)', () => {
+    expect(nagBytesOf(nextNagAction(claudeAdapter, cmdApprovalPrompt, { appCursorKeys: true }))).toEqual(Buffer.from('1\r'))
+  })
+
+  test('file-access variant ("2. Yes, and always allow access …") matches the same signature', () => {
+    const fileApprovalPrompt = [
+      ' Bash command',
+      '',
+      '   touch /tmp/nagrepro/probe && ls -la /tmp/nagrepro',
+      '   Create probe file and list directory',
+      '',
+      ' Do you want to ' + 'proceed?',
+      ' ❯ 1. Yes',
+      '   2. Yes, and always allow access to nagrepro/ from this project',
+      '   3. No',
+      '',
+      ' Esc to cancel · Tab to amend · ctrl+e to explain',
+    ].join('\n')
+    const a = nextNagAction(claudeAdapter, fileApprovalPrompt)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('command-approval')
+  })
+
+  // BORIS HARD CRITERION: an org-policy prompt ("Your organization requires approval for this tool", an
+  // MCP restriction) MUST NOT be auto-pressed — the owner's org rule is human-only. Even though it wears
+  // the SAME 3-option layout, the matcher's explicit exclusion keeps it OUT.
+  test('org-policy prompt → NONE (never auto-Yes the owner org rule), despite the same 3-option layout', () => {
+    const orgPolicyPrompt = [
+      ' some_mcp__server__tool',
+      '',
+      ' Your ' + 'organization requires ' + 'approval' + ' for this tool',
+      '',
+      ' Do you want to ' + 'proceed?',
+      ' ❯ 1. Yes',
+      '   2. Yes, and don' + "'t ask again",
+      '   3. No',
+      '',
+      ' Esc to cancel · Tab to amend · ctrl+e to explain',
+    ].join('\n')
+    expect(nextNagAction(claudeAdapter, orgPolicyPrompt).kind).toBe('none')
+  })
+
+  test('a mere QUOTE of the prompt (ready composer ❯ below, not on "1. Yes") → none', () => {
+    const quote = [
+      'the peer pasted the approval prompt into chat:',
+      ' Do you want to ' + 'proceed?',
+      '   1. Yes   2. Yes, and always allow   3. No',
+      '❯ ', // the ready composer is the bottom-most ❯ row — a quote, not a live select
+      '  bypass permissions on',
+    ].join('\n')
+    expect(nextNagAction(claudeAdapter, quote).kind).toBe('none')
+  })
+
+  test('REGRESSION: the dangerous-rm breaker still classifies as dangerous-rm, not command-approval', () => {
+    // the rm breaker's 2-option pane must be owned by its own taxonomy (it fails the 3-option test anyway)
+    const rmPrompt = [
+      ' Bash command',
+      '   rm -rf /tmp/iapeer-rmrepro-cwd-XY',
+      ' Dangerous r' + 'm operation on working directory or its ' + 'ancestor:',
+      ' /tmp/iapeer-rmrepro-cwd-XY',
+      ' Do you want to ' + 'proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+    ].join('\n')
+    const a = nextNagAction(claudeAdapter, rmPrompt)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('dangerous-rm')
+  })
+
+  test('codex has no command-approval circuit-breaker → none', () => {
+    expect(nextNagAction(codexAdapter, cmdApprovalPrompt).kind).toBe('none')
+  })
+})
+
 // В60 — the nag-watcher's stuck-gate: a dismiss may fire only when the pane has been COMPLETELY
 // static (no pty writes) for the threshold. A live peer rendering the modal text keeps writing →
 // the gate never opens; a genuinely blocked modal freezes the pty → it opens after the threshold.

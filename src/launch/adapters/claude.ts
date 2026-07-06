@@ -129,6 +129,46 @@ function dangerousRmDetail(pane: string): string {
   return [cmd && `cmd=${JSON.stringify(cmd)}`, target && `target=${JSON.stringify(target)}`].filter(Boolean).join(' ') || '(unparsed)'
 }
 
+// Standard command-approval prompt (claude 2.1.201 — the NO-RULE-MATCH passthrough / file-access "ask")
+// needles. This is the prompt a peer sees when it is NOT in bypass — i.e. GATED mode, OR a yolo peer
+// whose bypass the runtime disabled mid-session (the `tengu_disable_bypass_permissions_mode` feature
+// gate / `disableBypassPermissionsMode` setting). Under GENUINE bypass this prompt never surfaces (only
+// the dangerous-rm breaker does — verified from the 2.1.201 permission-gate: bypass auto-allows every
+// `ask` except "Dangerous rm/rmdir operation"). The live render (captured via a nested pty, default
+// mode) is a THREE-option select — "❯ 1. Yes / 2. Yes, and <don't ask again | always allow …> / 3. No"
+// under "Do you want to proceed?" — which is what distinguishes it from the dangerous-rm breaker's
+// TWO-option "1. Yes / 2. No". Split-literal (В40): a peer reviewing this adapter must not self-trigger.
+const ORG_POLICY_APPROVAL = 'organization requires ' + 'approval' // MCP org-restriction — NEVER auto-pressed
+const BASH_CMD_HEADER = 'Bash' + ' command'
+/** FULL-signature + position match for the LIVE standard command-approval prompt. Returns true ONLY for
+ *  the 3-option layout with the bottom-most `❯` cursor on "1. Yes" — so a mere QUOTE of the prompt (ready
+ *  composer `❯` below) never matches. Two hard exclusions satisfy the owner's NARROW-matcher rule:
+ *    · org-policy ("Your organization requires approval for this tool", an MCP restriction) → excluded,
+ *      the owner's org rule is HUMAN-only and must never be auto-pressed;
+ *    · the dangerous-rm breaker → handled by its own taxonomy (checked first in blockingConfirm), and
+ *      structurally excluded here anyway (it is a 2-option "2. No", never "2. Yes," + "3. No"). */
+function isCommandApprovalPrompt(pane: string): boolean {
+  if (!pane.includes(RM_PROCEED)) return false // shares "Do you want to proceed?" with the rm breaker
+  if (pane.includes(ORG_POLICY_APPROVAL)) return false // org-policy → never auto-Yes
+  if (isDangerousRmPrompt(pane)) return false // its own taxonomy owns this pane
+  // 3-option standard layout: option 2 is a "Yes," variant + option 3 is "No" (the rm breaker is
+  // 2-option "1. Yes / 2. No", so it fails BOTH tests — no overlap).
+  if (!/(^|\n)\s*2\.\s*Yes/.test(pane)) return false
+  if (!/(^|\n)\s*3\.\s*No\b/.test(pane)) return false
+  // live-modal position gate: the bottom-most `❯` row must sit on "1. Yes".
+  let lastCursorRow = ''
+  for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
+  return /❯\s*1\.\s*Yes\b/.test(lastCursorRow)
+}
+/** Best-effort trace of the command the approval prompt guarded — the first non-blank line under the
+ *  "Bash command" block header. Mirrors dangerousRmDetail's post-hoc audit purpose. */
+function commandApprovalDetail(pane: string): string {
+  const lines = pane.split(/\r?\n/)
+  const hi = lines.findIndex(l => l.trim() === BASH_CMD_HEADER)
+  if (hi >= 0) for (let j = hi + 1; j < lines.length; j++) { const t = lines[j].trim(); if (t) return `cmd=${JSON.stringify(t)}` }
+  return '(unparsed)'
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Transcript activity proxy + resume uuid (lifecycle port, claude slug fix)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,18 +376,27 @@ export const claudeAdapter: RuntimeAdapter = {
   },
 
   /**
-   * Dangerous-rm/rmdir circuit-breaker (RuntimeAdapter.blockingConfirm). Unlike the fullscreen nag
-   * (benign upsell → DECLINE), this guard sits ABOVE `--dangerously-skip-permissions` and hangs a
-   * headless peer forever with no human to answer. Owner decision (Артур, 04.07): auto-press YES —
-   * peers run on bypass, so this only restores the pre-2.1.x status quo, and a hang is real recurring
-   * harm. The default cursor is already on "1. Yes" (verified live), so ['1','Enter'] is the explicit,
-   * position-robust affirmative. Returns the class tag + a one-line command/target trace so the
-   * supervisor logs a post-hoc audit line. NB deliberately NOT a "smart" safe-decline/escalation — that
-   * lands later on the vault idea "Human-approval подтверждения действий пира через Telegram-кнопки".
+   * Blocking-confirm circuit-breaker (RuntimeAdapter.blockingConfirm). Unlike the fullscreen nag
+   * (benign upsell → DECLINE), these guards hang a headless peer forever with no human to answer.
+   * Owner decision (Артур, 04.07): auto-press YES — peers run on bypass, so this only restores the
+   * pre-2.1.x status quo, and a hang is real recurring harm. Two signatures are matched, most-specific
+   * first, each with its own taxonomy so the supervisor's audit log and (later) the human-approval
+   * broker can tell them apart:
+   *   1. 'dangerous-rm' — the rm/rmdir breaker that sits ABOVE `--dangerously-skip-permissions` (the
+   *      ONLY prompt that surfaces under genuine bypass). Default cursor on "1. Yes" (verified live).
+   *   2. 'command-approval' — the STANDARD 3-option approval prompt, surfaced when the peer is NOT in
+   *      bypass: gated mode, or a yolo peer whose bypass the runtime disabled mid-session (feature gate
+   *      / setting). Auto-Yes keeps a yolo peer alive; a gated peer is routed to the human broker by the
+   *      supervisor (Unit 4, mode-aware). Org-policy ("Your organization requires approval for this
+   *      tool") is EXCLUDED by the matcher — the owner's org rule is never auto-pressed.
+   * Both press ['1','Enter'] (the position-robust affirmative — cursor already on "1. Yes") and carry a
+   * one-line command/target trace for the post-hoc audit line. NB deliberately NOT a "smart" safe-
+   * decline/escalation — the human-approval path lands in Ф1 (vault "Human-approval …Telegram-кнопки").
    */
   blockingConfirm(pane: string): { keys: string[]; taxonomy: string; detail: string } | null {
-    if (!isDangerousRmPrompt(pane)) return null
-    return { keys: ['1', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
+    if (isDangerousRmPrompt(pane)) return { keys: ['1', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
+    if (isCommandApprovalPrompt(pane)) return { keys: ['1', 'Enter'], taxonomy: 'command-approval', detail: commandApprovalDetail(pane) }
+    return null
   },
 
   /**
