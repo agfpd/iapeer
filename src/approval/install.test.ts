@@ -25,7 +25,7 @@ function readSettings(): Record<string, unknown> {
 }
 
 describe('claude approval install / remove — the toggle idempotency invariant', () => {
-  test('install seeds the PreToolUse hook + MCP allow-rule; remove restores byte-identical bytes', () => {
+  test('install seeds the PermissionRequest hook + MCP allow-rule; remove restores byte-identical bytes', () => {
     // a pre-existing settings.json with foreign content (as ensureClaudeProjectSettings leaves)
     mkdirSync(join(cwd, '.claude'), { recursive: true })
     writeFileSync(claudeSettingsPath(cwd), `${JSON.stringify({ enableAllProjectMcpServers: true, tui: 'default' }, null, 2)}\n`)

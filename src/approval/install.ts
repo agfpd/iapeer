@@ -179,7 +179,7 @@ export function setApprovalMode(cwd: string, mode: ApprovalMode, env: NodeJS.Pro
   const surfaces = [`profile: approval_mode=${mode}`]
   for (const rt of profile.runtimes) {
     if (rt === 'claude') {
-      if (mode === 'gated') surfaces.push(`claude: ${installClaudeApproval(cwd, env) ? 'PreToolUse hook + MCP allow-rule installed' : 'settings write SKIPPED (non-object)'}`)
+      if (mode === 'gated') surfaces.push(`claude: ${installClaudeApproval(cwd, env) ? 'PermissionRequest hook + MCP allow-rule installed' : 'settings write SKIPPED (non-object)'}`)
       else surfaces.push(`claude: ${removeClaudeApproval(cwd) ? 'hook + allow-rule removed' : 'nothing to remove'}`)
     } else if (rt === 'codex') {
       if (mode === 'gated') {
