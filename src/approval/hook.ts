@@ -10,17 +10,10 @@
 // response, client timeout) prints a DENY with a reason — a gated peer is never allowed to
 // act unapproved, and never hangs (the client timeout sits above the broker's).
 //
-// Pure helpers (parseHookInput / actionContent / formatHookDecision / resolveFleetBase)
-// are unit-tested; runApprovalHook is the thin IO orchestration.
+// Pure helpers (parseHookInput / actionContent / formatHookDecision) are unit-tested;
+// runApprovalHook is the thin IO orchestration over the shared broker transport (brokerClient).
 
-import { readFileSync } from 'fs'
-import { join } from 'path'
-import { pluginStateDir } from '../storage/index.ts'
-
-export interface ApprovalDecision {
-  decision: 'allow' | 'deny'
-  reason?: string
-}
+import { type ApprovalDecision, requestApproval, resolveFleetBase } from './brokerClient.ts'
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : v === undefined || v === null ? '' : JSON.stringify(v)
@@ -140,26 +133,6 @@ export function formatHookDecision(d: ApprovalDecision, event: HookEvent): strin
   })
 }
 
-/** Resolve the daemon fleet base URL (origin-form, no path) from router.json's `tcp`
- *  field, else the well-known loopback default. TCP loopback is always served (the daemon
- *  dual-listens), so the hook never needs the unix socket. */
-export function resolveFleetBase(env: NodeJS.ProcessEnv = process.env): string {
-  try {
-    const routerJson = join(pluginStateDir('iapeer', { env }), 'router.json')
-    const parsed = JSON.parse(readFileSync(routerJson, 'utf8')) as { tcp?: unknown }
-    if (typeof parsed.tcp === 'string' && parsed.tcp) return parsed.tcp.replace(/\/mcp\/?$/, '')
-  } catch {
-    /* no router.json → default below */
-  }
-  const port = env.IAPEER_PORT?.trim() || '8765'
-  return `http://127.0.0.1:${port}`
-}
-
-/** Client-side hold ceiling — comfortably ABOVE the broker's default-deny timeout (300s)
- *  so the broker's answer always arrives first; if the daemon is dead the fetch aborts and
- *  we fail-safe deny. */
-const HOOK_FETCH_TIMEOUT_MS = 600_000
-
 export interface RunHookDeps {
   env?: NodeJS.ProcessEnv
   /** Injectable fetch (tests). Default global fetch. */
@@ -188,7 +161,7 @@ export interface HookRunResult {
 export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Promise<HookRunResult> {
   const env = deps.env ?? process.env
   const doFetch = deps.fetch ?? fetch
-  const timeoutMs = deps.timeoutMs ?? HOOK_FETCH_TIMEOUT_MS
+  const timeoutMs = deps.timeoutMs
   let event: HookEvent
   let toolName: string
   let toolInput: Record<string, unknown> | undefined
@@ -203,28 +176,12 @@ export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Pr
     if (!personality) throw new Error('no PEER_PERSONALITY in the hook environment')
     const runtime = env.PEER_RUNTIME?.trim() || 'claude'
     const { kind, content, summary } = actionContent(toolName, toolInput)
-    const base = resolveFleetBase(env)
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-    ;(timer as { unref?: () => void }).unref?.()
-    try {
-      const headers: Record<string, string> = { 'content-type': 'application/json' }
-      const bearer = env.IAPEER_BEARER_TOKEN?.trim()
-      if (bearer) headers.authorization = `Bearer ${bearer}`
-      const resp = await doFetch(`${base}/fleet/v1/approvals`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ personality, runtime, kind, tool: toolName, content, summary }),
-        signal: controller.signal,
-      })
-      if (!resp.ok) throw new Error(`daemon returned ${resp.status}`)
-      const data = (await resp.json()) as ApprovalDecision
-      const decision: ApprovalDecision =
-        data.decision === 'allow' ? { decision: 'allow' } : { decision: 'deny', reason: data.reason || 'denied' }
-      return { stdout: formatHookDecision(decision, event), stderr: '', exitCode: 0 }
-    } finally {
-      clearTimeout(timer)
-    }
+    const decision = await requestApproval(
+      resolveFleetBase(env),
+      { personality, runtime, kind, tool: toolName, content, summary },
+      { env, fetch: doFetch, timeoutMs },
+    )
+    return { stdout: formatHookDecision(decision, event), stderr: '', exitCode: 0 }
   } catch (e) {
     // Event known → event-appropriate DENY JSON (never allow-by-accident, never hang).
     return {

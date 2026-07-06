@@ -318,13 +318,18 @@ export interface RuntimeAdapter {
    * settings, or flag disables it). A headless peer has no human to press 1/2, so it HANGS forever
    * (live-observed on a verification session). Owner decision (Артур, 04.07): auto-press YES — peers
    * already run on bypass, so this only restores the pre-2.1.x status quo; a hang is real recurring
-   * harm. Return `{keys, taxonomy, detail}` (the affirmative keys + a class tag + a one-line trace of
-   * WHAT was approved) so the supervisor can press it AND leave a post-hoc log; else null. Match the
-   * FULL signature + cursor position so ordinary content mentioning the phrase never fires. Optional
-   * (codex/router omit it). tui only. FUTURE: replace blind-YES with human approval via Telegram —
-   * see the vault idea "Human-approval подтверждения действий пира через Telegram-кнопки".
+   * harm. Return `{keys, denyKeys, taxonomy, detail}` (the AFFIRMATIVE keys + the taxonomy-specific
+   * DECLINE keys + a class tag + a one-line trace of WHAT was approved) so the supervisor can press
+   * YES on a yolo peer AND leave a post-hoc log, OR route the confirm to the human broker on a gated
+   * peer and press the decision (Unit 4 — allow→keys, deny→denyKeys). `denyKeys` differs by taxonomy
+   * because the modal layouts differ (dangerous-rm is a 2-option "1.Yes/2.No" → `['2','Enter']`;
+   * command-approval is a 3-option "1.Yes/2.Yes,…/3.No" → `['3','Enter']`) — the adapter owns that
+   * layout knowledge, not the supervisor. Match the FULL signature + cursor position so ordinary
+   * content mentioning the phrase never fires; else null. Optional (codex/router omit it). tui only.
+   * Human-approval lands via the daemon broker (docs/17); the vault idea is "Human-approval
+   * подтверждения действий пира через Telegram-кнопки".
    */
-  blockingConfirm?(pane: string): { keys: string[]; taxonomy: string; detail: string } | null
+  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null
 
   /** Is the input surface ready for the first message? (tui: ready marker present
    *  AND startup dialogs gone). Router runtimes return true (no input surface).

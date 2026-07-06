@@ -7,6 +7,7 @@ import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootActi
 // supervisor answers the exact dialogs the launch primitive answers, with byte-correct keys.
 const bytesOf = (a: BootAction): Buffer => (a.kind === 'dialog' ? a.bytes : Buffer.alloc(0))
 const nagBytesOf = (a: NagAction): Buffer => (a.kind === 'dismiss' || a.kind === 'approve' ? a.bytes : Buffer.alloc(0))
+const nagDenyBytesOf = (a: NagAction): Buffer => (a.kind === 'approve' ? a.denyBytes : Buffer.alloc(0))
 
 describe('nextBootAction — codex startup dialogs answered off the model', () => {
   test('dir-trust → Enter (CR)', () => {
@@ -161,6 +162,13 @@ describe('nextNagAction — dangerous-rm circuit-breaker auto-confirmed (owner: 
     expect(nagBytesOf(nextNagAction(claudeAdapter, rmPrompt, { appCursorKeys: true }))).toEqual(Buffer.from('1\r'))
   })
 
+  test('gated DECLINE keys = "2" then Enter (2-option layout: 1.Yes / 2.No)', () => {
+    const a = nextNagAction(claudeAdapter, rmPrompt)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.denyKeys).toEqual(['2', 'Enter']) // dangerous-rm is 2-option → No is "2"
+    expect(nagDenyBytesOf(a)).toEqual(Buffer.from('2\r')) // cursor-mode independent (literal digit)
+  })
+
   test('a mere QUOTE of the breaker (ready composer ❯ below, not on "1. Yes") → none', () => {
     const quote = [
       'the peer explained the guard:',
@@ -224,6 +232,13 @@ describe('nextNagAction — command-approval circuit-breaker (standard 3-option 
 
   test('affirmative bytes are cursor-mode INDEPENDENT (no arrow key)', () => {
     expect(nagBytesOf(nextNagAction(claudeAdapter, cmdApprovalPrompt, { appCursorKeys: true }))).toEqual(Buffer.from('1\r'))
+  })
+
+  test('gated DECLINE keys = "3" then Enter (3-option layout: 1.Yes / 2.Yes,… / 3.No)', () => {
+    const a = nextNagAction(claudeAdapter, cmdApprovalPrompt)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.denyKeys).toEqual(['3', 'Enter']) // command-approval is 3-option → No is "3" (NOT "2", which is "Yes, and…")
+    expect(nagDenyBytesOf(a)).toEqual(Buffer.from('3\r'))
   })
 
   test('file-access variant ("2. Yes, and always allow access …") matches the same signature', () => {

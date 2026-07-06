@@ -389,13 +389,16 @@ export const claudeAdapter: RuntimeAdapter = {
    *      / setting). Auto-Yes keeps a yolo peer alive; a gated peer is routed to the human broker by the
    *      supervisor (Unit 4, mode-aware). Org-policy ("Your organization requires approval for this
    *      tool") is EXCLUDED by the matcher — the owner's org rule is never auto-pressed.
-   * Both press ['1','Enter'] (the position-robust affirmative — cursor already on "1. Yes") and carry a
-   * one-line command/target trace for the post-hoc audit line. NB deliberately NOT a "smart" safe-
-   * decline/escalation — the human-approval path lands in Ф1 (vault "Human-approval …Telegram-кнопки").
+   * Both AFFIRM with ['1','Enter'] (the position-robust affirmative — cursor already on "1. Yes"); the
+   * DECLINE keys differ by layout: dangerous-rm is a 2-option "1.Yes/2.No" → ['2','Enter']; command-
+   * approval is a 3-option "1.Yes/2.Yes,…/3.No" → ['3','Enter']. The supervisor presses `keys` (yolo
+   * auto-Yes / gated-approved) or `denyKeys` (gated-denied / broker fail-safe). Each carries a one-line
+   * command/target trace for the audit + broker content. NB deliberately NOT a "smart" safe-decline —
+   * the gated human-approval path lands via the daemon broker (docs/17, Unit 4).
    */
-  blockingConfirm(pane: string): { keys: string[]; taxonomy: string; detail: string } | null {
-    if (isDangerousRmPrompt(pane)) return { keys: ['1', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
-    if (isCommandApprovalPrompt(pane)) return { keys: ['1', 'Enter'], taxonomy: 'command-approval', detail: commandApprovalDetail(pane) }
+  blockingConfirm(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null {
+    if (isDangerousRmPrompt(pane)) return { keys: ['1', 'Enter'], denyKeys: ['2', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
+    if (isCommandApprovalPrompt(pane)) return { keys: ['1', 'Enter'], denyKeys: ['3', 'Enter'], taxonomy: 'command-approval', detail: commandApprovalDetail(pane) }
     return null
   },
 

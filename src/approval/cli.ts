@@ -3,7 +3,7 @@
 // tray). `approval-hook` is the runtime-installed bridge; `approvals`/`approve`/`deny` are the
 // host answer channel; `approval-mode` is the per-peer gated/yolo toggle.
 
-import { resolveFleetBase } from './hook.ts'
+import { resolveFleetBase } from './brokerClient.ts'
 import { setApprovalMode } from './install.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import { readPeerProfile, approvalModeOf, type ApprovalMode } from '../identity/index.ts'

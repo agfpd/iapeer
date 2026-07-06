@@ -38,12 +38,14 @@ export function nextBootAction(adapter: BootPredicates, viewport: string, enc: K
  *  claudeAdapter satisfies both; codex/router omit them → no action. */
 export interface NagPredicate {
   nagDismissKeys?(pane: string): string[] | null
-  blockingConfirm?(pane: string): { keys: string[]; taxonomy: string; detail: string } | null
+  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null
 }
 
 export type NagAction =
   | { kind: 'dismiss'; keys: string[]; bytes: Buffer } // benign upsell — press keys silently
-  | { kind: 'approve'; keys: string[]; bytes: Buffer; taxonomy: string; detail: string } // circuit-breaker — press keys + LOG
+  // circuit-breaker — press `bytes` to AFFIRM (yolo auto-Yes / gated-approved) or `denyBytes` to DECLINE
+  // (gated-denied / broker fail-safe); LOG the taxonomy + detail either way.
+  | { kind: 'approve'; keys: string[]; bytes: Buffer; denyKeys: string[]; denyBytes: Buffer; taxonomy: string; detail: string }
   | { kind: 'none' }
 
 /**
@@ -59,7 +61,15 @@ export type NagAction =
 export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyEncoding = {}): NagAction {
   const confirm = adapter.blockingConfirm?.(viewport)
   if (confirm && confirm.keys.length)
-    return { kind: 'approve', keys: confirm.keys, bytes: keysToBytes(confirm.keys, enc), taxonomy: confirm.taxonomy, detail: confirm.detail }
+    return {
+      kind: 'approve',
+      keys: confirm.keys,
+      bytes: keysToBytes(confirm.keys, enc),
+      denyKeys: confirm.denyKeys,
+      denyBytes: keysToBytes(confirm.denyKeys, enc),
+      taxonomy: confirm.taxonomy,
+      detail: confirm.detail,
+    }
   const keys = adapter.nagDismissKeys?.(viewport)
   if (keys && keys.length) return { kind: 'dismiss', keys, bytes: keysToBytes(keys, enc) }
   return { kind: 'none' }

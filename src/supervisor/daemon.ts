@@ -31,6 +31,8 @@ import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootPred
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
+import { approvalModeOf, readPeerProfile, type ApprovalMode } from '../identity/index.ts'
+import { routeCircuitBreaker } from './approvalRoute.ts'
 
 /** Resolve a runtime launcher from the host AT CALL TIME — env override (IAPEER_<RT>_BIN, the same
  *  knob the rest of the foundation uses) → PATH lookup — never a baked machine-specific path. Returns
@@ -688,6 +690,30 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // the now-visible composer). Only runs for a runtime whose adapter declares nagDismissKeys.
   const nagAdapter = BOOT_ADAPTERS[runtime] as NagPredicate | undefined
   if (nagAdapter?.nagDismissKeys || nagAdapter?.blockingConfirm) {
+    // ── Unit 4 — approval-mode routing for the circuit-breaker ──────────────────────
+    // Resolve the peer's approval mode ONCE at watcher setup: the profile is stable for the session (a
+    // mid-session flip needs a fresh launch), and re-reading it every tick would hammer the fs. yolo
+    // (default) → the breaker AUTO-presses YES as before (restores the pre-2.1.x bypass status quo,
+    // owner decision). gated → the breaker ROUTES the confirm to the human-approval broker (blocking
+    // POST, inject the human's Yes/No). approvalModeOf is the ONE "absent⇒yolo" default — never
+    // re-derived here; an unreadable/malformed profile → yolo (approvalModeOf(null)), the safe backstop
+    // (a gated peer only launched WITHOUT bypass because the SAME profile read gated moments earlier).
+    let approvalMode: ApprovalMode = 'yolo'
+    try {
+      approvalMode = approvalModeOf(readPeerProfile(opts.cwd ?? runDir))
+    } catch {
+      /* unreadable / malformed profile → yolo default */
+    }
+    // Broker identity: prefer the composed child-env ABI (PEER_PERSONALITY/RUNTIME, invocation.ts), else
+    // derive from the session name (`<runtime>-<personality>`) by STRIPPING the runtime prefix — the
+    // personality itself may carry a '-', so never split on the first dash.
+    const brokerEnv = opts.env ?? process.env
+    const brokerPersonality =
+      brokerEnv.PEER_PERSONALITY?.trim() || (session.startsWith(`${runtime}-`) ? session.slice(runtime.length + 1) : session)
+    const brokerRuntime = brokerEnv.PEER_RUNTIME?.trim() || runtime
+    // In-flight guard: the setInterval keeps firing while a gated POST is outstanding (the modal stays up,
+    // the pane stays stuck), so gate to EXACTLY ONE broker request per wedged modal.
+    let brokerInFlight = false
     let nagFiredMs = 0
     // В60 — stuck-gate: a REAL blocked modal freezes the pty entirely, while a live peer merely
     // RENDERING the modal text (code review / quoted report — the В40 false-fire class) keeps
@@ -712,12 +738,42 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         child.terminal.write(action.bytes)
         nagFiredMs = Date.now()
       } else if (action.kind === 'approve') {
-        // CIRCUIT-BREAKER confirm (e.g. dangerous-rm) — press the affirmative so a headless peer never
-        // hangs on it (owner decision: auto-YES restores the pre-2.1.x bypass status quo). Leave a
-        // post-hoc AUDIT line in the supervisor's own log (console → logPath): WHICH peer (session),
-        // WHAT (taxonomy + the parsed command/target), WHEN (ts). A rare bad rm is then at least visible
-        // after the fact — the interim before human-approval (Telegram) lands. Best-effort log, never
-        // gates the keypress.
+        // CIRCUIT-BREAKER confirm (e.g. dangerous-rm) — a headless peer has no human to press it, so it
+        // hangs forever. What we press depends on the peer's approval MODE (resolved once above):
+        if (approvalMode === 'gated') {
+          // GATED — route the confirm to the human-approval broker (docs/17, Unit 4). A blocking POST
+          // awaits a human's allow/deny (≤ broker 300s); routeCircuitBreaker injects the affirmative on
+          // allow, the taxonomy-specific decline on deny (dangerous-rm=2.No / command-approval=3.No), and
+          // fails safe to DENY on any broker fault. The breaker sits ABOVE the permission layer, so this
+          // is the ONLY interceptor for prompts the runtime hook cannot see (dangerous-rm; rm from a
+          // subprocess). Guarded by brokerInFlight so a re-firing tick never opens a second request.
+          if (brokerInFlight) return
+          brokerInFlight = true
+          void routeCircuitBreaker(
+            { taxonomy: action.taxonomy, detail: action.detail, approveBytes: action.bytes, denyBytes: action.denyBytes },
+            {
+              personality: brokerPersonality,
+              runtime: brokerRuntime,
+              env: brokerEnv,
+              write: b => child.terminal.write(b),
+              log: line => {
+                try {
+                  console.warn(line)
+                } catch {
+                  /* logging must never break the conduit */
+                }
+              },
+            },
+          ).finally(() => {
+            brokerInFlight = false
+            nagFiredMs = Date.now() // just answered → let the (now-clearing) modal repaint away before re-check
+          })
+          return
+        }
+        // YOLO (default) — auto-press YES so a headless peer never hangs (owner decision: restores the
+        // pre-2.1.x bypass status quo). Leave a post-hoc AUDIT line (WHICH peer, WHAT taxonomy + parsed
+        // command/target, WHEN) so a rare bad rm is at least visible after the fact. Best-effort log,
+        // never gates the keypress.
         child.terminal.write(action.bytes)
         nagFiredMs = Date.now()
         try {
