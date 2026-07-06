@@ -25,7 +25,13 @@ import { preSeedCodexHooksTrust, removeCodexHooksTrustUnder, type HooksTrustOutc
 // never asked → the hook never fires → auto-allowed). No class matcher, no drift, no hang: a new
 // tool the runtime prompts for is intercepted the same way. iapeer only seeds the hook + the
 // allow-rule for its own MCP tool (else the runtime would prompt on the peer's own IAP channel).
-/** codex tool-name regex (codex PreToolUse path — structural, live-verify pending). */
+// codex tool-name regex (codex PreToolUse path). VERIFIED LIVE (codex-cli 0.142.5, Unit 3): codex
+// fires `PreToolUse` (NOT PermissionRequest) for tool calls, with `tool_name:"Bash"` for shell exec +
+// `tool_input.command` = the full command; a PreToolUse `deny` HARD-BLOCKS the tool AND the
+// `permissionDecisionReason` reaches the model — even under `sandbox_mode=danger-full-access`
+// (permission_mode=bypassPermissions), so under the gated config the hook is the SOLE gate. `Bash`
+// confirmed live; `apply_patch` (the patch tool) per the codex hooks docs. The extra alternatives are a
+// forward-compatible superset (a future codex rename still matches) — harmless, never over-matches.
 export const CODEX_APPROVAL_MATCHER = '^(Bash|Shell|shell|local_shell|exec|apply_patch|ApplyPatch)$'
 /** The peer's own IAP tool — allow-listed so a gated peer's send_to_peer is not itself gated. */
 export const IAPEER_MCP_ALLOW = 'mcp__iapeer__send_to_peer'

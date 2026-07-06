@@ -37,7 +37,7 @@ Bypass — это **аргумент запуска**, у каждого ран�
 
 **Почему matcher-free `PermissionRequest`, а не `PreToolUse`.** `PermissionRequest` фаярит **только когда permission-конфиг рантайма решил спросить** — вызов, не покрытый allow/deny-правилом. Значит политика *что спрашивать* остаётся на 100% у рантайма: юзер настраивает её обычными permission-правилами (инструмент в `permissions.allow` не спрашивается никогда → хук не фаярит → авто-allow). Нет матчера классов, который дрейфует, нет проскакивающего нового инструмента, нет зависания. iapeer лишь сеет хук + одно allow-правило для собственного MCP-инструмента пира.
 
-**codex** (хук `PreToolUse` — структурно; живая верификация ожидается):
+**codex** (хук `PreToolUse` — проверено живьём, codex-cli 0.142.5):
 
 | # | Поверхность | yolo | gated |
 |---|---|---|---|
@@ -62,7 +62,7 @@ codex-хук матчится по регекспу имён инструмен�
 У обоих рантаймов есть Claude-совместимая **hook-система**, которая перехватывает подтверждение программно и возвращает `allow`/`deny` + причину + структурное содержимое действия. Это первичный механизм. **Экранный pty-скрейп — бэкстоп только для одного класса** — claude-circuit-breaker `dangerous-rm`, который живёт *выше* permission-слоя и не виден ни одному хуку.
 
 - **claude `PermissionRequest`** — на stdin `{tool_name, tool_input, …}`; хук печатает `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow|deny","message":"…"}}}`. `deny` доносит `message` до модели. Фаярит только на вопрос-достойных вызовах.
-- **codex `PreToolUse`** — тот же shape stdin; печатает `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow|deny","permissionDecisionReason":"…"}}`. `exit 2` (+ stderr) тоже отклоняет.
+- **codex `PreToolUse`** — тот же shape stdin; печатает `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow|deny","permissionDecisionReason":"…"}}`. `exit 2` (+ stderr) тоже отклоняет. Проверено живьём (0.142.5): codex фаярит `PreToolUse` (не `PermissionRequest`) на tool-вызовах с `tool_name:"Bash"` для shell; `deny` жёстко блокирует тул и причина доходит до модели даже под `sandbox_mode=danger-full-access` — так что под gated-конфигом (danger-full-access + on-request → `permission_mode=bypassPermissions`) хук — ЕДИНСТВЕННЫЙ гейт.
 - **супервизор circuit-breaker** — гард `dangerous-rm`/`rmdir` claude (и стандартный command-approval-промпт, который показывает no-bypass-сессия) — это TUI-селект, невидимый хуку. pty-супервизор читает его со своей авторитетной модели и под gated POSTит брокеру (ниже); под yolo авто-жмёт YES с аудит-строкой.
 
 Хук-бинарь — сабкоманда `iapeer approval-hook`: читает hook-JSON рантайма со stdin, резолвит `PEER_PERSONALITY`/`PEER_RUNTIME` из session-env и URL демона из `router.json`, POSTит блокирующий запрос брокеру и печатает рантайм-специфичный JSON решения.

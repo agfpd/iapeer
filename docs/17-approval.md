@@ -37,7 +37,7 @@ The bypass is a **launch argument**, different per runtime, and the mode is a co
 
 **Why matcher-free `PermissionRequest`, not `PreToolUse`.** `PermissionRequest` fires **only when the runtime's permission config decided to prompt** — a call not covered by an allow/deny rule. So the policy of *what to ask* stays 100% at the runtime: a user tunes it with ordinary permission rules (a tool in `permissions.allow` is never asked → the hook never fires → auto-allowed). No class matcher to drift, no new tool slipping through, no hang. iapeer only seeds the hook + the one allow-rule for the peer's own MCP tool.
 
-**codex** (`PreToolUse` hook — structural; live-verify pending):
+**codex** (`PreToolUse` hook — verified live, codex-cli 0.142.5):
 
 | # | Surface | yolo | gated |
 |---|---|---|---|
@@ -62,7 +62,7 @@ All surfaces are read/applied **at session start**. A **live session keeps its l
 Both runtimes carry a Claude-compatible **hook** system that intercepts an approval programmatically and returns `allow`/`deny` + a reason + the structured action content. That is the primary mechanism. **pty screen-scrape is a backstop for one class only** — claude's `dangerous-rm` circuit-breaker, which sits *above* the permission layer and no hook can see.
 
 - **claude `PermissionRequest`** — stdin carries `{tool_name, tool_input, …}`; the hook prints `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow|deny","message":"…"}}}`. A `deny` carries `message` to the model. Fires only on prompt-worthy calls.
-- **codex `PreToolUse`** — same stdin shape; prints `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow|deny","permissionDecisionReason":"…"}}`. `exit 2` (+ stderr) also denies.
+- **codex `PreToolUse`** — same stdin shape; prints `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow|deny","permissionDecisionReason":"…"}}`. `exit 2` (+ stderr) also denies. Verified live (0.142.5): codex fires `PreToolUse` (not `PermissionRequest`) for tool calls with `tool_name:"Bash"` for shell; a `deny` hard-blocks the tool and the reason reaches the model even under `sandbox_mode=danger-full-access` — so under the gated config (danger-full-access + on-request → `permission_mode=bypassPermissions`) the hook is the SOLE gate.
 - **supervisor circuit-breaker** — claude's `dangerous-rm`/`rmdir` guard (and the standard command-approval prompt a no-bypass session shows) is a TUI select the hook never sees. The pty supervisor reads it off its authoritative model and, under gated, POSTs it to the broker (below); under yolo it auto-presses YES with an audit line.
 
 The hook binary is the `iapeer approval-hook` subcommand: it reads the runtime's hook JSON on stdin, resolves `PEER_PERSONALITY`/`PEER_RUNTIME` from its session env and the daemon URL from `router.json`, POSTs a blocking request to the broker, and prints the runtime-appropriate decision JSON.
