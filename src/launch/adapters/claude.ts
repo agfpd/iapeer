@@ -23,7 +23,7 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
-import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 import { lastTimestampedEntryMs } from './transcriptTail.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,9 +228,16 @@ export const claudeAdapter: RuntimeAdapter = {
    * NO currency — no marketplace/install/update on this path.
    */
   buildArgv(spec: LaunchSpec, cfg: LaunchAdapterConfig): string[] {
+    // Human-approval mode (docs/17). yolo (default) = '--dangerously-skip-permissions'
+    // (headless bypass, current fleet behavior). gated = NO bypass + an EXPLICIT
+    // '--permission-mode default' so the base is deterministic (never inherits an
+    // acceptEdits/bypass defaultMode from settings): the runtime's permission layer is
+    // active as a fail-SAFE backstop, and the separately-installed PreToolUse hook is
+    // the primary interceptor (it fires regardless of mode — verified live 2.1.201).
+    const gated = spec.approvalMode === 'gated'
     return [
       cfg.claudeBin,
-      '--dangerously-skip-permissions',
+      ...(gated ? ['--permission-mode', 'default'] : ['--dangerously-skip-permissions']),
       '--disallowedTools',
       'AskUserQuestion',
       '--add-dir',
@@ -350,12 +357,20 @@ export const claudeAdapter: RuntimeAdapter = {
    *   - '❯' (U+276F) — the TUI input-prompt glyph, present only at the ready
    *     input row, never in the splash art (claude-start.sh:357-360).
    *   - 'bypass permissions on' — the banner --dangerously-skip-permissions
-   *     emits once booted past the splash.
+   *     emits once booted past the splash (YOLO mode only).
    *   - none of the boot dialogs present (a dialog row can also carry '❯').
+   *
+   * GATED (docs/17): the peer launches WITHOUT --dangerously-skip-permissions, so the
+   * 'bypass permissions on' banner is ABSENT (verified live 2.1.201 — the no-bypass
+   * ready pane is '❯ Try "edit <filepath> to…"', no banner). The ready signal is then
+   * the composer '❯' with every boot dialog cleared. This branch is evaluated ONLY at
+   * BOOT (waitHostReady / the boot-driver), before any tool runs — so a mid-session
+   * '❯'-bearing modal (dangerous-rm / nag) cannot false-positive it.
    */
-  isInputReady(pane: string): boolean {
+  isInputReady(pane: string, mode?: ApprovalMode): boolean {
     if (anyBootDialog(pane)) return false
-    return pane.includes('❯') && pane.includes('bypass permissions on')
+    if (!pane.includes('❯')) return false
+    return mode === 'gated' ? true : pane.includes('bypass permissions on')
   },
 
   /**

@@ -76,6 +76,47 @@ describe('codexAdapter.buildArgv', () => {
   })
 })
 
+describe('approval-mode toggle — buildArgv + ready gate (docs/17)', () => {
+  test('claude yolo (default): --dangerously-skip-permissions, NO --permission-mode', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w' }), cfg)
+    expect(argv).toContain('--dangerously-skip-permissions')
+    expect(argv).not.toContain('--permission-mode')
+  })
+  test('claude gated: NO bypass, explicit --permission-mode default', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w', approvalMode: 'gated' }), cfg)
+    expect(argv).not.toContain('--dangerously-skip-permissions')
+    expect(argv.join(' ')).toContain('--permission-mode default')
+    // still headless-safe: AskUserQuestion stays disallowed in BOTH modes (owner policy)
+    expect(argv.join(' ')).toContain('--disallowedTools AskUserQuestion')
+  })
+  test('codex yolo (default): the YOLO bypass flag', () => {
+    const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w' }), cfg)
+    expect(argv).toContain('--dangerously-bypass-approvals-and-sandbox')
+    expect(argv.join(' ')).not.toContain('approval_policy')
+  })
+  test('codex gated: NO bypass, approvals on + sandbox off (danger-full-access)', () => {
+    const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w', approvalMode: 'gated' }), cfg)
+    expect(argv).not.toContain('--dangerously-bypass-approvals-and-sandbox')
+    expect(argv.join(' ')).toContain('approval_policy=on-request')
+    expect(argv.join(' ')).toContain('sandbox_mode=danger-full-access')
+  })
+  test('claude isInputReady is mode-aware: gated ready pane has NO bypass banner', () => {
+    const gatedReady = 'some output\n❯ Try "edit <filepath> to..."\n' // no "bypass permissions on"
+    const yoloReady = 'some output\n❯ \nbypass permissions on'
+    // yolo (default): needs the banner
+    expect(claudeAdapter.isInputReady(gatedReady)).toBe(false)
+    expect(claudeAdapter.isInputReady(yoloReady)).toBe(true)
+    // gated: the composer '❯' with boot dialogs cleared is enough (no banner)
+    expect(claudeAdapter.isInputReady(gatedReady, 'gated')).toBe(true)
+    expect(claudeAdapter.isInputReady(yoloReady, 'gated')).toBe(true)
+    // a boot dialog up → NOT ready, in either mode
+    const trustDialog = '❯ 1. Yes, I trust this folder\n  2. No, exit\ntrust this folder'
+    expect(claudeAdapter.isInputReady(trustDialog, 'gated')).toBe(false)
+    // no composer glyph at all → not ready
+    expect(claudeAdapter.isInputReady('booting, no prompt yet', 'gated')).toBe(false)
+  })
+})
+
 describe('codexAdapter.isInputReady', () => {
   test('fresh boot: splash + composer → true', () => {
     const pane = [

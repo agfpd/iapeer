@@ -19,7 +19,7 @@ import { parseSessionName } from '../core/socket.ts'
 import type { TmuxRuntime } from '../core/constants.ts'
 import { paneLogViewport } from './readyGateModel.ts'
 import type { LaunchInvocation } from './invocation.ts'
-import type { RuntimeAdapter } from './types.ts'
+import type { ApprovalMode, RuntimeAdapter } from './types.ts'
 
 /** Match the tmux launch geometry (index.ts new-session -x 220 -y 50) so the served child + the
  *  pane-log model render at the same size launch reads readiness at. */
@@ -154,7 +154,7 @@ export async function startPtyHost(b: {
  * 2 s cadence + bootDeadline.
  */
 export async function waitHostReady(
-  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; paneLogStartByte?: number; env?: NodeJS.ProcessEnv },
+  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; paneLogStartByte?: number; approvalMode?: ApprovalMode; env?: NodeJS.ProcessEnv },
   sleep: (ms: number) => Promise<void>,
 ): Promise<boolean> {
   const log = `${b.logDir}/${b.identity}.log`
@@ -168,7 +168,7 @@ export async function waitHostReady(
     await sleep(2000)
     if (!hostSessionAlive(b.identity, b.env)) return false
     const view = await paneLogViewport(log, HOST_COLS, HOST_ROWS, b.paneLogStartByte ?? 0)
-    if (view && b.adapter.isInputReady(view)) return true
+    if (view && b.adapter.isInputReady(view, b.approvalMode)) return true
   }
   return false
 }

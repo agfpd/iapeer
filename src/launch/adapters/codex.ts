@@ -43,7 +43,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
 import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
-import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Boot dialog markers (watcher.codexUpdate/DirTrust/HooksReview, 253-261)
@@ -199,6 +199,13 @@ export const codexAdapter: RuntimeAdapter = {
    * NO currency — no marketplace/install/update on this path.
    */
   buildArgv(spec: LaunchSpec, cfg: LaunchAdapterConfig): string[] {
+    // Human-approval mode (docs/17). yolo (default) = the YOLO bypass flag (current
+    // fleet behavior). gated = NO bypass + `-c approval_policy=on-request` (the model
+    // asks before acting → the PreToolUse/PermissionRequest hook intercepts) with
+    // `-c sandbox_mode=danger-full-access` — gated gates APPROVALS, it does NOT add a
+    // sandbox (workspace-write would sever the loopback-MCP send_to_peer + vault writes;
+    // sandboxing is a separate axis, not v1). Session-scoped `-c`, never a host-config edit.
+    const gated = spec.approvalMode === 'gated'
     return [
       cfg.codexBin,
       ...(spec.resume ? ['resume', '--last'] : []),
@@ -208,7 +215,9 @@ export const codexAdapter: RuntimeAdapter = {
       ...(spec.systemPromptFile
         ? ['-c', `model_instructions_file=${spec.systemPromptFile}`]
         : []),
-      '--dangerously-bypass-approvals-and-sandbox',
+      ...(gated
+        ? ['-c', 'approval_policy=on-request', '-c', 'sandbox_mode=danger-full-access']
+        : ['--dangerously-bypass-approvals-and-sandbox']),
       ...(spec.extraArgs ?? []),
     ]
   },
@@ -261,7 +270,9 @@ export const codexAdapter: RuntimeAdapter = {
    * composer, and the ready-gate still verifies a real model turn (activity
    * mtime advance) before declaring READY.
    */
-  isInputReady(pane: string): boolean {
+  // mode is accepted for interface parity but ignored: codex's ready marker (the '› '
+  // composer arrow) is the same whether or not it launched with the YOLO bypass flag.
+  isInputReady(pane: string, _mode?: ApprovalMode): boolean {
     if (pane.includes('Press enter to continue')) return false
     return pane.split(/\r?\n/).some(line => line.trimStart().startsWith('› '))
   },

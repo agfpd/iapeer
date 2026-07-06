@@ -202,7 +202,7 @@ export const launch: LaunchFn = async (
       // the SAME shape as the tmux boot/deliver/ready-gate below, with host equivalents.
       const baselineMtime = adapter.newestActivityMtime(cwd) ?? 0
       const isReady = await waitHostReady(
-        { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte, env },
+        { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte, approvalMode: spec.approvalMode, env },
         sleep,
       )
       if (!isReady) return fail(identity, 'never-became-ready (hosted: supervisor input surface not ready)')

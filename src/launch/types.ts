@@ -14,7 +14,12 @@
 // be implemented independently against a known contract.
 
 import type { Intelligence, Runtime } from '../core/constants.ts'
+import type { ApprovalMode } from '../identity/index.ts'
 import type { PublicPeerSummary } from '../registry/index.ts'
+
+// Re-export so the adapters (which already import their contract types from here) get
+// ApprovalMode from ONE place rather than reaching into identity directly.
+export type { ApprovalMode }
 
 export type { PublicPeerSummary } from '../registry/index.ts'
 
@@ -159,6 +164,12 @@ export interface LaunchSpec {
    *  less throwaway may omit it, but an adapter that declares requiresIntelligence
    *  then refuses (cannot confirm the required nature). */
   intelligence?: Intelligence
+  /** Human-approval mode (docs/17): `yolo` (default/omitted) launches with the
+   *  runtime bypass flag (current fleet behavior); `gated` launches WITHOUT bypass
+   *  and swaps in the gated permission/approval config, so the runtime's blocking
+   *  requests route to a human via the daemon broker (a PreToolUse hook, installed
+   *  separately at toggle time, is the interceptor). buildArgv reads it. */
+  approvalMode?: ApprovalMode
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,8 +327,11 @@ export interface RuntimeAdapter {
   blockingConfirm?(pane: string): { keys: string[]; taxonomy: string; detail: string } | null
 
   /** Is the input surface ready for the first message? (tui: ready marker present
-   *  AND startup dialogs gone). Router runtimes return true (no input surface). */
-  isInputReady(pane: string): boolean
+   *  AND startup dialogs gone). Router runtimes return true (no input surface).
+   *  `mode` (default yolo) lets a runtime whose READY marker differs by approval mode
+   *  pick the right one — claude's yolo ready banner ('bypass permissions on') is
+   *  absent under gated (launched WITHOUT --dangerously-skip-permissions). */
+  isInputReady(pane: string, mode?: ApprovalMode): boolean
 
   /** Newest activity-proxy FILE mtime — used by the READY-GATE (it waits for ANY transcript write past
    *  baseline = "the model produced its first turn"). NOT for idle accounting: a live session re-saves

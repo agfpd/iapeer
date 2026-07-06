@@ -1124,6 +1124,9 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       // Carry the peer's nature so the launch primitive can enforce an adapter's
       // intelligence gate (telegram requires natural). From the registry record.
       intelligence: peer.intelligence,
+      // Human-approval mode from the LOCAL profile (docs/17): drives the runtime
+      // bypass flag + gated permission/approval config in buildArgv. Default yolo.
+      approvalMode: peerApprovalMode(cwd),
     }
     const launchCfg: LaunchConfig = {
       claudeBin: cfg.claudeBin,
