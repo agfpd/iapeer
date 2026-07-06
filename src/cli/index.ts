@@ -1281,6 +1281,11 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|status',
     desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; install activates it (installs SwiftBar when absent). See docs/16.',
   },
+  { sig: 'approval-mode <peer> [gated|yolo]', desc: 'read/flip a peer\'s human-approval mode (docs/17): yolo=current bypass; gated=blocking runtime approvals routed to a human. Persists + brings runtime surfaces to the mode; applies on next fresh session' },
+  { sig: 'approvals [--json]', desc: 'list pending human-approval requests (verbatim action content); the host answer channel to the daemon broker' },
+  { sig: 'approve <id>', desc: 'approve a pending request — the decision clears it in every channel' },
+  { sig: 'deny <id> [reason]', desc: 'deny a pending request; the reason reaches the model' },
+  { sig: 'approval-hook', desc: '(runtime-installed) PreToolUse bridge: stdin hook JSON → broker → decision JSON. Not run by hand' },
 ]
 
 /** Greedy word-wrap to `width` columns. A token longer than `width` keeps its own
@@ -2579,6 +2584,47 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
               'usage: iapeer tray <render [--stream] | cmd <command> <peer> [runtime] | install [--plugin-only] | uninstall | status>',
             )
         }
+      }
+      case 'approval-hook': {
+        // (runtime-installed, docs/17) the PreToolUse bridge: stdin = the runtime's hook JSON,
+        // stdout = the decision JSON (EXACTLY — the runtime parses it), blocking on the broker.
+        // Never run by hand. Fail-safe: any error prints a DENY (expressed in JSON, exit 0).
+        const { runApprovalHook } = await import('../approval/hook.ts')
+        const stdin = await Bun.stdin.text()
+        const r = await runApprovalHook(stdin, { env })
+        out(`${r.output}\n`)
+        return r.exitCode
+      }
+      case 'approvals': {
+        const { approvalsList } = await import('../approval/cli.ts')
+        const r = await approvalsList(flags.json === true, env)
+        out(r.text)
+        return r.code
+      }
+      case 'approve':
+      case 'deny': {
+        const id = positionals[0]
+        if (!id) return argErr(errOut, `${verb} needs an id — usage: iapeer ${verb} <id>${verb === 'deny' ? ' [reason]' : ''} (list: iapeer approvals)`)
+        const { resolveApproval } = await import('../approval/cli.ts')
+        const reason = verb === 'deny' ? positionals.slice(1).join(' ') || undefined : undefined
+        const approver = typeof flags.approver === 'string' ? flags.approver : undefined
+        const r = await resolveApproval(id, verb, { reason, approver }, env)
+        out(r.text)
+        return r.code
+      }
+      case 'approval-mode': {
+        const peer = positionals[0]
+        if (!peer) return argErr(errOut, 'approval-mode needs a peer — usage: iapeer approval-mode <peer> [gated|yolo] [--now]')
+        const modeArg = positionals[1]
+        if (modeArg && modeArg !== 'gated' && modeArg !== 'yolo') return argErr(errOut, 'approval-mode: mode must be gated | yolo (omit to read the current mode)')
+        const { approvalModeCli } = await import('../approval/cli.ts')
+        const r = approvalModeCli(peer, modeArg as 'gated' | 'yolo' | undefined, env)
+        out(r.text)
+        if (r.code === 0 && modeArg && flags.now === true) {
+          const o = await newPeer(peer, undefined, { env })
+          out(`applied now: fresh session (${o.action})\n`)
+        }
+        return r.code
       }
       default: {
         // `iapeer <runtime>` (launch) — folder-launch the cwd's peer, ALWAYS fresh. On a TTY this is
