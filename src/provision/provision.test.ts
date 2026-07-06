@@ -127,6 +127,38 @@ describe('provisionPeer', () => {
       provisionPeer({ cwd: join(root, 'some-dir'), runtime: 'notifier', personality: 'timer', env }),
     ).rejects.toThrow(/must equal the normalized cwd basename|1:1/)
   })
+
+  // ─── A1: faceless absent service bot on a channel runtime ──────────────────
+  test('A1: telegram + intelligence=absent → BOTH the local profile AND the registry are absent (no split-brain)', async () => {
+    const root = mkTmp()
+    const { dir: bindir } = fakeBinDir('telegram-runtime')
+    const env = envFor(root, bindir)
+    const cwd = join(root, 'approval')
+
+    const r = await provisionPeer({ cwd, runtime: 'telegram', intelligence: 'absent', env })
+
+    expect(r.intelligence).toBe('absent')
+    expect(readPeerProfile(cwd)!.intelligence).toBe('absent') // LOCAL profile absent, not the telegram natural default
+    expect(findPeer(readPeersIndex({ env }), 'approval')?.intelligence).toBe('absent') // registry agrees
+  })
+
+  test('A1: telegram WITHOUT an explicit nature stays natural (existing peers unchanged)', async () => {
+    const root = mkTmp()
+    const { dir: bindir } = fakeBinDir('telegram-runtime')
+    const env = envFor(root, bindir)
+    const cwd = join(root, 'arthur')
+    const r = await provisionPeer({ cwd, runtime: 'telegram', env })
+    expect(r.intelligence).toBe('natural')
+    expect(readPeerProfile(cwd)!.intelligence).toBe('natural')
+  })
+
+  test('A1: an out-of-set nature fails LOUD (artificial on telegram = an LLM agent on a human channel)', async () => {
+    const root = mkTmp()
+    const { dir: bindir } = fakeBinDir('telegram-runtime')
+    const env = envFor(root, bindir)
+    const cwd = join(root, 'bot')
+    await expect(provisionPeer({ cwd, runtime: 'telegram', intelligence: 'artificial', env })).rejects.toThrow(/not valid for runtime "telegram"/)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

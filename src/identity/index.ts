@@ -11,8 +11,10 @@ import {
   IAPEER_DIR,
   PEER_PROFILE_FILE,
   NAME_RE,
+  allowedIntelligencesForRuntime,
   defaultIntelligenceForRuntime,
   isInfraRuntime,
+  isIntelligenceAllowedForRuntime,
   isRuntime,
   isValidName,
   normalizeIntelligenceValue,
@@ -131,6 +133,12 @@ export interface EnsurePeerProfileOptions {
    *  always-on plist so launchd's minimal PATH resolves it. Forwarded to
    *  installAlwaysOnPlist; ignored for warm-on-demand runtimes. */
   runtimeBin?: string
+  /** Explicit peer nature (natural/absent/artificial). OPT-IN override of the runtime
+   *  default (defaultIntelligenceForRuntime): a channel runtime defaults `natural` but may be
+   *  provisioned `absent` for a FACELESS SERVICE bot (e.g. a Telegram approval-card bot).
+   *  Validated against allowedIntelligencesForRuntime — an out-of-set value fails LOUD. Absent
+   *  (undefined) ⇒ the runtime default (unchanged for every existing peer). */
+  intelligence?: Intelligence
   /** В36 — peer description, persisted into the LOCAL profile (the source of truth the
    *  registry is reindexed FROM). Writing it only to the registry made it a stale copy:
    *  the first reindexFromLocals (addRuntime on a dual-runtime create, connect telegram,
@@ -503,6 +511,21 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
   const peers = options.peers ?? []
   ensureLocalIapScaffold(cwd)
   const discoveredRuntimes = discoverPeerRuntimes(cwd, options.runtime)
+  // Nature = the EXPLICIT intelligence when supplied (validated against the runtime's allowed
+  // set — an out-of-set value, e.g. artificial on telegram, fails LOUD), else the runtime
+  // default. This is where a FACELESS SERVICE bot (absent) on a channel runtime becomes
+  // first-class (docs/Идентичность); an omitted intelligence keeps every existing peer's
+  // default nature unchanged.
+  const resolvedIntelligence = (rt: Runtime): Intelligence => {
+    const explicit = options.intelligence
+    if (explicit === undefined) return defaultIntelligenceForRuntime(rt)
+    if (!isIntelligenceAllowedForRuntime(rt, explicit)) {
+      throw new IapError(
+        `intelligence "${explicit}" is not valid for runtime "${rt}" — allowed: ${allowedIntelligencesForRuntime(rt).join(', ')}`,
+      )
+    }
+    return explicit
+  }
   const existing = readPeerProfile(cwd)
   if (!existing) {
     let personality: string
@@ -550,7 +573,7 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
       // В36 — the description lands in the LOCAL profile at birth (source of truth);
       // the registry row is a projection of this file, not the other way around.
       description: options.description?.trim() ?? '',
-      intelligence: defaultIntelligenceForRuntime(options.runtime),
+      intelligence: resolvedIntelligence(options.runtime),
     }
     ensureLocalRuntimeScopes(cwd, profile.runtimes)
     // INFRA runtime → provision the always-on launchd plist that holds it live.
@@ -607,7 +630,10 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
       runtimeBin: options.runtimeBin,
       env: options.env,
     })
-    intelligence = defaultIntelligenceForRuntime(options.runtime)
+    // Re-provision honors an EXPLICIT nature (a manifest-declared absent service bot survives
+    // update-runtime re-provision), else the runtime default (the legacy vocab-flip this fix
+    // preserved). resolvedIntelligence validates the explicit against the runtime's allowed set.
+    intelligence = resolvedIntelligence(options.runtime)
   }
   // В36 — an explicit description on RE-provision updates the local profile too (H1 in
   // writePeerProfileAtomic still guards: absent/empty never wipes an existing value).

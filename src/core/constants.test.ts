@@ -4,7 +4,35 @@
 // session created on the override dir, the resolver scanning /tmp → false offline).
 
 import { describe, expect, test } from 'bun:test'
-import { DEFAULT_SOCK_DIR, resolveSockDir } from './constants.ts'
+import {
+  DEFAULT_SOCK_DIR,
+  allowedIntelligencesForRuntime,
+  defaultIntelligenceForRuntime,
+  isIntelligenceAllowedForRuntime,
+  resolveSockDir,
+} from './constants.ts'
+
+describe('allowedIntelligencesForRuntime (A1 — identity ⊥ channel)', () => {
+  test('channel runtimes carry natural OR absent (human OR faceless service bot)', () => {
+    expect(allowedIntelligencesForRuntime('telegram')).toEqual(['natural', 'absent'])
+    expect(allowedIntelligencesForRuntime('voicetalk')).toEqual(['natural', 'absent'])
+  })
+  test('service runtimes carry absent only; agentic carry artificial only', () => {
+    expect(allowedIntelligencesForRuntime('notifier')).toEqual(['absent'])
+    expect(allowedIntelligencesForRuntime('claude')).toEqual(['artificial'])
+    expect(allowedIntelligencesForRuntime('codex')).toEqual(['artificial'])
+  })
+  test('the DEFAULT stays the first allowed — existing peers unchanged, absent is OPT-IN', () => {
+    expect(defaultIntelligenceForRuntime('telegram')).toBe('natural') // arthur & co keep natural
+    expect(allowedIntelligencesForRuntime('telegram')[0]).toBe(defaultIntelligenceForRuntime('telegram'))
+  })
+  test('membership: absent allowed on a channel, artificial (LLM agent) never', () => {
+    expect(isIntelligenceAllowedForRuntime('telegram', 'absent')).toBe(true)
+    expect(isIntelligenceAllowedForRuntime('telegram', 'natural')).toBe(true)
+    expect(isIntelligenceAllowedForRuntime('telegram', 'artificial')).toBe(false)
+    expect(isIntelligenceAllowedForRuntime('claude', 'absent')).toBe(false)
+  })
+})
 
 describe('resolveSockDir', () => {
   test('no override → DEFAULT_SOCK_DIR (/tmp, contract sock convention)', () => {

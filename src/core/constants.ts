@@ -65,6 +65,27 @@ export function defaultIntelligenceForRuntime(runtime: string): Intelligence {
   return 'artificial'
 }
 
+/**
+ * The intelligences a runtime may LEGITIMATELY carry (the single Ф0 source; provision
+ * validates against it, the launch gate enforces it). Identity (natural/absent/artificial)
+ * is ORTHOGONAL to the channel: a human-channel runtime can carry a HUMAN (natural) OR a
+ * FACELESS SERVICE bot (absent) — e.g. a Telegram approval-card bot — but never an LLM agent
+ * (artificial) on that channel. A service-only runtime carries services (absent). An agentic
+ * runtime carries an LLM (artificial). The DEFAULT (defaultIntelligenceForRuntime) stays the
+ * first of each set, so an existing peer with no explicit nature is unchanged — `absent` on a
+ * channel runtime is strictly OPT-IN (an explicit `--intelligence absent` / manifest decl).
+ */
+export function allowedIntelligencesForRuntime(runtime: string): readonly Intelligence[] {
+  if (NATURAL_RUNTIMES.has(runtime)) return ['natural', 'absent']
+  if (ABSENT_RUNTIMES.has(runtime)) return ['absent']
+  return ['artificial']
+}
+
+/** Is `intelligence` a legitimate nature for `runtime`? (provision fail-loud + launch gate.) */
+export function isIntelligenceAllowedForRuntime(runtime: string, intelligence: Intelligence): boolean {
+  return allowedIntelligencesForRuntime(runtime).includes(intelligence)
+}
+
 // Infra runtimes are ALWAYS-ON (held live by launchd KeepAlive), as opposed to the
 // warm-on-demand agentic runtimes (claude/codex, woken by the daemon). Liveness is
 // a property of the RUNTIME, not the personality (zone Идентичность). Infra runtimes

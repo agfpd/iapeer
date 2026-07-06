@@ -89,6 +89,11 @@ export async function provisionPeer(opts: ProvisionPeerOptions): Promise<Provisi
     peers,
     personality: opts.personality,
     runtimeBin,
+    // The EXPLICIT nature now reaches the LOCAL profile too (A1) — previously it landed only
+    // in the registry upsert below, so a `--intelligence absent` telegram bot got a natural
+    // local profile (split-brain) and its plist crash-looped the natural gate. Validated
+    // against the runtime's allowed set inside ensurePeerProfile.
+    intelligence: opts.intelligence,
     // В36 — description goes into the LOCAL profile (source of truth); the registry
     // upsert below then persists a value reindexFromLocals can no longer wipe.
     description: opts.description,

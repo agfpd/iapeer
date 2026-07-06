@@ -131,14 +131,16 @@ export const launch: LaunchFn = async (
   const { identity, socketPath: sock, cwd } = spec
   const env = cfg.env ?? process.env
 
-  // (0) Intelligence gate (fail-loud BEFORE any tmux work): an adapter that declares
-  //     requiresIntelligence (telegram → 'natural') refuses a peer whose nature does
-  //     not match — and refuses too when the nature is unknown (cannot confirm). Ports
-  //     the persistent-peer FATAL human-channel guard (docs/Рантайм-адаптеры).
-  if (adapter.requiresIntelligence && spec.intelligence !== adapter.requiresIntelligence) {
+  // (0) Intelligence gate (fail-loud BEFORE any bring-up work): an adapter that declares
+  //     allowedIntelligences (telegram/voicetalk → ['natural','absent']) refuses a peer whose
+  //     nature is not IN the set — and refuses too when the nature is unknown (cannot confirm).
+  //     A channel runtime carries a human (natural) OR a faceless service bot (absent), never an
+  //     LLM agent (artificial). Ports the persistent-peer FATAL human-channel guard, relaxed to
+  //     first-class faceless service bots (docs/Рантайм-адаптеры).
+  if (adapter.allowedIntelligences && (spec.intelligence == null || !adapter.allowedIntelligences.includes(spec.intelligence))) {
     return fail(
       identity,
-      `runtime "${spec.runtime}" requires intelligence=${adapter.requiresIntelligence}, ` +
+      `runtime "${spec.runtime}" requires intelligence ∈ {${adapter.allowedIntelligences.join(', ')}}, ` +
         `peer "${spec.personality}" is ${spec.intelligence ?? 'unknown'} — refusing to launch`,
     )
   }

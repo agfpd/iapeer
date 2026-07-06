@@ -160,9 +160,9 @@ export interface LaunchSpec {
   /** Free-form extra CLI args (PEER_START_ARGS). */
   extraArgs?: string[]
   /** Peer intelligence (artificial/natural/absent). Used to enforce an adapter's
-   *  intelligence gate at launch (telegram requires natural). Optional: a doctrine-
-   *  less throwaway may omit it, but an adapter that declares requiresIntelligence
-   *  then refuses (cannot confirm the required nature). */
+   *  intelligence gate at launch (telegram allows natural|absent). Optional: a doctrine-
+   *  less throwaway may omit it, but an adapter that declares allowedIntelligences
+   *  then refuses (cannot confirm the nature is in the set). */
   intelligence?: Intelligence
   /** Human-approval mode (docs/17): `yolo` (default/omitted) launches with the
    *  runtime bypass flag (current fleet behavior); `gated` launches WITHOUT bypass
@@ -273,13 +273,14 @@ export interface RuntimeAdapter {
   deliveryConfirm?: 'transcript' | 'socket-ack'
 
   /**
-   * If set, launch REFUSES unless the peer's intelligence equals this value
-   * (fail-loud). telegram → 'natural' — it is a human channel; launching an
-   * artificial/absent peer on it is a category error (the persistent-peer path held
-   * a FATAL guard in two places). Most adapters omit it (no nature gate). Source of intelligence →
+   * If set, launch REFUSES unless the peer's intelligence is IN this set (fail-loud —
+   * also when the nature is unknown). A channel runtime carries a HUMAN (natural) OR a
+   * FACELESS SERVICE bot (absent) but never an LLM agent (artificial): telegram/voicetalk →
+   * ['natural','absent'] (sourced from allowedIntelligencesForRuntime — the single Ф0 truth).
+   * Most adapters omit it (no nature gate — claude/codex/notifier). Source of intelligence →
    * docs/Идентичность; enforced by the launch primitive against LaunchSpec.intelligence.
    */
-  requiresIntelligence?: Intelligence
+  allowedIntelligences?: readonly Intelligence[]
 
   /**
    * Build the runtime argv: binary + flags, wiring systemPromptFile per-runtime

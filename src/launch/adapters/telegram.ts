@@ -23,6 +23,7 @@
 // that is install-time (blueprint §0.6 fast-wake), not session bring-up.
 
 import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import { allowedIntelligencesForRuntime } from '../../core/constants.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // telegramAdapter
@@ -38,13 +39,14 @@ export const telegramAdapter: RuntimeAdapter = {
   deliveryMarkers: { promptGlyphs: [] },
 
   /**
-   * telegram is a HUMAN channel — launch REFUSES a non-natural peer (fail-loud).
-   * Porting the persistent-peer FATAL guard (it stood in two places): a peer with
-   * intelligence artificial/absent must never be brought up on telegram (it would
-   * route a human's bot to an agent/script). The launch primitive enforces this
-   * against LaunchSpec.intelligence; source of intelligence → docs/Идентичность.
+   * telegram carries a HUMAN (natural) OR a FACELESS SERVICE bot (absent) — but never an
+   * LLM agent (artificial), which would route a human's channel to an agent/script. Launch
+   * REFUSES anything outside this set (fail-loud), the persistent-peer FATAL guard relaxed to
+   * first-class faceless service bots (e.g. a Telegram approval-card bot). Sourced from the
+   * single Ф0 truth (allowedIntelligencesForRuntime); enforced by the launch primitive against
+   * LaunchSpec.intelligence. Source of intelligence → docs/Идентичность.
    */
-  requiresIntelligence: 'natural',
+  allowedIntelligences: allowedIntelligencesForRuntime('telegram'),
 
   /**
    * argv = telegramBin + 'run' + extraArgs (telegram-start.sh:119,

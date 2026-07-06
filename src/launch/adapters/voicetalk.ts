@@ -9,7 +9,7 @@
 //
 // voicetalk is a presence-runtime for a HUMAN (the owner's voice channel), modelled on
 // telegram per the foundation presence-runtime contract: kind:'router',
-// usesDoctrine:false, requiresIntelligence:'natural', argv = `<bin> run <extra>`. The
+// usesDoctrine:false, allowedIntelligences:['natural','absent'], argv = `<bin> run <extra>`. The
 // STT/TTS engines and providers live in a shared voice service (voice-connect), NOT in
 // this adapter and NOT in the peer passport — interfaces.voicetalk carries only the
 // binding ({wake_word, device}), opaque to the foundation.
@@ -19,6 +19,7 @@
 // bring-up.
 
 import type { ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import { allowedIntelligencesForRuntime } from '../../core/constants.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // voicetalkAdapter
@@ -34,13 +35,12 @@ export const voicetalkAdapter: RuntimeAdapter = {
   deliveryMarkers: { promptGlyphs: [] },
 
   /**
-   * voicetalk is a HUMAN channel — launch REFUSES a non-natural peer (fail-loud).
-   * Same nature gate as telegram: a peer with intelligence artificial/absent must never
-   * be brought up on voicetalk (it would route the owner's voice channel to an
-   * agent/script). The launch primitive enforces this against LaunchSpec.intelligence;
-   * source of intelligence → docs/Идентичность.
+   * voicetalk carries a HUMAN (natural) OR a FACELESS SERVICE bot (absent) — never an LLM
+   * agent (artificial), which would route the owner's voice channel to an agent/script. Same
+   * nature gate as telegram, sourced from the single Ф0 truth (allowedIntelligencesForRuntime);
+   * enforced by the launch primitive against LaunchSpec.intelligence. Source → docs/Идентичность.
    */
-  requiresIntelligence: 'natural',
+  allowedIntelligences: allowedIntelligencesForRuntime('voicetalk'),
 
   /**
    * argv = voicetalkBin + 'run' + extraArgs.

@@ -211,11 +211,11 @@ describe('telegramAdapter (router — no TUI surface)', () => {
 })
 
 describe('voicetalkAdapter (router — presence-runtime, human voice channel)', () => {
-  test('kind:router, no doctrine, requires natural', () => {
+  test('kind:router, no doctrine, allows natural|absent (channel: human or faceless service bot)', () => {
     expect(voicetalkAdapter.runtime).toBe('voicetalk')
     expect(voicetalkAdapter.kind).toBe('router')
     expect(voicetalkAdapter.usesDoctrine).toBe(false)
-    expect(voicetalkAdapter.requiresIntelligence).toBe('natural') // a human channel — refuse non-natural
+    expect(voicetalkAdapter.allowedIntelligences).toEqual(['natural', 'absent']) // human OR faceless service; never an LLM agent
   })
   test('buildArgv = voicetalk-runtime run [+extra], default + pinned bin', () => {
     expect(voicetalkAdapter.buildArgv(spec({ runtime: 'voicetalk' }), cfg)).toEqual(['voicetalk-runtime', 'run'])
@@ -433,16 +433,16 @@ describe('deliveryMarkers (adapter-owned, was transport PROMPT_GLYPHS)', () => {
   })
 })
 
-// ─── Ф-A #3: intelligence gate (telegram launch requires natural) ────────────
-describe('launch intelligence gate (adapter.requiresIntelligence)', () => {
-  test('telegram declares requiresIntelligence=natural; tui runtimes declare none', () => {
-    expect(telegramAdapter.requiresIntelligence).toBe('natural')
-    expect(claudeAdapter.requiresIntelligence).toBeUndefined()
-    expect(codexAdapter.requiresIntelligence).toBeUndefined()
-    expect(notifierAdapter.requiresIntelligence).toBeUndefined()
+// ─── Ф-A #3 / A1: intelligence gate (channel runtime allows natural|absent) ────
+describe('launch intelligence gate (adapter.allowedIntelligences)', () => {
+  test('telegram allows natural|absent (human OR faceless service bot); tui runtimes/notifier declare none', () => {
+    expect(telegramAdapter.allowedIntelligences).toEqual(['natural', 'absent'])
+    expect(claudeAdapter.allowedIntelligences).toBeUndefined()
+    expect(codexAdapter.allowedIntelligences).toBeUndefined()
+    expect(notifierAdapter.allowedIntelligences).toBeUndefined()
   })
 
-  test('launch REFUSES a non-natural peer on telegram (fail-loud, before any tmux)', async () => {
+  test('launch REFUSES an ARTIFICIAL (LLM-agent) peer on telegram (fail-loud, before any bring-up)', async () => {
     const r = await launch(
       spec({ runtime: 'telegram', identity: 'telegram-bot', socketPath: '/tmp/tmux-iap-telegram-bot.sock', intelligence: 'artificial' }),
       telegramAdapter,
@@ -450,10 +450,10 @@ describe('launch intelligence gate (adapter.requiresIntelligence)', () => {
       launchCfg,
     )
     expect(r.status).toBe('FAILED')
-    expect(r.reason).toMatch(/requires intelligence=natural/)
+    expect(r.reason).toMatch(/requires intelligence ∈ \{natural, absent\}/)
   })
 
-  test('launch REFUSES when intelligence is unknown (cannot confirm natural)', async () => {
+  test('launch REFUSES when intelligence is unknown (cannot confirm)', async () => {
     const r = await launch(
       spec({ runtime: 'telegram', identity: 'telegram-bot', socketPath: '/tmp/tmux-iap-telegram-bot.sock' }),
       telegramAdapter,
@@ -462,6 +462,18 @@ describe('launch intelligence gate (adapter.requiresIntelligence)', () => {
     )
     expect(r.status).toBe('FAILED')
     expect(r.reason).toMatch(/unknown/)
+  })
+
+  test('A1: launch does NOT refuse an ABSENT (faceless service) peer on telegram — the gate passes', async () => {
+    const r = await launch(
+      spec({ runtime: 'telegram', identity: 'telegram-approval', socketPath: '/tmp/tmux-iap-telegram-approval.sock', intelligence: 'absent' }),
+      telegramAdapter,
+      'first',
+      launchCfg,
+    )
+    // It may still FAIL downstream (no real telegram bin in the test), but NEVER with the
+    // intelligence-gate reason — absent is now a legitimate nature for a channel runtime.
+    expect(r.reason ?? '').not.toMatch(/requires intelligence/)
   })
 })
 
