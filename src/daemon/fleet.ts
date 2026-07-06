@@ -60,6 +60,8 @@ import {
 } from '../storage/rotatelog.ts'
 import { heartbeatAgeSecs, probeFullDiskAccess, readMemoryProvider, readVoiceProvider } from '../status/index.ts'
 import { deliveryLogPath } from './deliverylog.ts'
+import { approvalsLogPath } from './approvalslog.ts'
+import { ApprovalBroker } from './approvals.ts'
 import { callTool, type CallToolDeps } from './index.ts'
 
 /** The API generation baked into every snapshot (additive evolution within v1 —
@@ -225,6 +227,9 @@ export function fleetEventFiles(cfg: LifecycleConfig): Array<{ path: string; src
     { path: lifecycleLogPath(cfg.eventLogDir), src: 'lifecycle' },
     { path: deliveryLogPath(cfg.eventLogDir), src: 'delivery' },
     { path: exitLogPath(cfg.eventLogDir), src: 'exits' },
+    // Human-approval broker events (docs/17): approval-request / approval-resolved.
+    // A pre-approval daemon simply never writes this file (readLogTail tolerates absence).
+    { path: approvalsLogPath(cfg.eventLogDir), src: 'approvals' },
   ]
 }
 
@@ -440,6 +445,8 @@ export interface FleetHandlerOptions {
   ops?: FleetOps
   /** Injectable tailer poll interval (tests). */
   pollMs?: number
+  /** Injectable approval broker (tests — e.g. a short timeout). Default: a fresh one. */
+  broker?: ApprovalBroker
 }
 
 export type FleetHandler = (
@@ -459,6 +466,9 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
   const startedAtMs = Date.now()
   const files = fleetEventFiles(cfg)
   const tailer = new FleetEventTailer(files, opts.pollMs)
+  // The approval broker — one per daemon; the ASK side (POST /approvals long-poll) and
+  // the ANSWER side (GET/POST /approvals/*) are all interfaces to this one queue.
+  const broker = opts.broker ?? new ApprovalBroker({ logDir: cfg.eventLogDir, env })
   let opsPromise: Promise<FleetOps> | undefined
   const getOps = (): Promise<FleetOps> => {
     if (opts.ops) return Promise.resolve(opts.ops)
@@ -541,6 +551,72 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
         if (result.isError) return sendJson(res, 502, { error: text })
         return sendJson(res, 200, { from: caller.address, result: safeParse(text) })
       }
+      // ── approvals — the human-approval broker surface (docs/17) ────────────
+      if (path === '/fleet/v1/approvals') {
+        if (method === 'GET') {
+          return sendJson(res, 200, { api: FLEET_API_VERSION, version: IAPEER_VERSION, ts: new Date().toISOString(), approvals: broker.list() })
+        }
+        if (method === 'POST') {
+          // The gated peer's hook BLOCKS here (long-poll): enqueue + await a decision.
+          let body: Record<string, unknown>
+          try {
+            body = await readBody(req)
+          } catch (e) {
+            return sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
+          }
+          if (typeof body.personality !== 'string' || !body.personality || typeof body.tool !== 'string' || typeof body.content !== 'string') {
+            return sendJson(res, 400, { error: 'approval request needs {personality, runtime, tool, content} (+ optional kind/summary/title/approvers)' })
+          }
+          const { id, decision } = broker.request({
+            personality: body.personality,
+            runtime: typeof body.runtime === 'string' ? body.runtime : 'claude',
+            kind: typeof body.kind === 'string' ? body.kind : 'tool',
+            tool: body.tool,
+            content: body.content,
+            summary: typeof body.summary === 'string' ? body.summary : undefined,
+            title: typeof body.title === 'string' ? body.title : undefined,
+            approvers: Array.isArray(body.approvers) ? body.approvers.filter((a): a is string => typeof a === 'string') : undefined,
+          })
+          // No idle-socket kill during the (≤ broker-timeout) hold; cancel default-deny
+          // if the asking hook's transport dies before an answer (drop it from the queue).
+          res.setTimeout?.(0)
+          let settled = false
+          const onClose = (): void => {
+            if (!settled) broker.cancel(id)
+          }
+          req.on('close', onClose)
+          const d = await decision
+          settled = true
+          return sendJson(res, 200, { id, ...d })
+        }
+        return sendJson(res, 405, { error: 'method not allowed — GET|POST /fleet/v1/approvals' })
+      }
+      const apMatch = /^\/fleet\/v1\/approvals\/([^/]+)(?:\/(approve|deny))?$/.exec(path)
+      if (apMatch) {
+        const id = decodeURIComponent(apMatch[1]!)
+        const action = apMatch[2]
+        if (!action) {
+          if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/approvals/<id>' })
+          const item = broker.get(id)
+          if (!item) return sendJson(res, 404, { error: `no pending approval "${id}"` })
+          return sendJson(res, 200, { api: FLEET_API_VERSION, version: IAPEER_VERSION, ts: new Date().toISOString(), approval: item })
+        }
+        if (method !== 'POST') return sendJson(res, 405, { error: 'method not allowed — POST /fleet/v1/approvals/<id>/(approve|deny)' })
+        let body: Record<string, unknown> = {}
+        try {
+          body = await readBody(req)
+        } catch {
+          /* empty/invalid body is fine — approve/deny carry only optional fields */
+        }
+        const by = typeof body.approver === 'string' ? body.approver : undefined
+        const via = typeof body.via === 'string' ? body.via : 'cli'
+        const ok =
+          action === 'approve'
+            ? broker.resolve(id, { decision: 'allow', reason: typeof body.reason === 'string' ? body.reason : undefined }, { by, via })
+            : broker.resolve(id, { decision: 'deny', reason: typeof body.reason === 'string' ? body.reason : 'denied by human' }, { by, via })
+        if (!ok) return sendJson(res, 404, { error: `no pending approval "${id}" (already resolved, expired, or unknown)` })
+        return sendJson(res, 200, { id, action, ok: true })
+      }
       return sendJson(res, 404, {
         error: `unknown fleet endpoint ${method} ${path}`,
         endpoints: [
@@ -549,6 +625,10 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
           'GET /fleet/v1/events?replay=N',
           'POST /fleet/v1/peers/<peer>/(wake|stop|start|new|refresh|interrupt|compact)',
           'POST /fleet/v1/send',
+          'GET /fleet/v1/approvals',
+          'POST /fleet/v1/approvals (hook long-poll)',
+          'GET /fleet/v1/approvals/<id>',
+          'POST /fleet/v1/approvals/<id>/(approve|deny)',
         ],
       })
     } catch (e) {
