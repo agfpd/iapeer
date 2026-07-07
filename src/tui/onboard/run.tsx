@@ -71,7 +71,7 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
   // wizard only runs on one), off under NO_COLOR.
   const a = makeAnsi(colorEnabled(env, process.stdout))
 
-  let result: WizardResult = { code: 0, memoryConsent: false, voiceConsent: false, telegramConsent: false, advisories: [], summary: [] }
+  let result: WizardResult = { code: 0, memoryConsent: false, voiceConsent: false, trayConsent: false, telegramConsent: false, advisories: [], summary: [] }
   try {
     const app = render(<OnboardApp env={env} onResult={r => (result = r)} />)
     await app.waitUntilExit()
@@ -162,6 +162,31 @@ export async function runOnboardWizard(opts: OnboardWizardOptions = {}): Promise
     } else {
       process.stdout.write(
         '\n' + paintResult('voice', 'skipped', ' — set it up later with `npx @agfpd/voice-connect init`', a) + '\n',
+      )
+    }
+
+    if (result.trayConsent) {
+      const { onboardTrayStep } = await import('../../onboard/tray.ts')
+      process.stdout.write(
+        '\n' +
+          a.bold('Installing the menu-bar tray face (SwiftBar)…') +
+          '\n' +
+          a.dim(
+            'A live fleet dashboard in the macOS menu bar. Needs Homebrew to auto-install SwiftBar;\n' +
+              'without brew the plugin is dropped inert and you install SwiftBar manually (`iapeer tray install --app`).',
+          ) +
+          '\n\n',
+      )
+      try {
+        const t = await onboardTrayStep({ env })
+        process.stdout.write('\n' + paintResult('tray', t.state, t.detail ? ` — ${t.detail}` : '', a) + '\n')
+      } catch (e) {
+        const rest = ` — ${e instanceof Error ? e.message : String(e)} ${a.dim('(activate later: `iapeer tray install --app`)')}`
+        process.stdout.write('\n' + paintResult('tray', 'step skipped', rest, a) + '\n')
+      }
+    } else {
+      process.stdout.write(
+        '\n' + paintResult('tray', 'skipped', ' — add it later with `iapeer tray install --app`', a) + '\n',
       )
     }
   } finally {

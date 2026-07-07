@@ -1168,6 +1168,7 @@ const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   'plugin-only',
   'remove-codesign-identity',
   'stream',
+  'tray',
   'yes',
 ])
 
@@ -1219,8 +1220,8 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'help | --help | -h', desc: 'print this usage (works appended to any verb; executes nothing)' },
   { sig: 'daemon [--install-plist]', desc: 'run the host-wide HTTP-MCP router (launchd-held)' },
   {
-    sig: 'onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--no-voice] [--voice <pkg>] [--infra <csv>]',
-    desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory → voice (all default YES). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
+    sig: 'onboard [--accept-risk] [--dry-run] [--no-notifier] [--no-telegram] [--telegram-human <p>] [--telegram-user-id <id>] [--no-memory] [--memory <pkg>] [--no-voice] [--voice <pkg>] [--tray] [--infra <csv>]',
+    desc: 'backbone host-phase: marketplace → notifier → telegram (human peer) → memory → voice (default YES) → tray (default NO, --tray opts in). --accept-risk (or IAPEER_ACCEPT_RISK=1) accepts the security warning non-interactively',
   },
   { sig: 'status', desc: 'host snapshot: version, daemon health, memory + voice slots (<provider> | none)' },
   { sig: 'live-runtime <peer>', desc: 'print the peer\'s CURRENT live runtime (freshest pane-log among pid-alive sessions; NOT default_runtime). Exit 1 + no output if none alive' },
@@ -1526,6 +1527,17 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         })
         const voiceLabel = voice.provider ? `${voice.provider.provider} ${voice.provider.version}` : 'none'
         out(`voice: ${voice.state}${voice.detail ? ` — ${voice.detail}` : ''} (slot: ${voiceLabel})\n`)
+        // Tray face (SwiftBar menu-bar fleet dashboard): OPTIONAL and DEFAULT-NO on the
+        // linear path (a GUI dependency — conservatively opt-in). `--tray` opts in;
+        // without it the step is skipped (non-interactive never hangs — the step asks
+        // nothing). The plugin FILE is already dropped by install; this is GUI activation.
+        const { onboardTrayStep } = await import('../onboard/tray.ts')
+        const tray = await onboardTrayStep({
+          skip: flags.tray !== true,
+          dryRun: flags['dry-run'] === true,
+          env,
+        })
+        out(`tray: ${tray.state}${tray.detail ? ` — ${tray.detail}` : ''}\n`)
         // Runtime auth readiness (clean-host prerequisite): a peer runs the runtime's
         // interactive TUI; the launcher auto-clears first-run modals (theme/trust) but
         // CANNOT complete a login OAuth flow. Warn for every INSTALLED runtime (marketplace

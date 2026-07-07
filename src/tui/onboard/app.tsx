@@ -19,6 +19,8 @@ export interface WizardResult {
   code: number
   memoryConsent: boolean
   voiceConsent: boolean
+  /** Install the SwiftBar menu-bar tray face (default-NO — a GUI dependency). */
+  trayConsent: boolean
   advisories: string[]
   summary: string[]
   telegramConsent: boolean
@@ -28,7 +30,7 @@ export interface WizardResult {
   hostRuntime?: OnboardRuntime
 }
 
-type Phase = 'gate' | 'running' | 'telegram' | 'memory' | 'voice' | 'declined' | 'finishing'
+type Phase = 'gate' | 'running' | 'telegram' | 'memory' | 'voice' | 'tray' | 'declined' | 'finishing'
 type StepStatus = 'pending' | 'running' | 'ok' | 'warn' | 'fail'
 interface Step {
   key: string
@@ -98,16 +100,20 @@ export function OnboardApp({
   const [hostRuntime, setHostRuntime] = useState<OnboardRuntime | undefined>(undefined)
   const [telegramConsent, setTelegramConsent] = useState(false)
   const [memoryConsent, setMemoryConsent] = useState(false)
+  const [voiceConsent, setVoiceConsent] = useState(false)
   const spin = useSpinnerFrame(phase === 'running')
 
-  const finish = (voiceConsent: boolean): void => {
+  const finish = (trayConsent: boolean): void => {
     const failed = steps.some(s => s.status === 'fail')
     const summary = steps.map(s => {
       const mark = s.status === 'ok' ? '✓' : s.status === 'warn' ? '!' : s.status === 'fail' ? '✗' : '·'
       return `  ${mark} ${s.label}${s.detail ? ` — ${s.detail}` : ''}`
     })
     summary.unshift(failed ? 'Onboard finished with errors:' : 'Onboard complete:')
-    onResult({ code: failed ? 1 : 0, memoryConsent, voiceConsent, telegramConsent, advisories, summary, hostRuntime })
+    // voiceConsent is committed state by now (its phase completed a render cycle before
+    // tray); trayConsent is the last decision, passed directly (its setState wouldn't
+    // have flushed within this same input handler).
+    onResult({ code: failed ? 1 : 0, memoryConsent, voiceConsent, trayConsent, telegramConsent, advisories, summary, hostRuntime })
     setPhase('finishing')
     setTimeout(() => exit(), 30)
   }
@@ -152,19 +158,34 @@ export function OnboardApp({
     { isActive: phase === 'memory' },
   )
 
-  // Voice consent — DEFAULT-YES ([Y/n]: Enter or y → install). The LAST consent → finish.
+  // Voice consent — DEFAULT-YES ([Y/n]: Enter or y → install). Then → tray.
   useInput(
     (input, key) => {
-      if (input === 'n' || input === 'N') finish(false)
-      else if (input === 'y' || input === 'Y' || key.return) finish(true)
+      if (input === 'n' || input === 'N') {
+        setVoiceConsent(false)
+        setPhase('tray')
+      } else if (input === 'y' || input === 'Y' || key.return) {
+        setVoiceConsent(true)
+        setPhase('tray')
+      }
     },
     { isActive: phase === 'voice' },
+  )
+
+  // Tray consent — DEFAULT-NO ([y/N]: Enter or n → skip; y → install). A GUI
+  // dependency (SwiftBar), so conservatively opt-IN. The LAST consent → finish.
+  useInput(
+    (input, key) => {
+      if (input === 'y' || input === 'Y') finish(true)
+      else if (input === 'n' || input === 'N' || key.return || key.escape) finish(false)
+    },
+    { isActive: phase === 'tray' },
   )
 
   // Declined → exit 1 (no host mutation).
   useEffect(() => {
     if (phase !== 'declined') return
-    onResult({ code: 1, memoryConsent: false, voiceConsent: false, telegramConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
+    onResult({ code: 1, memoryConsent: false, voiceConsent: false, trayConsent: false, telegramConsent: false, advisories: [], summary: ['onboard aborted — risk not accepted.'] })
     const t = setTimeout(() => exit(), 30)
     return () => clearTimeout(t)
   }, [phase, onResult, exit])
@@ -375,6 +396,14 @@ export function OnboardApp({
             ? Install the voice provider backend (@agfpd/voice-connect)?
           </Text>
           <Text dimColor> A local text-to-speech / speech-to-text HTTP service. Per-agent voice tools are a separate `iapeer enable`. [Y/n]</Text>
+        </Box>
+      ) : null}
+      {phase === 'tray' ? (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold color="cyan">
+            ? Install the menu-bar tray face (SwiftBar)?
+          </Text>
+          <Text dimColor> A live fleet dashboard in your macOS menu bar (installs SwiftBar via Homebrew). [y/N]</Text>
         </Box>
       ) : null}
     </Box>

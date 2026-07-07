@@ -35,7 +35,7 @@ The same operation is available as `iapeer install` if the binary is already in 
 iapeer onboard
 ```
 
-`onboard` prepares the host for agents. First of all it **brings up the daemon** — loads the plist into launchd, after which launchd holds the daemon itself, bringing it back up on a crash and a reboot. No separate `launchctl` command is needed for this. Then onboard registers the extension marketplace in Claude and Codex, provisions the scheduler (`notifier`), creates a human peer on Telegram, and installs the memory provider. The daemon start always runs; the rest are on by default and turned off with flags (`--no-notifier`, `--no-telegram`, `--no-memory`).
+`onboard` prepares the host for agents. First of all it **brings up the daemon** — loads the plist into launchd, after which launchd holds the daemon itself, bringing it back up on a crash and a reboot. No separate `launchctl` command is needed for this. Then onboard registers the extension marketplace in Claude and Codex, provisions the scheduler (`notifier`), creates a human peer on Telegram, installs the memory provider and the voice backend, and offers the menu-bar tray face (SwiftBar). The daemon start always runs; the memory/voice/notifier/telegram steps are on by default and turned off with flags (`--no-notifier`, `--no-telegram`, `--no-memory`, `--no-voice`). The **tray** is the exception — default **off** (it pulls in a GUI app via Homebrew), opted into with `--tray` on the non-interactive path or a `[y/N]` prompt in the interactive wizard; without Homebrew it degrades to a soft skip (the plugin is left in place, install SwiftBar manually with `iapeer tray install --app`).
 
 Check the daemon is alive and the host is ready:
 
