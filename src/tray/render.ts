@@ -144,7 +144,9 @@ const lockRank = (p: TrayPeer): number => (p.launchd_managed ? 0 : 1)
 // ── renderers ─────────────────────────────────────────────────────────────────
 
 const MANAGE_COMMANDS: Array<{ cmd: string; label: string }> = [
-  { cmd: 'wake', label: 'Wake' },
+  // NB: no 'Wake' — a peer-row click (attach) already wakes a sleeping peer before it
+  // connects, so a separate Wake item was redundant (owner decision). `tray cmd wake`
+  // stays available on the CLI / fleet API; only the menu item is dropped.
   { cmd: 'stop', label: 'Stop' },
   { cmd: 'start', label: 'Start' },
   { cmd: 'new', label: 'New session (fresh)' },
@@ -295,8 +297,52 @@ function renderManage(peers: TrayPeer[], bin: string): string[] {
         }),
       )
     }
+    // approval-mode toggle — only for agentic (attachable) peers; meaningless for the
+    // human channel / notifier infra (arthur/timer/watcher), which are always yolo.
+    if (attachable(p)) out.push(...renderApprovalToggle(p, bin))
   }
   return out
+}
+
+/**
+ * The per-peer approval-mode control in the Manage submenu (docs/17): READS the current
+ * mode and FLIPS it via the local `approval-mode` verb.
+ *
+ * APPLY = next session, NOT now. The flip persists the mode + brings the runtime
+ * surfaces to it; it does NOT pass --now, so it takes effect on the peer's NEXT fresh
+ * session. A menu tap must never kill a live session mid-work (a respawn is a heavy,
+ * surprising side effect of a click). The item says "(next session)" so the wait is
+ * explicit.
+ *
+ * refresh=true is the ONE deliberate exception to the "no refresh in the streamable
+ * menu" rule: the flip runs the local verb (no daemon round-trip → NO SSE event), so
+ * the plugin must re-render to reflect the new mode.
+ *
+ * SECURITY-ASYMMETRIC friction (a mode-flip changes the security PERIMETER — unlike a
+ * one-off Deny): yolo→gated STRENGTHENS (adds human approval) → a single safe tap;
+ * gated→yolo WEAKENS (REMOVES human approval) → the current mode sits on a submenu and
+ * the flip is an explicit red ⚠ confirm CHILD, so the perimeter is never dropped by one
+ * stray click. SwiftBar has no native confirm dialog — the nested explicit item IS the
+ * confirm.
+ */
+function renderApprovalToggle(p: TrayPeer, bin: string): string[] {
+  const flip = (target: 'gated' | 'yolo'): Record<string, string | boolean> => ({
+    bash: bin,
+    param1: 'approval-mode',
+    param2: p.personality,
+    param3: target,
+    terminal: false,
+    refresh: true, // local verb → no SSE event → re-render to show the new mode
+  })
+  if (p.approval_mode === 'gated') {
+    // WEAKEN — current on the parent (no action); the flip is an explicit red confirm child.
+    return [
+      line(2, 'Approval: gated 🛡', { color: COLOR.warn }),
+      line(3, '⚠ Switch to yolo — removes human approval (next session)', { color: COLOR.down, ...flip('yolo') }),
+    ]
+  }
+  // STRENGTHEN (yolo → gated) — safe, one tap.
+  return [line(2, 'Approval: yolo → gated 🛡 (next session)', flip('gated'))]
 }
 
 // ── approval renderers (docs/17 — the always-on approval channel in the bar) ─────

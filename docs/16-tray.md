@@ -42,8 +42,16 @@ activation that also installs SwiftBar.app when it is absent.
     own `terminal=true`, whose Terminal launch drives a `Cmd-T` System-Events keystroke that
     silently no-ops unless SwiftBar holds Accessibility permission. **Launchd-managed infra
     peers (telegram / notifier, `🔒`) are not pty-attachable** — their rows are plain status
-    lines. Lifecycle actions (Wake / Stop / Start / New / Interrupt / Refresh / Compact) live
+    lines. Lifecycle actions (Stop / Start / New / Interrupt / Refresh / Compact) live
     in the **Manage** submenu, each a `POST /fleet/v1/peers/<peer>/<cmd>` via `iapeer tray cmd`.
+    (No Wake item — a peer-row click already wakes a sleeping peer before it attaches, so
+    it was redundant.) For an agentic peer the Manage submenu also carries an
+    **approval-mode toggle** (docs/17): it reads the current mode and flips it via the local
+    `iapeer approval-mode <peer> <mode>` verb, applied on the peer's **next fresh session**
+    (a click never respawns a live session). The friction is asymmetric to the security
+    weight: `yolo → gated` (adds human approval) is one safe tap; `gated → yolo` (REMOVES the
+    approval perimeter) sits behind the submenu as an explicit red ⚠ confirm, so it is never
+    dropped by a stray click.
 - **Pending approvals (docs/17):** when the queue is non-empty, the **top of the dropdown** shows
   each pending request **expanded, with no extra clicks** — a header (`<peer> · <tool>`), the
   **verbatim action content** (the command / diff / plan, monospace, capped for the menu; the FULL

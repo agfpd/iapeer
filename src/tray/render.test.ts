@@ -92,10 +92,42 @@ describe('renderSwiftBar', () => {
   test('Manage submenu carries per-peer lifecycle commands (kept off the rows)', () => {
     expect(lines.some(l => l.startsWith('Manage'))).toBe(true)
     expect(out).toContain('\n--boris\n') // a peer sub-submenu parent at depth 1
-    // no refresh=true — the SSE stream reflects the outcome (streamable is always fresh)
-    expect(out).toContain(`----Wake | bash=${BIN} param1=tray param2=cmd param3=wake param4=boris terminal=false`)
-    expect(out).not.toContain('refresh=true')
+    // Wake was DROPPED from the submenu (a row click already wakes-then-attaches).
+    expect(out).not.toContain('param3=wake')
+    expect(out).not.toContain('----Wake ')
+    // Stop/Start and the rest remain; lifecycle commands carry NO refresh=true (the SSE
+    // stream reflects their outcome — streamable is always fresh).
+    expect(out).toContain(`----Stop | bash=${BIN} param1=tray param2=cmd param3=stop param4=boris terminal=false`)
+    expect(out).toContain('param3=start param4=boris')
     expect(out).toContain('param3=interrupt param4=boris')
+  })
+
+  test('approval-mode toggle: yolo peer → one-tap strengthen (→ gated), refresh to re-render', () => {
+    // boris is yolo (no approval_mode) → a single safe item flipping to gated
+    expect(out).toContain(`----Approval: yolo → gated 🛡 (next session) | bash=${BIN} param1=approval-mode param2=boris param3=gated terminal=false refresh=true`)
+  })
+
+  test('approval-mode toggle: gated peer → current on parent + red ⚠ confirm CHILD (weaken behind a submenu)', () => {
+    // scriber is gated → the current mode shows on the (action-less) parent, and the
+    // yolo flip is an explicit red confirm one level deeper (perimeter-weakening friction)
+    expect(lines.some(l => l === '----Approval: gated 🛡 | color=#d29922')).toBe(true)
+    const child = lines.find(l => l.startsWith('------⚠ Switch to yolo'))!
+    expect(child).toContain('color=#f85149') // red weight on the weakening action
+    expect(child).toContain(`param1=approval-mode param2=scriber param3=yolo terminal=false refresh=true`)
+  })
+
+  test('approval-mode toggle: NOT offered for launchd infra/human peers (always yolo)', () => {
+    // timer is launchd-managed (arthur/timer/watcher class) → no approval control
+    const timerBlockStart = lines.indexOf('--timer')
+    expect(timerBlockStart).toBeGreaterThan(-1)
+    // no Approval line assigned to timer (scan its submenu block until the next depth-1 parent)
+    let sawApproval = false
+    for (let i = timerBlockStart + 1; i < lines.length; i++) {
+      const l = lines[i]!
+      if (/^--[^-]/.test(l)) break // next peer's depth-1 parent
+      if (l.includes('param1=approval-mode')) sawApproval = true
+    }
+    expect(sawApproval).toBe(false)
   })
 
   test('sorting: 🔒 launchd block on top (before the first working agent); within each block live→asleep→stopped, then alpha', () => {
