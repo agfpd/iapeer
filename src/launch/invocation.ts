@@ -34,10 +34,15 @@ export function buildLaunchInvocation(
 ): LaunchInvocation {
   const env = cfg.env ?? process.env
   const launchEnv = readLaunchEnv(spec.cwd, spec.runtime)
-  const specWithArgs: LaunchSpec =
-    launchEnv.startArgs.length > 0
-      ? { ...spec, extraArgs: [...(spec.extraArgs ?? []), ...launchEnv.startArgs] }
-      : spec
+  const specWithArgs: LaunchSpec = {
+    ...spec,
+    ...(launchEnv.startArgs.length > 0 ? { extraArgs: [...(spec.extraArgs ?? []), ...launchEnv.startArgs] } : {}),
+    // launch.env PEER_DISALLOWED_TOOLS opt-in — an explicit spec.disallowedTools (caller override) wins;
+    // else the launch.env value (undefined = key absent → adapter default, fleet unchanged).
+    ...(spec.disallowedTools === undefined && launchEnv.disallowedTools !== undefined
+      ? { disallowedTools: launchEnv.disallowedTools }
+      : {}),
+  }
   const argv = adapter.buildArgv(specWithArgs, cfg)
   const childEnv: NodeJS.ProcessEnv = {
     ...env,

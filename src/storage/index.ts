@@ -215,6 +215,11 @@ export function peerLaunchEnvPath(cwd: string, runtime: Runtime): string {
 export interface LaunchEnv {
   /** Tokens from PEER_START_ARGS, appended AFTER the adapter's base argv flags. */
   startArgs: string[]
+  /** claude `--disallowedTools` override from PEER_DISALLOWED_TOOLS. UNDEFINED = the key was ABSENT
+   *  (→ the adapter default is used, the whole fleet unchanged); a string (incl. '') = the key was
+   *  PRESENT (opt-in: '' omits the flag, a value sets it). The absent-vs-empty distinction is the
+   *  opt-in gate — only an explicitly-present key changes behavior. */
+  disallowedTools?: string
   /** Other KEY=VALUE assignments — extra child-process env for the peer session. */
   env: Record<string, string>
 }
@@ -255,8 +260,15 @@ export function readLaunchEnv(cwd: string, runtime: Runtime): LaunchEnv {
   }
   const startArgsRaw = (env.PEER_START_ARGS ?? '').trim()
   delete env.PEER_START_ARGS // consumed as argv, not propagated as a child env var
+  // PEER_DISALLOWED_TOOLS — a LAUNCH DIRECTIVE (claude --disallowedTools), not a child env var. Preserve
+  // the ABSENT (undefined → default) vs PRESENT-EMPTY ('' → omit the flag) distinction: an unset key must
+  // leave the whole fleet on the hardcoded default. Consumed out of the child env like PEER_START_ARGS.
+  const hasDisallowed = Object.prototype.hasOwnProperty.call(env, 'PEER_DISALLOWED_TOOLS')
+  const disallowedTools = hasDisallowed ? env.PEER_DISALLOWED_TOOLS : undefined
+  delete env.PEER_DISALLOWED_TOOLS
   return {
     startArgs: startArgsRaw ? startArgsRaw.split(/\s+/) : [],
+    ...(disallowedTools !== undefined ? { disallowedTools } : {}),
     env,
   }
 }

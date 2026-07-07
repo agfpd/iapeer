@@ -62,4 +62,23 @@ describe('readLaunchEnv', () => {
     expect(startArgs).toEqual([])
     expect(env).toEqual({ FOO: 'bar' })
   })
+
+  // docs/17 — PEER_DISALLOWED_TOOLS: the ABSENT vs PRESENT-EMPTY distinction is the opt-in gate.
+  test('PEER_DISALLOWED_TOOLS ABSENT → disallowedTools undefined (fleet default; key omitted)', () => {
+    writeLaunchEnv('claude', 'FOO=bar\n')
+    const le = readLaunchEnv(cwd, 'claude')
+    expect(le.disallowedTools).toBeUndefined()
+    expect('disallowedTools' in le).toBe(false) // omitted, so a differential oracle stays byte-identical
+  })
+  test('PEER_DISALLOWED_TOOLS explicit EMPTY → disallowedTools "" (opt-in: omit the flag) + consumed from env', () => {
+    writeLaunchEnv('claude', 'PEER_DISALLOWED_TOOLS=\nFOO=bar\n')
+    const { disallowedTools, env } = readLaunchEnv(cwd, 'claude')
+    expect(disallowedTools).toBe('') // present-empty ≠ absent
+    expect(env.PEER_DISALLOWED_TOOLS).toBeUndefined() // consumed as a launch directive, not a child env var
+    expect(env).toEqual({ FOO: 'bar' })
+  })
+  test('PEER_DISALLOWED_TOOLS with a value → that verbatim list (quotes stripped)', () => {
+    writeLaunchEnv('claude', 'PEER_DISALLOWED_TOOLS="Edit,Write"\n')
+    expect(readLaunchEnv(cwd, 'claude').disallowedTools).toBe('Edit,Write')
+  })
 })

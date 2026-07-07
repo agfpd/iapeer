@@ -277,11 +277,15 @@ export const claudeAdapter: RuntimeAdapter = {
    *
    *   - '--dangerously-skip-permissions'  claude-start.sh:318, spawner.ts:776 —
    *     headless peer has no interactive owner to grant per-tool permission.
-   *   - '--disallowedTools','AskUserQuestion'  claude-start.sh:313/316,
-   *     spawner.ts:777 — AskUserQuestion would render in a TUI no headless peer
-   *     owner watches; the question goes "into the void". Default is the literal
-   *     'AskUserQuestion'; the per-peer override (PEER_DISALLOWED_TOOLS empty =
-   *     allow all) is install-time launch.env, not this path.
+   *   - '--disallowedTools', <list>  claude-start.sh:313/316, spawner.ts:777 —
+   *     AskUserQuestion would render in a TUI no headless peer owner watches; the
+   *     question goes "into the void", so it is disallowed by DEFAULT. The value is
+   *     an OPT-IN per-peer override via spec.disallowedTools (launch.env
+   *     PEER_DISALLOWED_TOOLS, merged in buildLaunchInvocation): UNDEFINED (the
+   *     fleet default) → the literal 'AskUserQuestion'; an EXPLICIT empty string →
+   *     the flag is OMITTED (allow all — e.g. to re-enable AskUserQuestion for a
+   *     throwaway peer); a non-empty value → that verbatim list. Only an explicitly
+   *     set env key changes behavior — the whole existing fleet is byte-identical.
    *   - '--add-dir','/'  grants the file/edit/bash tools access OUTSIDE cwd (the
    *     CLI equivalent of settings `permissions.additionalDirectories`). A peer
    *     reads/writes its memory vault (often an iCloud Obsidian dir) and ~/.iapeer,
@@ -314,11 +318,14 @@ export const claudeAdapter: RuntimeAdapter = {
     // active as a fail-SAFE backstop, and the separately-installed PreToolUse hook is
     // the primary interceptor (it fires regardless of mode — verified live 2.1.201).
     const gated = spec.approvalMode === 'gated'
+    // Opt-in disallowedTools (docs/17 — real-modal acceptance / general per-peer control). UNDEFINED →
+    // the hardcoded default 'AskUserQuestion' (fleet unchanged); explicit '' → omit the flag (allow all);
+    // a value → that verbatim list. A blank/whitespace value collapses to "omit" (the re-enable case).
+    const disallowed = (spec.disallowedTools === undefined ? 'AskUserQuestion' : spec.disallowedTools).trim()
     return [
       cfg.claudeBin,
       ...(gated ? ['--permission-mode', 'default'] : ['--dangerously-skip-permissions']),
-      '--disallowedTools',
-      'AskUserQuestion',
+      ...(disallowed ? ['--disallowedTools', disallowed] : []),
       '--add-dir',
       '/',
       ...(spec.systemPromptFile ? ['--system-prompt-file', spec.systemPromptFile] : []),

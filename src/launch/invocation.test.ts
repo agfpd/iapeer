@@ -119,6 +119,32 @@ describe('buildLaunchInvocation — differential vs the verbatim pre-extraction 
     }
   })
 
+  // docs/17 — the launch.env PEER_DISALLOWED_TOOLS opt-in reaches claude's argv (the REAL path for a
+  // throwaway that re-enables AskUserQuestion). Default UNCHANGED; explicit-empty omits the flag.
+  test('launch.env PEER_DISALLOWED_TOOLS= (empty) → claude argv OMITS --disallowedTools (AskUserQuestion re-enabled)', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'inv-disallow-'))
+    try {
+      const p = peerLaunchEnvPath(cwd, 'claude')
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, 'PEER_DISALLOWED_TOOLS=\n')
+      const argv = buildLaunchInvocation(spec({ runtime: 'claude', identity: 'claude-p', cwd }), claudeAdapter, CFG).argv
+      expect(argv).not.toContain('--disallowedTools')
+      expect(argv.join(' ')).not.toContain('AskUserQuestion')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('no launch.env key → claude argv keeps the default --disallowedTools AskUserQuestion (fleet unchanged)', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'inv-disallow-def-'))
+    try {
+      const argv = buildLaunchInvocation(spec({ runtime: 'claude', identity: 'claude-p', cwd }), claudeAdapter, CFG).argv
+      expect(argv.join(' ')).toContain('--disallowedTools AskUserQuestion')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('В45 — a launch.env PATH override WINS over the base env PATH (was silently clobbered)', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'inv-path-'))
     try {

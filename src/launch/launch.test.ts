@@ -89,6 +89,27 @@ describe('approval-mode toggle — buildArgv + ready gate (docs/17)', () => {
     // still headless-safe: AskUserQuestion stays disallowed in BOTH modes (owner policy)
     expect(argv.join(' ')).toContain('--disallowedTools AskUserQuestion')
   })
+  // docs/17 — opt-in disallowedTools override (PEER_DISALLOWED_TOOLS). Default UNCHANGED for the whole
+  // fleet; only an EXPLICIT value changes it (empty = re-enable AskUserQuestion for a throwaway).
+  test('claude disallowedTools UNDEFINED → the hardcoded default AskUserQuestion (fleet unchanged)', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w' }), cfg)
+    expect(argv.join(' ')).toContain('--disallowedTools AskUserQuestion')
+  })
+  test('claude disallowedTools EXPLICIT empty → the flag is OMITTED (allow all — AskUserQuestion works)', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w', disallowedTools: '' }), cfg)
+    expect(argv).not.toContain('--disallowedTools')
+    expect(argv.join(' ')).not.toContain('AskUserQuestion')
+    expect(argv).toContain('--add-dir') // the rest of the argv is intact
+  })
+  test('claude disallowedTools whitespace-only → also OMITTED (collapses to the re-enable case)', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w', disallowedTools: '  ' }), cfg)
+    expect(argv).not.toContain('--disallowedTools')
+  })
+  test('claude disallowedTools a custom value → that verbatim list', () => {
+    const argv = claudeAdapter.buildArgv(spec({ runtime: 'claude', cwd: '/w', disallowedTools: 'Edit,Write' }), cfg)
+    expect(argv.join(' ')).toContain('--disallowedTools Edit,Write')
+    expect(argv.join(' ')).not.toContain('AskUserQuestion')
+  })
   test('codex yolo (default): the YOLO bypass flag', () => {
     const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w' }), cfg)
     expect(argv).toContain('--dangerously-bypass-approvals-and-sandbox')

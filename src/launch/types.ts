@@ -159,6 +159,11 @@ export interface LaunchSpec {
   resumeRef?: string
   /** Free-form extra CLI args (PEER_START_ARGS). */
   extraArgs?: string[]
+  /** claude `--disallowedTools` value (opt-in per-peer override via launch.env `PEER_DISALLOWED_TOOLS`).
+   *  UNDEFINED (the default for the whole fleet) → the adapter's hardcoded default (`AskUserQuestion`);
+   *  an EXPLICIT empty string → the flag is OMITTED (allow all — e.g. re-enable AskUserQuestion); a
+   *  non-empty value → that verbatim list. Only claude's buildArgv consumes it (codex has no such flag). */
+  disallowedTools?: string
   /** Peer intelligence (artificial/natural/absent). Used to enforce an adapter's
    *  intelligence gate at launch (telegram allows natural|absent). Optional: a doctrine-
    *  less throwaway may omit it, but an adapter that declares allowedIntelligences
