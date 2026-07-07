@@ -107,6 +107,8 @@ What this means for you:
 - You are trusting the model's judgment, and the doctrine you give each peer, the same way you would trust a developer with a shell on your account.
 - iapeer does **not** silently weaken your own interactive `claude` / `codex` setup. The bypass acceptance is recorded per peer, in that agent's own config; the project-MCP pre-approval is written **project-locally**, under the peer's folder — never to your global user settings.
 
+**Want a human in the loop for a given peer?** Set its approval mode to `gated` — `iapeer approval-mode <peer> gated`. That peer launches **without** the bypass flag, and every blocking approval its runtime would raise is routed to you — a Telegram button, a click in the tray, or `iapeer approve` on the CLI — before the tool runs; your `allow`/`deny` (with a reason) flows back and the tool proceeds or is refused. The default stays `yolo` (bypass) for every peer; `gated` is opt-in, per peer. See [docs/17 — Human approval](docs/17-approval.md).
+
 Run iapeer on a host you control, give each peer only the access it needs, and treat a peer's instructions as security-relevant. `iapeer onboard` states this at setup; it's repeated here so the trade-off is explicit before you create your first agent. Details on every first-run dialog: [docs/07 — Install & update](docs/07-install-and-update.md#first-run-dialogs-on-a-clean-machine).
 
 ## Documentation
@@ -121,8 +123,6 @@ Planned, not yet built:
 - **Linux support** — iapeer runs on macOS today; Linux is planned.
 - **More agent runtimes** — `opencode` and `antigravity`, two further CLI runtimes alongside Claude Code and Codex.
 - **Discord runtime** — a human-presence runtime for Discord, alongside Telegram.
-- **Permissions gate** — finer control over what an agent is allowed to do.
-- **Approve permissions over Telegram** — approve an agent's permission requests from the chat; today permissions are auto-allowed by flags.
 
 ## License
 
