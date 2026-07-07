@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { exitLogPath, getAdapter, launch } from './index.ts'
+import { exitLogPath, getAdapter, intelligenceGateReason, launch } from './index.ts'
 import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
@@ -485,16 +485,18 @@ describe('launch intelligence gate (adapter.allowedIntelligences)', () => {
     expect(r.reason).toMatch(/unknown/)
   })
 
-  test('A1: launch does NOT refuse an ABSENT (faceless service) peer on telegram — the gate passes', async () => {
-    const r = await launch(
-      spec({ runtime: 'telegram', identity: 'telegram-approval', socketPath: '/tmp/tmux-iap-telegram-approval.sock', intelligence: 'absent' }),
-      telegramAdapter,
-      'first',
-      launchCfg,
-    )
-    // It may still FAIL downstream (no real telegram bin in the test), but NEVER with the
-    // intelligence-gate reason — absent is now a legitimate nature for a channel runtime.
-    expect(r.reason ?? '').not.toMatch(/requires intelligence/)
+  test('A1: the gate PASSES an ABSENT (faceless service) peer on telegram — null reason', () => {
+    // Asserted at the PURE-gate level (intelligenceGateReason), NOT via launch(): absent is a
+    // legitimate nature for a channel runtime, so this case would PASS the gate and fall into
+    // real router bring-up (startPtyHost) — which HANGS in the sandbox (no telegram bin) and
+    // times out (the A1 CI flake, 0.4.71+). The two refusal cases above stay end-to-end via
+    // launch() precisely because the gate short-circuits them BEFORE any bring-up.
+    expect(
+      intelligenceGateReason(
+        telegramAdapter,
+        spec({ runtime: 'telegram', personality: 'approval', identity: 'telegram-approval', intelligence: 'absent' }),
+      ),
+    ).toBeNull()
   })
 })
 

@@ -122,6 +122,24 @@ export function exitLogPath(exitLogDir: string): string {
 // launch — bring up ONE session (runtime-agnostic via the adapter)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The intelligence gate — launch step (0), extracted as a PURE predicate so it is
+ * unit-testable in isolation (no bring-up, never touches the pty host). A channel
+ * adapter that declares `allowedIntelligences` (telegram/voicetalk → ['natural',
+ * 'absent']) refuses a peer whose nature is NOT in the set — and refuses too when
+ * the nature is unknown (cannot confirm). Returns the fail-loud reason string, or
+ * `null` when the gate PASSES (the peer may proceed to bring-up).
+ */
+export function intelligenceGateReason(adapter: RuntimeAdapter, spec: LaunchSpec): string | null {
+  if (adapter.allowedIntelligences && (spec.intelligence == null || !adapter.allowedIntelligences.includes(spec.intelligence))) {
+    return (
+      `runtime "${spec.runtime}" requires intelligence ∈ {${adapter.allowedIntelligences.join(', ')}}, ` +
+      `peer "${spec.personality}" is ${spec.intelligence ?? 'unknown'} — refusing to launch`
+    )
+  }
+  return null
+}
+
 export const launch: LaunchFn = async (
   spec: LaunchSpec,
   adapter: RuntimeAdapter,
@@ -137,13 +155,8 @@ export const launch: LaunchFn = async (
   //     A channel runtime carries a human (natural) OR a faceless service bot (absent), never an
   //     LLM agent (artificial). Ports the persistent-peer FATAL human-channel guard, relaxed to
   //     first-class faceless service bots (docs/Рантайм-адаптеры).
-  if (adapter.allowedIntelligences && (spec.intelligence == null || !adapter.allowedIntelligences.includes(spec.intelligence))) {
-    return fail(
-      identity,
-      `runtime "${spec.runtime}" requires intelligence ∈ {${adapter.allowedIntelligences.join(', ')}}, ` +
-        `peer "${spec.personality}" is ${spec.intelligence ?? 'unknown'} — refusing to launch`,
-    )
-  }
+  const gateReason = intelligenceGateReason(adapter, spec)
+  if (gateReason) return fail(identity, gateReason)
 
   // (0.5) Ensure the socket's PARENT dir exists before `tmux new-session -S <sock>` —
   //       tmux does NOT create it and fails SILENTLY (the session "dies immediately")
