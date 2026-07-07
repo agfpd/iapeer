@@ -112,10 +112,20 @@ function throwEvent(v: unknown): never {
   throw new Error(`hook stdin has an unexpected hook_event_name "${String(v)}"`)
 }
 
-/** The decision JSON in the shape the given event accepts. A deny carries the reason to the
- *  model. PermissionRequest uses `decision.behavior` (+ `message`); PreToolUse uses
- *  `permissionDecision` (+ `permissionDecisionReason`) — both verified live 2.1.201 / codex 0.142.5. */
-export function formatHookDecision(d: ApprovalDecision, event: HookEvent): string {
+/**
+ * The decision JSON in the shape the given event (and runtime) accepts. A deny carries the
+ * reason to the model. PermissionRequest uses `decision.behavior` (+ `message`); PreToolUse
+ * uses `permissionDecision` (+ `permissionDecisionReason`).
+ *
+ * codex vs claude on the PreToolUse **allow** path (VERIFIED LIVE, codex-cli 0.142.5): codex
+ * honors ONLY `permissionDecision:"deny"` — emitting `permissionDecision:"allow"` marks the
+ * hook **Failed** (fail-open, the "PreToolUse Failed"/"unsupported permissionDecision:allow"
+ * the operator saw). The clean allow on codex is to **abstain**: emit NOTHING (exit 0) → codex
+ * marks the hook **Completed** and the tool proceeds under the gated bypass base (approval is a
+ * DENY-or-abstain gate on codex, not a two-sided allow/deny one). claude's PreToolUse DOES honor
+ * `permissionDecision:"allow"`, so it keeps the affirmative form. Deny is identical on both.
+ */
+export function formatHookDecision(d: ApprovalDecision, event: HookEvent, runtime = 'claude'): string {
   if (event === 'PermissionRequest') {
     return JSON.stringify({
       hookSpecificOutput: {
@@ -124,11 +134,19 @@ export function formatHookDecision(d: ApprovalDecision, event: HookEvent): strin
       },
     })
   }
+  // PreToolUse
+  if (d.decision === 'allow') {
+    // codex: abstain (empty output) — an affirmative "allow" fails the hook (verified live 0.142.5).
+    if (runtime === 'codex') return ''
+    // claude: affirmative allow is honored.
+    return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } })
+  }
+  // deny (+ reason) — honored identically on claude and codex.
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      permissionDecision: d.decision,
-      ...(d.decision === 'deny' && d.reason ? { permissionDecisionReason: d.reason } : {}),
+      permissionDecision: 'deny',
+      ...(d.reason ? { permissionDecisionReason: d.reason } : {}),
     },
   })
 }
@@ -162,6 +180,9 @@ export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Pr
   const env = deps.env ?? process.env
   const doFetch = deps.fetch ?? fetch
   const timeoutMs = deps.timeoutMs
+  // Runtime resolved up front so BOTH the success and the fail-safe-deny paths format for the
+  // right runtime (codex's allow-shape differs from claude's — see formatHookDecision).
+  const runtime = env.PEER_RUNTIME?.trim() || 'claude'
   let event: HookEvent
   let toolName: string
   let toolInput: Record<string, unknown> | undefined
@@ -174,18 +195,17 @@ export async function runApprovalHook(stdin: string, deps: RunHookDeps = {}): Pr
   try {
     const personality = env.PEER_PERSONALITY?.trim()
     if (!personality) throw new Error('no PEER_PERSONALITY in the hook environment')
-    const runtime = env.PEER_RUNTIME?.trim() || 'claude'
     const { kind, content, summary } = actionContent(toolName, toolInput)
     const decision = await requestApproval(
       resolveFleetBase(env),
       { personality, runtime, kind, tool: toolName, content, summary },
       { env, fetch: doFetch, timeoutMs },
     )
-    return { stdout: formatHookDecision(decision, event), stderr: '', exitCode: 0 }
+    return { stdout: formatHookDecision(decision, event, runtime), stderr: '', exitCode: 0 }
   } catch (e) {
     // Event known → event-appropriate DENY JSON (never allow-by-accident, never hang).
     return {
-      stdout: formatHookDecision({ decision: 'deny', reason: `iapeer approval unavailable (${e instanceof Error ? e.message : String(e)}) — denied fail-safe` }, event),
+      stdout: formatHookDecision({ decision: 'deny', reason: `iapeer approval unavailable (${e instanceof Error ? e.message : String(e)}) — denied fail-safe` }, event, runtime),
       stderr: '',
       exitCode: 0,
     }

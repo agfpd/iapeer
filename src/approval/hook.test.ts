@@ -62,12 +62,27 @@ describe('formatHookDecision (per-event shape — verified live)', () => {
       hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'too risky' } },
     })
   })
-  test('PreToolUse → permissionDecision (+ permissionDecisionReason on deny)', () => {
-    expect(JSON.parse(formatHookDecision({ decision: 'allow' }, 'PreToolUse'))).toEqual({
+  test('PreToolUse claude → permissionDecision allow/deny (affirmative allow honored)', () => {
+    expect(JSON.parse(formatHookDecision({ decision: 'allow' }, 'PreToolUse', 'claude'))).toEqual({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
     })
-    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'too risky' }, 'PreToolUse'))).toEqual({
+    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'too risky' }, 'PreToolUse', 'claude'))).toEqual({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'too risky' },
+    })
+  })
+  test('PreToolUse codex ALLOW → EMPTY output (abstain — an affirmative allow fails the codex hook, verified live 0.142.5)', () => {
+    // The fix: codex honors ONLY deny; permissionDecision:"allow" marks the hook Failed
+    // (fail-open + TUI error). Abstaining (empty stdout, exit 0) → hook Completed → tool runs.
+    expect(formatHookDecision({ decision: 'allow' }, 'PreToolUse', 'codex')).toBe('')
+  })
+  test('PreToolUse codex DENY → permissionDecision deny + reason (unchanged, not a regress)', () => {
+    expect(JSON.parse(formatHookDecision({ decision: 'deny', reason: 'nope' }, 'PreToolUse', 'codex'))).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'nope' },
+    })
+  })
+  test('default runtime = claude (unspecified) keeps the affirmative allow', () => {
+    expect(JSON.parse(formatHookDecision({ decision: 'allow' }, 'PreToolUse'))).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
     })
   })
 })
@@ -99,9 +114,29 @@ describe('runApprovalHook (fail-safe orchestration)', () => {
     expect(out.behavior).toBe('deny')
     expect(out.message).toBe('obviously no')
   })
-  test('PreToolUse event → permissionDecision shape (codex path)', async () => {
+  test('PreToolUse + claude runtime → permissionDecision allow shape', async () => {
     const r = await runApprovalHook(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), { env, fetch: okFetch({ decision: 'allow' }) })
     expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+  test('PreToolUse + codex runtime + ALLOW → EMPTY stdout, exit 0 (the fix: no hook error, tool runs)', async () => {
+    const codexEnv = { ...env, PEER_RUNTIME: 'codex' } as unknown as NodeJS.ProcessEnv
+    const r = await runApprovalHook(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), { env: codexEnv, fetch: okFetch({ decision: 'allow' }) })
+    expect(r.stdout).toBe('') // abstain → codex marks the hook Completed and runs the tool
+    expect(r.exitCode).toBe(0)
+  })
+  test('PreToolUse + codex runtime + DENY → still blocks with reason (not a regress)', async () => {
+    const codexEnv = { ...env, PEER_RUNTIME: 'codex' } as unknown as NodeJS.ProcessEnv
+    const r = await runApprovalHook(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rm -rf /' } }), { env: codexEnv, fetch: okFetch({ decision: 'deny', reason: 'obviously no' }) })
+    const out = JSON.parse(r.stdout).hookSpecificOutput
+    expect(out.permissionDecision).toBe('deny')
+    expect(out.permissionDecisionReason).toBe('obviously no')
+  })
+  test('PreToolUse + codex runtime + daemon unreachable → FAIL-SAFE deny (blocks, exit 0)', async () => {
+    const codexEnv = { ...env, PEER_RUNTIME: 'codex' } as unknown as NodeJS.ProcessEnv
+    const deadFetch = (async () => { throw new Error('ECONNREFUSED') }) as unknown as typeof fetch
+    const r = await runApprovalHook(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'x' } }), { env: codexEnv, fetch: deadFetch })
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny') // fail-safe DENIES, never abstains-to-allow
+    expect(r.exitCode).toBe(0)
   })
   test('daemon unreachable → FAIL-SAFE deny (event-appropriate, exit 0)', async () => {
     const deadFetch = (async () => {
