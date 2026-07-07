@@ -23,6 +23,23 @@ export interface NumberedModal {
 
 const CAP_LINES = 24
 const CAP_BYTES = 8192
+// How far above the footer to scan for the modal's options — the real AskUserQuestion box (question +
+// pill + N options each with a DESCRIPTION line + an inter-option separator) is a dozen-plus rows.
+const MODAL_MAX_LINES = 40
+
+/**
+ * Is `line` a claude/codex interactive-SELECT footer — the stable signature of a live numbered picker?
+ * AskUserQuestion: "Enter to select · ↑/↓ to navigate · Esc to cancel"; a resume/boot select: "Enter to
+ * confirm · Esc to cancel"; codex: "Press enter to confirm or esc to go back". Anchoring on this footer
+ * (boris's guidance — устойчивее чем «❯ внизу») is layout-robust: it survives the cursor sitting on ANY
+ * option and options being interleaved with description lines. The command-approval breaker's footer
+ * ("Esc to cancel · Tab to amend · ctrl+e to explain") deliberately does NOT match (no select/navigate
+ * hint) — it is a KNOWN class handled by its own taxonomy, and the structural guards below (a live
+ * glyph-selected option + ≥2 options + nothing below the footer) keep this from firing on prose.
+ */
+export function isSelectFooter(line: string): boolean {
+  return /esc to (?:cancel|go back)/i.test(line) && /(?:enter to |to navigate|to select|to confirm|press enter)/i.test(line)
+}
 // Unicode box-drawing block (U+2500–U+257F) — modal borders/separators; stripped for PARSING only
 // (the verbatim `content` keeps them).
 const BOX_DRAWING = /[─-╿]/g
@@ -65,37 +82,42 @@ function capBlock(block: string[]): string {
  */
 export function detectNumberedModal(pane: string, glyph: string): NumberedModal | null {
   const lines = pane.split(/\r?\n/)
-  // bottom-most row carrying the select glyph.
-  let selected = -1
-  for (let i = 0; i < lines.length; i++) if (lines[i].includes(glyph)) selected = i
-  if (selected < 0) return null
-  // it must be a SELECTED numbered option (`glyph … N. …`) — the composer (`glyph <text>`) carries no
-  // leading digit-dot, so an idle/ready pane and a mere quote-with-composer-below both fail here.
+  // 1. FOOTER anchor — the stable signature of a live interactive select (boris: устойчивее «❯ внизу»).
+  //    The LAST footer line is THIS modal's (a scrolled-off older one sits above). Anchoring here is
+  //    robust to the cursor sitting on ANY option and to options interleaved with DESCRIPTION lines /
+  //    separators (the real AskUserQuestion layout — verified against a live 2.1.202 render).
+  let footerIdx = -1
+  for (let i = 0; i < lines.length; i++) if (isSelectFooter(lines[i])) footerIdx = i
+  if (footerIdx < 0) return null
+  // 2. COMPOSER-REPLACED guard — a LIVE blocking modal has NOTHING below its footer (the composer is
+  //    gone). A mere QUOTE of a modal pasted into chat has the ready composer glyph rendered BELOW it, so
+  //    ANY select glyph after the footer means "not a live block" → reject (the В40 quote class).
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].includes(glyph)) return null
+  // 3. OPTIONS — scan a bounded WINDOW above the footer (NOT a contiguous run: the real modal interleaves
+  //    each option with a wrapped description line and even an inter-option separator, and a blank can sit
+  //    between the last option and the footer). Require a glyph-SELECTED option (a live cursor is on one)
+  //    and ≥2 distinct numbered options. option1 = the "1." row CLOSEST to the footer (the modal's own —
+  //    a stray transcript "1." further up loses to it).
+  const windowTop = Math.max(0, footerIdx - MODAL_MAX_LINES)
   const selectedRe = new RegExp(`${escapeForRegex(glyph)}\\s*\\d+[.)]\\s`)
-  if (!selectedRe.test(lines[selected])) return null
-  // The select glyph sits only on the SELECTED option; siblings render WITHOUT it (above and below). Grow
-  // the contiguous OPTION RUN in BOTH directions from the selected row while each line parses as a
-  // numbered option (an interleaved blank / non-option line ends the run). This captures every option,
-  // not just the ones above the cursor.
-  let optTop = selected
-  let optBottom = selected
-  while (optTop - 1 >= 0 && parseOption(lines[optTop - 1], glyph)) optTop--
-  while (optBottom + 1 < lines.length && parseOption(lines[optBottom + 1], glyph)) optBottom++
-  // need ≥2 DISTINCT numbered options (a real select, not a lone printed `N.` line).
   const nums = new Set<number>()
   let option1 = ''
-  for (let i = optTop; i <= optBottom; i++) {
+  let hasSelected = false
+  let firstOptIdx = -1
+  for (let i = windowTop; i < footerIdx; i++) {
+    if (selectedRe.test(lines[i])) hasSelected = true
     const opt = parseOption(lines[i], glyph)
     if (!opt) continue
+    if (firstOptIdx < 0) firstOptIdx = i
     nums.add(opt.num)
-    if (opt.num === 1 && !option1) option1 = opt.label
+    if (opt.num === 1) option1 = opt.label // last (closest-to-footer) wins
   }
-  if (nums.size < 2) return null
-  // Verbatim block shown to the human: the option run + a little context (the question above / a footer
-  // below), then leading/trailing blank lines trimmed. Bounded by the caps.
-  const start = Math.max(0, optTop - 3)
-  const end = Math.min(lines.length - 1, optBottom + 2)
-  const block = lines.slice(start, end + 1)
+  if (!hasSelected) return null // no live cursor on an option → a printed list, not a live select
+  if (nums.size < 2) return null // ≥2 options → a real select
+  // 4. Verbatim block shown to the human: from a couple of lines above the first option (the question) to
+  //    the footer, blanks trimmed + capped.
+  const cTop = Math.max(windowTop, (firstOptIdx < 0 ? footerIdx : firstOptIdx) - 2)
+  const block = lines.slice(cTop, footerIdx + 1)
   while (block.length && block[0].trim() === '') block.shift()
   while (block.length && block[block.length - 1].trim() === '') block.pop()
   return { content: capBlock(block), option1: option1 || '(option 1)' }

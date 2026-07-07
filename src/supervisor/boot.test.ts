@@ -327,9 +327,54 @@ describe('nextNagAction — command-approval circuit-breaker (standard 3-option 
 })
 
 // docs/17 yolo-robustness — the GENERIC unknown-modal detector: a numbered-SELECT modal matching NONE of
-// the known signatures (a new modal Anthropic/OpenAI shipped). Detected structurally (bottom-most glyph
-// row is a numbered option + ≥2 options), routed ALWAYS to the human with fixed option-1-or-cancel keys.
+// the known signatures (a new modal Anthropic/OpenAI shipped). Detected structurally, ANCHORED ON THE
+// SELECT FOOTER ("Enter to select · ↑/↓ to navigate · Esc to cancel") — layout-robust to the cursor on
+// any option and options interleaved with description lines — + ≥2 options + a live glyph-selected option
+// + nothing below the footer. Routed ALWAYS to the human with fixed option-1-or-cancel keys.
 describe('nextNagAction — generic unknown blocking modal (docs/17 yolo-robustness)', () => {
+  // REGRESSION — the EXACT modelToPlainText render of a LIVE AskUserQuestion (claude 2.1.202, captured
+  // from eph-unk during boris's acceptance). The FIRST detector missed it: options interleaved with
+  // wrapped DESCRIPTION lines + an inter-option separator broke the old contiguous-run count, and the
+  // footer (not a `❯`-numbered row) is the bottom line. This is the fixture that must never regress.
+  const realAskUserQuestion = [
+    ' ☐ Deploy',
+    'How should I deploy the migration?',
+    '❯ 1. Blue-green rollout',
+    '     Stand up the new version alongside the old, cut over traffic once healthy, keep the old stack as instant rollback.',
+    '  2. In-place upgrade',
+    '     Upgrade the running instance directly — faster and cheaper, but no instant rollback and brief downtime during migration.',
+    '  3. Abort and ask later',
+    '     Do not deploy now; defer the decision until more information is available.',
+    '  4. Type something.',
+    '────────────────────────────────────────────────────────────────────────────',
+    '  5. Chat about this',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ].join('\n')
+
+  test('REAL AskUserQuestion (descriptions + separator between options) → detected, taxonomy unknown-modal', () => {
+    const a = nextNagAction(claudeAdapter, realAskUserQuestion)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('unknown-modal')
+    expect(a.alwaysHuman).toBe(true)
+    expect(a.option1).toBe('Blue-green rollout') // parsed past the interleaved description lines
+    expect(a.keys).toEqual(['1', 'Enter']) // Allow presses option 1 — verified live: '1' selects it
+    expect(a.denyKeys).toEqual(['Escape']) // the footer's own "Esc to cancel"
+  })
+
+  test('position-INDEPENDENT — cursor moved to option 3 (arrow-navigated) still detects, option1 unchanged', () => {
+    const cursor3 = realAskUserQuestion.replace('❯ 1. Blue-green', '  1. Blue-green').replace('  3. Abort', '❯ 3. Abort')
+    const a = nextNagAction(claudeAdapter, cursor3)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.option1).toBe('Blue-green rollout') // Allow always presses option 1, wherever the cursor sits
+  })
+
+  test('a numbered list WITHOUT a select footer → none (footer is the required anchor)', () => {
+    const list = ['My plan has three steps:', '❯ 1. First do this', '  2. Then that', '  3. Finally this'].join('\n')
+    expect(nextNagAction(claudeAdapter, list).kind).toBe('none')
+  })
+
   // A REAL claude modal we do NOT have a needle for — e.g. an AskUserQuestion-style select. Its text
   // matches no known signature, but structurally it IS a live numbered select that replaced the composer.
   const unknownModal = [
@@ -367,17 +412,18 @@ describe('nextNagAction — generic unknown blocking modal (docs/17 yolo-robustn
     expect(nagDenyBytesOf(nextNagAction(claudeAdapter, unknownModal, { appCursorKeys: true }))).toEqual(Buffer.from('\x1b'))
   })
 
-  test('a lone numbered line (only "1.") is NOT a select → none (needs ≥2 options)', () => {
-    const lone = ['Here is step one:', '❯ 1. do the thing', '', '❯ '].join('\n')
+  test('a lone numbered option (only "1.") under a footer is NOT a select → none (needs ≥2 options)', () => {
+    const lone = ['Here is step one:', '❯ 1. do the thing', 'Enter to select · Esc to cancel'].join('\n')
     expect(nextNagAction(claudeAdapter, lone).kind).toBe('none')
   })
 
-  test('a QUOTE of a modal (ready composer ❯ is the bottom-most row) → none', () => {
+  test('a QUOTE of a modal (footer quoted, but the ready composer ❯ renders BELOW it) → none', () => {
     const quote = [
-      'the peer pasted a menu into chat:',
-      '  1. Option A',
+      'the peer pasted a picker into chat:',
+      '❯ 1. Option A',
       '  2. Option B',
-      '❯ ', // ready composer below the quote — bottom-most ❯ is not a numbered option
+      'Enter to select · ↑/↓ to navigate · Esc to cancel', // the footer is quoted too…
+      '❯ ', // …but the LIVE composer renders below it → glyph after the footer → not a live block
       '  bypass permissions on',
     ].join('\n')
     expect(nextNagAction(claudeAdapter, quote).kind).toBe('none')
