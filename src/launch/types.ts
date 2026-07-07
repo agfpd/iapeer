@@ -175,6 +175,13 @@ export interface LaunchSpec {
    *  requests route to a human via the daemon broker (a PreToolUse hook, installed
    *  separately at toggle time, is the interceptor). buildArgv reads it. */
   approvalMode?: ApprovalMode
+  /** Extra sandbox-writable roots BEYOND the peer cwd, for a gated codex peer launched under
+   *  `sandbox_mode=workspace-write` (docs/17). Consumed ONLY by codex's gated buildArgv (emitted as
+   *  `-c sandbox_workspace_write.writable_roots=[…]`) — claude/router/yolo ignore it, the same
+   *  codex-only shape as `disallowedTools` is claude-only. Resolved at spec-build from the host's
+   *  memory provider (the shared vault lives OUTSIDE every peer cwd, so a memory write would otherwise
+   *  hit codex's native modal); empty/omitted → no extra roots. */
+  writableRoots?: string[]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

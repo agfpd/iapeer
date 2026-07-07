@@ -13,6 +13,7 @@ import {
   hostStatus,
   memoryProviderPath,
   readMemoryProvider,
+  resolveMemoryWritableRoots,
   readVoiceProvider,
   voiceProviderPath,
   type HostStatus,
@@ -78,6 +79,41 @@ describe('readMemoryProvider (slot declaration, fail-open)', () => {
       expect(p).not.toBeNull()
       expect((p as Record<string, unknown> | null)?.plugin).toBeUndefined() // not parsed at all
     }
+  })
+
+  test('resolveMemoryWritableRoots — gated-codex vault source (config.env, fail-open at every step)', () => {
+    const root = mkTmp()
+    const env = envFor(root)
+    const configEnvPath = join(root, 'plugins', 'iapeer-memory', 'config.env')
+    const VAULT = '/Users/x/Library/Mobile Documents/iCloud~md~obsidian/Documents/iapeer-memory'
+    const writeConfig = (body: string): void => {
+      mkdirSync(join(root, 'plugins', 'iapeer-memory'), { recursive: true })
+      writeFileSync(configEnvPath, body)
+    }
+
+    // no memory slot at all → [] (never even looks at config.env)
+    expect(resolveMemoryWritableRoots(env)).toEqual([])
+
+    // slot present, config.env carries the vault (value with SPACES + '~') → that absolute path, verbatim
+    writeFileSync(memoryProviderPath(env), JSON.stringify(VALID))
+    writeConfig(`# comment\nIAPEER_MEMORY_LOCALE=ru\nIAPEER_MEMORY_VAULT_PATH=${VAULT}\n`)
+    expect(resolveMemoryWritableRoots(env)).toEqual([VAULT])
+
+    // quoted value → quotes stripped
+    writeConfig(`IAPEER_MEMORY_VAULT_PATH="${VAULT}"\n`)
+    expect(resolveMemoryWritableRoots(env)).toEqual([VAULT])
+
+    // a COMMENTED key is ignored; no live key → []
+    writeConfig(`# IAPEER_MEMORY_VAULT_PATH=${VAULT}\n`)
+    expect(resolveMemoryWritableRoots(env)).toEqual([])
+
+    // a RELATIVE path is rejected (a sandbox writable_root must be absolute) → []
+    writeConfig('IAPEER_MEMORY_VAULT_PATH=relative/vault\n')
+    expect(resolveMemoryWritableRoots(env)).toEqual([])
+
+    // slot present but config.env missing entirely → [] (fail-open)
+    rmSync(configEnvPath, { force: true })
+    expect(resolveMemoryWritableRoots(env)).toEqual([])
   })
 
   test('v1.2 provision/unprovision blocks: parsed when valid; relative command or bad args = absent (fail-open)', () => {

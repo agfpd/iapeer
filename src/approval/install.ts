@@ -188,12 +188,21 @@ export function setApprovalMode(cwd: string, mode: ApprovalMode, env: NodeJS.Pro
       if (mode === 'gated') surfaces.push(`claude: ${installClaudeApproval(cwd, env) ? 'PermissionRequest hook + MCP allow-rule installed' : 'settings write SKIPPED (non-object)'}`)
       else surfaces.push(`claude: ${removeClaudeApproval(cwd) ? 'hook + allow-rule removed' : 'nothing to remove'}`)
     } else if (rt === 'codex') {
-      if (mode === 'gated') {
-        const r = installCodexApproval(cwd, env)
-        surfaces.push(`codex: ${r ? `hooks.json installed + trust ${r.trust?.state ?? '?'}` : 'hooks.json write SKIPPED'}`)
-      } else {
-        surfaces.push(`codex: ${removeCodexApproval(cwd, env) ? 'hooks.json + trust removed' : 'trust cleared (no hooks.json)'}`)
-      }
+      // Gated codex is the EXEMPLAR (docs/17 reframe, 07.07): it shows its OWN native approval modal
+      // (from the on-request / workspace-write launch config in codex buildArgv) and the SUPERVISOR
+      // proxies that modal to the bar (unknownBlockingModal → routeCircuitBreaker). So iapeer installs
+      // NO broker PreToolUse hook on gated codex — the hook would SILENCE the native modal (its whole
+      // pre-reframe purpose). We still REMOVE any hook a prior (pre-reframe) gated toggle left behind, so
+      // an existing peer migrates cleanly to the native-modal model. yolo is identical (no hook). The
+      // gated↔yolo difference for codex is now ONLY the launch config + the profile field, not hooks.json
+      // — so the round-trip stays byte-identical. (claude keeps its PermissionRequest broker hook — its
+      // native prompt is what that hook cleanly intercepts; only codex switched to the native-modal model.)
+      const removed = removeCodexApproval(cwd, env)
+      surfaces.push(
+        mode === 'gated'
+          ? `codex: native modal + supervisor proxy, no broker hook${removed ? ' (cleared prior hook)' : ''}`
+          : `codex: ${removed ? 'hooks.json + trust removed' : 'trust cleared (no hooks.json)'}`,
+      )
     }
   }
   return { mode, surfaces }

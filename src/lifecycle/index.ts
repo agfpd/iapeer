@@ -28,6 +28,7 @@ import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/
 import { err, ok, type Result } from '../core/errors.ts'
 import { capPaneLogs } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
+import { resolveMemoryWritableRoots } from '../status/index.ts'
 import { approvalModeOf, readPeerProfile, resolveIdentity, type ApprovalMode } from '../identity/index.ts'
 import {
   ephemeralQueueDepth,
@@ -1109,6 +1110,17 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       ? composePeerPrompt(peer, cwd, identity, cfg, env, peersIndex.peers.map(publicPeerSummary))
       : undefined
 
+    // Human-approval mode from the LOCAL profile (docs/17): drives the runtime bypass flag +
+    // gated permission/approval config in buildArgv. Default yolo. Resolved ONCE — also gates the
+    // writable-roots resolution below.
+    const approvalMode = peerApprovalMode(cwd)
+    // Extra sandbox-writable roots for a GATED CODEX peer (docs/17): under sandbox_mode=workspace-write
+    // a write outside the peer cwd (a memory note into the shared vault) is BLOCKED and pops codex's
+    // native modal, so the vault is granted at launch. Resolved from the host's memory provider ONLY when
+    // it can matter (codex + gated) — a yolo/claude wake never reads it. codex's gated buildArgv consumes
+    // it; every other path ignores the field. Fail-open (empty when no memory provider).
+    const writableRoots = runtime === 'codex' && approvalMode === 'gated' ? resolveMemoryWritableRoots(env) : undefined
+
     // Hand the fully-resolved spec to the launch primitive (HOW). lifecycle has
     // made every WHEN/HOW-MANY decision (lock, registry, H4, runtime, resume).
     const spec: LaunchSpec = {
@@ -1124,9 +1136,8 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       // Carry the peer's nature so the launch primitive can enforce an adapter's
       // intelligence gate (telegram requires natural). From the registry record.
       intelligence: peer.intelligence,
-      // Human-approval mode from the LOCAL profile (docs/17): drives the runtime
-      // bypass flag + gated permission/approval config in buildArgv. Default yolo.
-      approvalMode: peerApprovalMode(cwd),
+      approvalMode,
+      ...(writableRoots && writableRoots.length > 0 ? { writableRoots } : {}),
     }
     const launchCfg: LaunchConfig = {
       claudeBin: cfg.claudeBin,

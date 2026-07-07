@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { IAPEER_MCP_ALLOW, installClaudeApproval, removeClaudeApproval, setApprovalMode } from './install.ts'
+import { IAPEER_MCP_ALLOW, codexHooksJsonPath, installClaudeApproval, removeClaudeApproval, setApprovalMode } from './install.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
@@ -105,5 +105,55 @@ describe('setApprovalMode — profile field + surfaces', () => {
 
   test('throws for a cwd with no peer profile', () => {
     expect(() => setApprovalMode(cwd, 'gated', env)).toThrow()
+  })
+
+  // docs/17 reframe (07.07): gated codex = native modal + supervisor proxy, so iapeer installs NO broker
+  // PreToolUse hook on gated codex (the hook would SILENCE the native modal). CODEX_HOME is isolated so the
+  // trust-clear (removeCodexHooksTrustUnder) never touches the real ~/.codex.
+  function codexEnvFor(): NodeJS.ProcessEnv {
+    return { ...env, CODEX_HOME: join(cwd, '.codexhome') }
+  }
+  function codexHooksText(): string | null {
+    const p = codexHooksJsonPath(cwd)
+    return existsSync(p) ? readFileSync(p, 'utf8') : null
+  }
+
+  test('gated codex installs NO broker hook (native-modal model); surface says so; round-trip has no accumulation', () => {
+    seedPeer(['codex'])
+    const cenv = codexEnvFor()
+    const g = setApprovalMode(cwd, 'gated', cenv)
+    expect(g.mode).toBe('gated')
+    expect(readPeerProfile(cwd)!.approval_mode).toBe('gated')
+    // no iapeer broker hook seeded — hooks.json absent, or (if present for other reasons) not ours
+    expect(codexHooksText() ?? '').not.toContain('approval-hook')
+    expect(g.surfaces.some(s => s.includes('native modal'))).toBe(true)
+    // gated → yolo → gated leaves no codex broker hook either way (byte-identical round-trip: no hook)
+    setApprovalMode(cwd, 'yolo', cenv)
+    expect(codexHooksText() ?? '').not.toContain('approval-hook')
+    setApprovalMode(cwd, 'gated', cenv)
+    expect(codexHooksText() ?? '').not.toContain('approval-hook')
+  })
+
+  test('a prior (pre-reframe) codex broker hook is REMOVED when re-toggling gated (clean migration)', () => {
+    seedPeer(['codex'])
+    mkdirSync(join(cwd, '.codex'), { recursive: true })
+    // simulate what a pre-reframe gated toggle left: OUR approval-hook group in hooks.json
+    writeFileSync(
+      codexHooksJsonPath(cwd),
+      `${JSON.stringify({ hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: '/x/iapeer approval-hook' }] }] } }, null, 2)}\n`,
+    )
+    setApprovalMode(cwd, 'gated', codexEnvFor())
+    expect(codexHooksText() ?? '').not.toContain('approval-hook') // our stale hook is gone
+  })
+
+  test('a FOREIGN codex hook survives a gated toggle (only our block is touched)', () => {
+    seedPeer(['codex'])
+    mkdirSync(join(cwd, '.codex'), { recursive: true })
+    writeFileSync(
+      codexHooksJsonPath(cwd),
+      `${JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: '/foreign/thing' }] }] } }, null, 2)}\n`,
+    )
+    setApprovalMode(cwd, 'gated', codexEnvFor())
+    expect(codexHooksText() ?? '').toContain('/foreign/thing')
   })
 })

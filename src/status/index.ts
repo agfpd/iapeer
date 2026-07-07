@@ -13,7 +13,7 @@
 import { closeSync, openSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { IAPEER_VERSION } from '../core/version.ts'
-import { resolveGlobalRoot } from '../storage/index.ts'
+import { resolveGlobalRoot, pluginInstallDir } from '../storage/index.ts'
 import { daemonDiscoveryPath } from '../daemon/index.ts'
 import { waitForDaemonHealthy } from '../update/index.ts'
 import { iapeerBinPath } from '../install/index.ts'
@@ -109,6 +109,67 @@ export function heartbeatAgeSecs(provider: { heartbeat?: string }, nowMs: number
     return Math.max(0, Math.floor((nowMs - statSync(provider.heartbeat).mtimeMs) / 1000))
   } catch {
     return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sandbox writable roots for a gated codex peer (docs/17). A gated codex session
+// launches under `sandbox_mode=workspace-write`: writes to its own cwd (+ /tmp,
+// $TMPDIR) are silent, but a write OUTSIDE those — a memory note into the shared
+// vault, which lives in iCloud OUTSIDE every peer cwd — is BLOCKED and pops codex's
+// native approval modal. Routine memory writes must not prompt, so the vault is added
+// to `sandbox_workspace_write.writable_roots` at launch. This resolves those extra
+// writable root(s) for the host (empty when the host has no memory provider).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** config.env key the memory provider records its vault path under. */
+const MEMORY_VAULT_ENV_KEY = 'IAPEER_MEMORY_VAULT_PATH'
+
+/**
+ * Extra sandbox-writable roots a gated codex peer needs beyond its cwd — the memory vault
+ * on a host that has a memory provider, else empty.
+ *
+ * INTERIM TECHDEBT (v1 — a durable, tracked debt, NOT a permanent design): the vault path is
+ * read from the provider's OPERATOR-OWNED `config.env` (`IAPEER_MEMORY_VAULT_PATH`), located via
+ * the provider name the memory SLOT declares. This deliberately BYPASSES the slot contract — the
+ * slot (`memory-provider.json`) is the ONLY declarative foundation↔provider boundary; `config.env`
+ * is the provider's PRIVATE surface. It is read-only and fail-open, but it IS a side-coupling that a
+ * future change to the slot contract must be aware of. Why the bypass: the slot is single-writer
+ * (the provider), so foundation cannot populate a vault field itself, and adding one is a cross-repo
+ * change to `@agfpd/iapeer-memory` + its release — a disproportionate cost that would block delivery
+ * on a foreign deploy. FOLLOW-UP (the way out of the debt): promote the data root INTO the slot (a
+ * `MemoryProvider.dataRoots` field the provider writes) so foundation reads it from the declared
+ * contract and this `config.env` read is retired.
+ *
+ * Fail-open at every step: no memory slot / no config.env / no key / a non-absolute value → `[]`. A
+ * gated codex peer still works with an empty result — only a cross-vault write would then prompt (a
+ * safe degraded state, never a break). Uses the injected `env` for path resolution (IAPEER_ROOT-aware
+ * → sandbox-isolated in tests, exactly like the rest of the storage layer).
+ */
+export function resolveMemoryWritableRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const slot = readMemoryProvider(env)
+  if (!slot) return [] // no memory provider on this host → no vault to grant
+  try {
+    const cfgPath = join(pluginInstallDir(slot.provider, { env }), 'config.env')
+    const text = readFileSync(cfgPath, 'utf8')
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim()
+      if (!line || line.startsWith('#')) continue
+      const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line)
+      if (!m || m[1] !== MEMORY_VAULT_ENV_KEY) continue
+      let value = m[2].trim()
+      if (
+        value.length >= 2 &&
+        ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+      ) {
+        value = value.slice(1, -1)
+      }
+      // Absolute path only — a relative writable_root is meaningless to codex's sandbox.
+      return value.startsWith('/') ? [value] : []
+    }
+    return [] // key absent from config.env
+  } catch {
+    return [] // unreadable config.env — fail-open to bare
   }
 }
 

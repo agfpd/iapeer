@@ -115,11 +115,29 @@ describe('approval-mode toggle — buildArgv + ready gate (docs/17)', () => {
     expect(argv).toContain('--dangerously-bypass-approvals-and-sandbox')
     expect(argv.join(' ')).not.toContain('approval_policy')
   })
-  test('codex gated: NO bypass, approvals on + sandbox off (danger-full-access)', () => {
+  // docs/17 reframe (07.07): gated codex = the EXEMPLAR — native modal + workspace-write sandbox, NOT
+  // danger-full-access. approvals on-request + ws-write + network OFF; writable_roots only when supplied.
+  test('codex gated: NO bypass, on-request + workspace-write + network off (no danger-full-access)', () => {
     const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w', approvalMode: 'gated' }), cfg)
     expect(argv).not.toContain('--dangerously-bypass-approvals-and-sandbox')
     expect(argv.join(' ')).toContain('approval_policy=on-request')
-    expect(argv.join(' ')).toContain('sandbox_mode=danger-full-access')
+    expect(argv.join(' ')).toContain('sandbox_mode=workspace-write')
+    expect(argv.join(' ')).toContain('sandbox_workspace_write.network_access=false')
+    expect(argv.join(' ')).not.toContain('danger-full-access')
+    // no writableRoots supplied → the writable_roots override is OMITTED entirely
+    expect(argv.join(' ')).not.toContain('writable_roots')
+  })
+  test('codex gated + writableRoots: emits a TOML string-array writable_roots override (spaces/tilde intact)', () => {
+    const vault = '/Users/x/Library/Mobile Documents/iCloud~md~obsidian/Documents/iapeer-memory'
+    const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w', approvalMode: 'gated', writableRoots: [vault] }), cfg)
+    // the override rides as ONE argv element: key + a JSON/TOML string-array literal (path verbatim)
+    expect(argv).toContain(`sandbox_workspace_write.writable_roots=${JSON.stringify([vault])}`)
+    expect(argv.join(' ')).toContain('"/Users/x/Library/Mobile Documents/iCloud~md~obsidian/Documents/iapeer-memory"')
+  })
+  test('codex YOLO ignores writableRoots (no sandbox → no writable_roots)', () => {
+    const argv = codexAdapter.buildArgv(spec({ runtime: 'codex', cwd: '/w', writableRoots: ['/some/vault'] }), cfg)
+    expect(argv).toContain('--dangerously-bypass-approvals-and-sandbox')
+    expect(argv.join(' ')).not.toContain('writable_roots')
   })
   test('claude isInputReady is mode-aware: gated ready pane has NO bypass banner', () => {
     const gatedReady = 'some output\n❯ Try "edit <filepath> to..."\n' // no "bypass permissions on"

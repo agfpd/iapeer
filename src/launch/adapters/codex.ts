@@ -209,13 +209,32 @@ export const codexAdapter: RuntimeAdapter = {
    * NO currency — no marketplace/install/update on this path.
    */
   buildArgv(spec: LaunchSpec, cfg: LaunchAdapterConfig): string[] {
-    // Human-approval mode (docs/17). yolo (default) = the YOLO bypass flag (current
-    // fleet behavior). gated = NO bypass + `-c approval_policy=on-request` (the model
-    // asks before acting → the PreToolUse/PermissionRequest hook intercepts) with
-    // `-c sandbox_mode=danger-full-access` — gated gates APPROVALS, it does NOT add a
-    // sandbox (workspace-write would sever the loopback-MCP send_to_peer + vault writes;
-    // sandboxing is a separate axis, not v1). Session-scoped `-c`, never a host-config edit.
+    // Human-approval mode (docs/17). yolo (default) = the YOLO bypass flag (current fleet behavior).
+    //
+    // gated = codex as the EXEMPLAR (docs/17 reframe, 07.07): the peer shows its OWN NATIVE approval
+    // modal in the TUI on a risky action — an attached human approves right there — while the supervisor
+    // proxies that same modal to the bar (unknownBlockingModal → routeCircuitBreaker → broker card). So
+    // gated launches WITHOUT the bypass and WITHOUT a broker PreToolUse hook (the hook would SILENCE the
+    // native modal — that was the pre-reframe design; setApprovalMode no longer installs it on gated
+    // codex). The config, session-scoped `-c` (never a host-config edit):
+    //   - `approval_policy=on-request` — the model asks before a non-auto-approved action → native modal.
+    //   - `sandbox_mode=workspace-write` — writes to the peer cwd (+ /tmp, $TMPDIR) are SILENT; a write
+    //     OUTSIDE those is blocked → native modal. This SUPERSEDES the old `danger-full-access` (whose
+    //     comment claimed ws-write would sever MCP + vault writes — DISPROVEN by the live sandbox matrix
+    //     07.07): send_to_peer (MCP) goes THROUGH regardless of network_access because Seatbelt wraps the
+    //     shell CHILDREN codex spawns, not the codex process itself, so the loopback MCP call is never
+    //     sandboxed; and the vault is restored to writable via writable_roots just below.
+    //   - `sandbox_workspace_write.writable_roots=[…]` — the extra roots (the shared memory vault, which
+    //     lives OUTSIDE every peer cwd) so ROUTINE memory writes stay silent instead of popping the modal.
+    //     Omitted when spec.writableRoots is empty (no memory provider). The value is a TOML inline array
+    //     of strings — JSON.stringify yields exactly that (paths quoted, `"`/`\` escaped); launch shell-
+    //     quotes the whole `-c` element once, so spaces/`~` in the path arrive intact. Array `-c` form
+    //     verified live (codex-cli 0.142.5).
+    //   - `sandbox_workspace_write.network_access=false` — pin outbound network OFF (the ws-write default,
+    //     set explicitly so a codex default change can't silently open it). Real outbound stays a risk →
+    //     native modal; MCP send_to_peer is unaffected (see above).
     const gated = spec.approvalMode === 'gated'
+    const roots = spec.writableRoots ?? []
     return [
       cfg.codexBin,
       ...(spec.resume ? ['resume', '--last'] : []),
@@ -226,7 +245,15 @@ export const codexAdapter: RuntimeAdapter = {
         ? ['-c', `model_instructions_file=${spec.systemPromptFile}`]
         : []),
       ...(gated
-        ? ['-c', 'approval_policy=on-request', '-c', 'sandbox_mode=danger-full-access']
+        ? [
+            '-c',
+            'approval_policy=on-request',
+            '-c',
+            'sandbox_mode=workspace-write',
+            ...(roots.length > 0 ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`] : []),
+            '-c',
+            'sandbox_workspace_write.network_access=false',
+          ]
         : ['--dangerously-bypass-approvals-and-sandbox']),
       ...(spec.extraArgs ?? []),
     ]
@@ -259,13 +286,16 @@ export const codexAdapter: RuntimeAdapter = {
   },
 
   /**
-   * GENERIC unknown blocking-modal detector (docs/17 — yolo-robustness). codex carries no known
-   * mid-session circuit-breaker (its tool approvals ride the PreToolUse hook under gated, and yolo
-   * bypasses them), so it declares no blockingConfirm/nagDismissKeys — but a NON-hookable modal
-   * (MCP-elicitation, a future codex prompt) can still surface on screen and hang the pty. This catches
-   * that residue structurally (bottom-most `›` is a numbered option + ≥2 options; see modalDetect.ts),
-   * excluding the known boot dialogs (owned by the boot-driver). The daemon routes it to the human with
-   * explicit button semantics + the timing stuck-gate on top.
+   * GENERIC unknown blocking-modal detector (docs/17 — yolo-robustness) — AND, since the gated reframe
+   * (07.07), the catcher for codex's OWN NATIVE approval modal. codex declares no blockingConfirm: under
+   * yolo the bypass flag means no modal ever shows; under gated codex shows its native `approval_policy=
+   * on-request` / sandbox modal, which is a numbered `›` select — so THIS structural detector (bottom-most
+   * `›` is a numbered option + ≥2 options; see modalDetect.ts) is what surfaces it to the human, exactly
+   * like a truly-unforeseen modal. The daemon routes it to the human (bar card) with explicit button
+   * semantics + the timing stuck-gate on top; an ATTACHED human can equally answer it in the TUI directly.
+   * Known boot dialogs (owned by the boot-driver) are excluded first. NB modalDetect keys on a SELECT
+   * FOOTER (isSelectFooter) — that the codex approval modal's footer matches it is a LIVE-verified
+   * invariant (docs/17 §gated-codex); a codex footer that ever diverges would need its own signature here.
    */
   unknownBlockingModal(pane: string): { content: string; option1: string } | null {
     if (isKnownCodexBlockingSignature(pane)) return null
