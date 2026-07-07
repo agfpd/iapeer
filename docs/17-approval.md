@@ -63,9 +63,25 @@ Both runtimes carry a Claude-compatible **hook** system that intercepts an appro
 
 - **claude `PermissionRequest`** — stdin carries `{tool_name, tool_input, …}`; the hook prints `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow|deny","message":"…"}}}`. A `deny` carries `message` to the model. Fires only on prompt-worthy calls.
 - **codex `PreToolUse`** — same stdin shape; prints `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow|deny","permissionDecisionReason":"…"}}`. `exit 2` (+ stderr) also denies. Verified live (0.142.5): codex fires `PreToolUse` (not `PermissionRequest`) for tool calls with `tool_name:"Bash"` for shell; a `deny` hard-blocks the tool and the reason reaches the model even under `sandbox_mode=danger-full-access` — so under the gated config (danger-full-access + on-request → `permission_mode=bypassPermissions`) the hook is the SOLE gate.
-- **supervisor circuit-breaker** — claude's `dangerous-rm`/`rmdir` guard (and the standard command-approval prompt a no-bypass session shows) is a TUI select the hook never sees. The pty supervisor reads it off its authoritative model and, under gated, POSTs it to the broker (below); under yolo it auto-presses YES with an audit line.
+- **supervisor circuit-breaker** — claude's `dangerous-rm`/`rmdir` guard (and the standard command-approval prompt a no-bypass session shows) is a TUI select the hook never sees. The pty supervisor reads it off its authoritative model and routes by class (see *Supervisor pty-scrape classification* below): the known auto-Yes classes are pressed under yolo (with an audit line) / brokered under gated, while `org-policy` and any unrecognized `unknown-modal` always go to the human.
 
 The hook binary is the `iapeer approval-hook` subcommand: it reads the runtime's hook JSON on stdin, resolves `PEER_PERSONALITY`/`PEER_RUNTIME` from its session env and the daemon URL from `router.json`, POSTs a blocking request to the broker, and prints the runtime-appropriate decision JSON.
+
+### Supervisor pty-scrape classification (yolo-robustness)
+
+The supervisor nag-watcher classifies every mid-session blocking TUI modal it observes off its authoritative model. It fires only when the pane has been **completely static** for a threshold (the timing stuck-gate: a real blocked modal freezes the pty; a peer merely streaming or rendering the modal text keeps writing) **and** the modal is a live numbered-select that **replaced the composer** (the bottom-most cursor-glyph row is a numbered option, not the composer — the same idle→composer / modal→option invariant the known matchers rest on). Owner rule: **yolo presses what it KNOWS (maximum known rights); anything new or above the peer, the human must SEE and confirm** — never a blind auto-Yes (a modal a runtime raised on purpose must not be swallowed), never a hang.
+
+| Class | Detection | yolo | gated |
+|---|---|---|---|
+| `dangerous-rm` | known needle (2-option `1.Yes/2.No`) | auto-Yes + audit | broker (Allow=1 / Deny=2) |
+| `command-approval` | known needle (3-option `1.Yes/2.Yes,…/3.No`) | auto-Yes + audit | broker (Allow=1 / Deny=3) |
+| `org-policy` | known needle ("organization requires approval") | **broker — never auto-Yes** | broker (Allow=1 / Deny=3) |
+| `unknown-modal` | **generic** — numbered select (≥2 options) matching NO known signature | **broker — never auto-Yes** | **broker** |
+
+- **`org-policy`** is a barrier ABOVE the peer (an MCP org-restriction). It is recognized but **always routed to the human** on both modes (the owner's org rule is human-only), with the precise 3-option keys. Previously it was excluded from the matcher and a yolo peer HUNG on it — now closed.
+- **`unknown-modal`** is the generic residue: a numbered-select modal (a new one Anthropic/OpenAI shipped) matching none of the known signatures. It is **always routed to the human** on both modes. Because the option layout is unknown, the injection is **binary** (v1): **Allow presses option 1** (the proceed/primary position in every known select; the position-robust affirmative) and **Deny presses `Escape`** (the universal modal cancel — it commits no numbered choice, so it can never accidentally affirm). The broker `content` carries **explicit button semantics** — the verbatim modal block plus a header stating exactly what Allow presses (`option 1: "<verbatim label>"`) and that Deny cancels via Esc — so the human decides informed, not on an abstract Allow/Deny. A **>2-way** choice on an unknown modal is a v2 extension (most approvals are binary). If a modal ignores the injected keys (Esc not honored), the daemon **bounds re-enqueue** (a few rounds) then **logs once and safe-parks** — the peer stays blocked (safe), never an infinite ask loop nor a blind Yes. Both claude (`❯`) and codex (`›`) are covered; codex's known boot dialogs are excluded (owned by the boot-driver).
+
+The supervisor scrape is the ONLY interceptor for prompts the runtime hook cannot see (dangerous-rm above the permission layer; a non-hookable modal such as codex MCP-elicitation). A blocking prompt that is NOT a numbered select (a free-form text-input prompt) is out of v1 scope — the numbered-select family is the approval/confirm class in practice.
 
 ## Nomenclature v1 and content per action (criterion «what is being approved»)
 

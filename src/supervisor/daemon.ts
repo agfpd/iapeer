@@ -94,6 +94,11 @@ const NAG_COOLDOWN_MS = 4000
  *  fire. A genuinely blocked modal freezes the session forever, so a ~10 s delay costs nothing;
  *  a live peer rendering the modal text keeps writing (stream/spinner) and never crosses this. */
 const NAG_STUCK_MS = 10_000
+// docs/17 fork 3 — bound how many times the daemon re-asks a human about a GENERIC unknown modal whose
+// injected keys did NOT clear it (a modal ignoring both option-1 and Esc). After this many answered-but-
+// still-static rounds it logs once and safe-PARKS (the peer stays blocked = safe) instead of looping
+// forever. The counter resets the moment the pane makes progress (writeSeq advances → the modal cleared).
+const MAX_UNKNOWN_MODAL_ATTEMPTS = 3
 // В25 — cap the attach-snapshot stabilization wait: under saturating output the model never goes quiet,
 // so without a budget firstAttach would never complete (frozen attach). On timeout we snapshot the
 // current model; live-forward delivers the rest once the gate lifts.
@@ -689,7 +694,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // NAG_COOLDOWN_MS so a just-dismissed modal is never double-answered (a stray keystroke would land in
   // the now-visible composer). Only runs for a runtime whose adapter declares nagDismissKeys.
   const nagAdapter = BOOT_ADAPTERS[runtime] as NagPredicate | undefined
-  if (nagAdapter?.nagDismissKeys || nagAdapter?.blockingConfirm) {
+  if (nagAdapter?.nagDismissKeys || nagAdapter?.blockingConfirm || nagAdapter?.unknownBlockingModal) {
     // ── Unit 4 — approval-mode routing for the circuit-breaker ──────────────────────
     // Resolve the peer's approval mode ONCE at watcher setup: the profile is stable for the session (a
     // mid-session flip needs a fresh launch), and re-reading it every tick would hammer the fs. yolo
@@ -711,10 +716,16 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     const brokerPersonality =
       brokerEnv.PEER_PERSONALITY?.trim() || (session.startsWith(`${runtime}-`) ? session.slice(runtime.length + 1) : session)
     const brokerRuntime = brokerEnv.PEER_RUNTIME?.trim() || runtime
-    // In-flight guard: the setInterval keeps firing while a gated POST is outstanding (the modal stays up,
+    // In-flight guard: the setInterval keeps firing while a broker POST is outstanding (the modal stays up,
     // the pane stays stuck), so gate to EXACTLY ONE broker request per wedged modal.
     let brokerInFlight = false
     let nagFiredMs = 0
+    // docs/17 fork 3 — bounded re-enqueue state for a GENERIC unknown modal. `attempts` counts answered-
+    // but-still-static rounds; `parked` latches after MAX to stop asking. Both reset on pane progress
+    // (writeSeq advance) so a later, DIFFERENT modal is handled fresh.
+    let unknownModalAttempts = 0
+    let unknownModalParked = false
+    let lastNagSeq = -1
     // В60 — stuck-gate: a REAL blocked modal freezes the pty entirely, while a live peer merely
     // RENDERING the modal text (code review / quoted report — the В40 false-fire class) keeps
     // writing. Fire the dismiss ONLY when the pane has been completely static (writeSeq unchanged)
@@ -724,6 +735,13 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       if (down) {
         clearInterval(nagWatch)
         return
+      }
+      // Pane made PROGRESS since last tick → the modal (if any) cleared / the peer moved on: reset the
+      // unknown-modal re-enqueue counters so a subsequent, different modal starts a fresh budget.
+      if (writeSeq !== lastNagSeq) {
+        lastNagSeq = writeSeq
+        unknownModalAttempts = 0
+        unknownModalParked = false
       }
       if (!paneIsStuck(stuckGate, writeSeq, Date.now(), NAG_STUCK_MS)) return // progressing → not a wedged modal
       if (Date.now() - nagFiredMs < NAG_COOLDOWN_MS) return // let a just-answered modal repaint away first
@@ -738,19 +756,51 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         child.terminal.write(action.bytes)
         nagFiredMs = Date.now()
       } else if (action.kind === 'approve') {
-        // CIRCUIT-BREAKER confirm (e.g. dangerous-rm) — a headless peer has no human to press it, so it
-        // hangs forever. What we press depends on the peer's approval MODE (resolved once above):
-        if (approvalMode === 'gated') {
-          // GATED — route the confirm to the human-approval broker (docs/17, Unit 4). A blocking POST
-          // awaits a human's allow/deny (≤ broker 300s); routeCircuitBreaker injects the affirmative on
-          // allow, the taxonomy-specific decline on deny (dangerous-rm=2.No / command-approval=3.No), and
-          // fails safe to DENY on any broker fault. The breaker sits ABOVE the permission layer, so this
-          // is the ONLY interceptor for prompts the runtime hook cannot see (dangerous-rm; rm from a
-          // subprocess). Guarded by brokerInFlight so a re-firing tick never opens a second request.
-          if (brokerInFlight) return
+        // A blocking confirm/modal a headless peer can't answer → it hangs forever. WHERE it goes depends
+        // on the class + the peer's approval MODE (resolved once above):
+        //   - alwaysHuman (org-policy / unknown-modal, docs/17 yolo-robustness) → ALWAYS to the human
+        //     broker in EITHER mode. Owner's rule: yolo presses what it KNOWS (max known rights); a modal
+        //     ABOVE us (org-policy) or one we could NOT classify (unknown) I must SEE and confirm — never
+        //     a blind auto-Yes (an unknown modal Anthropic put up on purpose must not be swallowed).
+        //   - known auto-Yes class (dangerous-rm / command-approval): gated → broker, yolo → auto-Yes.
+        const routeToHuman = action.alwaysHuman || approvalMode === 'gated'
+        if (routeToHuman) {
+          if (brokerInFlight) return // one broker request per wedged modal (the tick keeps firing)
+          // BOUNDED re-enqueue for a GENERIC unknown modal whose injected keys may not dismiss it (fork 3):
+          // after MAX_UNKNOWN_MODAL_ATTEMPTS answered rounds that leave the pane STILL static, stop asking —
+          // log once and safe-PARK (the peer stays blocked = safe; never an infinite ask loop nor a blind
+          // Yes). Counters reset on pane progress (loop top). Known classes (org-policy) have precise keys
+          // that DO dismiss, so this bound applies only to the heuristic unknown-modal path.
+          if (action.brokerKind === 'unknown-modal') {
+            if (unknownModalParked) return
+            if (unknownModalAttempts >= MAX_UNKNOWN_MODAL_ATTEMPTS) {
+              unknownModalParked = true
+              try {
+                console.warn(
+                  `[supervisor] UNKNOWN-MODAL PARKED identity=${session} ts=${new Date().toISOString()} attempts=${unknownModalAttempts} — injected keys did not clear it; manual attention needed`,
+                )
+              } catch {
+                /* logging must never break the conduit */
+              }
+              return
+            }
+            unknownModalAttempts++
+          }
+          // Route to the human-approval broker (docs/17). A blocking POST awaits a human's allow/deny (≤
+          // broker 300s); routeCircuitBreaker injects the affirmative on allow, the class-specific decline
+          // on deny (dangerous-rm=2.No / command-approval|org-policy=3.No / unknown-modal=Esc), and fails
+          // safe to DENY on any broker fault. For unknown-modal the broker content carries EXPLICIT button
+          // semantics (Allow presses option 1 "<label>"; Deny cancels via Esc) so the human decides informed.
           brokerInFlight = true
           void routeCircuitBreaker(
-            { taxonomy: action.taxonomy, detail: action.detail, approveBytes: action.bytes, denyBytes: action.denyBytes },
+            {
+              taxonomy: action.taxonomy,
+              brokerKind: action.brokerKind,
+              detail: action.detail,
+              option1: action.option1,
+              approveBytes: action.bytes,
+              denyBytes: action.denyBytes,
+            },
             {
               personality: brokerPersonality,
               runtime: brokerRuntime,
@@ -770,7 +820,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
           })
           return
         }
-        // YOLO (default) — auto-press YES so a headless peer never hangs (owner decision: restores the
+        // YOLO + known class — auto-press YES so a headless peer never hangs (owner decision: restores the
         // pre-2.1.x bypass status quo). Leave a post-hoc AUDIT line (WHICH peer, WHAT taxonomy + parsed
         // command/target, WHEN) so a rare bad rm is at least visible after the fact. Best-effort log,
         // never gates the keypress.

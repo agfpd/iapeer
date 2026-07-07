@@ -25,6 +25,7 @@ import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
 import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 import { lastTimestampedEntryMs } from './transcriptTail.ts'
+import { detectNumberedModal } from './modalDetect.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Boot dialog + ready markers (lifecycle claudeBootDialog / claudeInputReady)
@@ -167,6 +168,44 @@ function commandApprovalDetail(pane: string): string {
   const hi = lines.findIndex(l => l.trim() === BASH_CMD_HEADER)
   if (hi >= 0) for (let j = hi + 1; j < lines.length; j++) { const t = lines[j].trim(); if (t) return `cmd=${JSON.stringify(t)}` }
   return '(unparsed)'
+}
+
+// ORG-POLICY approval prompt (docs/17 — yolo-robustness). "Your organization requires approval for this
+// tool" is an MCP org-restriction: a barrier ABOVE the peer that the owner's rule says is HUMAN-only —
+// NEVER auto-pressed on ANY peer (yolo included). It was previously EXCLUDED from isCommandApprovalPrompt
+// (→ fell through to 'none' → a yolo peer HUNG on it). Now it is its OWN recognized-but-always-human tier
+// (blockingConfirm alwaysHuman:true) so it routes to the broker under BOTH modes with the SAME 3-option
+// command-approval layout keys (Allow=1.Yes, Deny=3.No). If a future org-policy render is NOT this
+// 3-option layout, isOrgPolicyPrompt returns false and the GENERIC unknownBlockingModal catches it
+// instead (→ human with Esc-deny) — either way it reaches a human, never auto-Yes.
+/** FULL-signature + position match for the org-policy approval prompt: the org needle + the 3-option
+ *  "proceed?" select with the bottom-most `❯` cursor on "1. Yes" (a live modal, not a quote). */
+function isOrgPolicyPrompt(pane: string): boolean {
+  if (!pane.includes(RM_PROCEED)) return false
+  if (!pane.includes(ORG_POLICY_APPROVAL)) return false
+  if (isDangerousRmPrompt(pane)) return false // 2-option breaker owns its pane
+  if (!/(^|\n)\s*2\.\s*Yes/.test(pane)) return false
+  if (!/(^|\n)\s*3\.\s*No\b/.test(pane)) return false
+  let lastCursorRow = ''
+  for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
+  return /❯\s*1\.\s*Yes\b/.test(lastCursorRow)
+}
+
+// claude's select-modal cursor glyph (U+276F) — the same glyph isInputReady / the nag matcher key on.
+const CLAUDE_SELECT_GLYPH = '❯'
+/** Does the pane carry a KNOWN claude blocking signature (dangerous-rm / command-approval / org-policy /
+ *  fullscreen-nag)? unknownBlockingModal returns null for these so it fires ONLY for the unrecognized
+ *  residue — the daemon also checks them first, but this keeps the detector self-contained + testable. */
+function isKnownClaudeBlockingSignature(pane: string): boolean {
+  // anyBootDialog: the numbered boot selects (resume-picker / bypass-accept / theme / MCP-approval) are
+  // owned by the boot-driver (nextBootAction) — never treat them as an "unknown" mid-session modal.
+  return (
+    anyBootDialog(pane) ||
+    isDangerousRmPrompt(pane) ||
+    isCommandApprovalPrompt(pane) ||
+    isOrgPolicyPrompt(pane) ||
+    isFullscreenNagText(pane)
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,10 +435,26 @@ export const claudeAdapter: RuntimeAdapter = {
    * command/target trace for the audit + broker content. NB deliberately NOT a "smart" safe-decline —
    * the gated human-approval path lands via the daemon broker (docs/17, Unit 4).
    */
-  blockingConfirm(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null {
+  blockingConfirm(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string; alwaysHuman?: boolean } | null {
     if (isDangerousRmPrompt(pane)) return { keys: ['1', 'Enter'], denyKeys: ['2', 'Enter'], taxonomy: 'dangerous-rm', detail: dangerousRmDetail(pane) }
     if (isCommandApprovalPrompt(pane)) return { keys: ['1', 'Enter'], denyKeys: ['3', 'Enter'], taxonomy: 'command-approval', detail: commandApprovalDetail(pane) }
+    // Org-policy: recognized, but NEVER auto-Yes — always to the human (both modes). Same 3-option keys.
+    if (isOrgPolicyPrompt(pane)) return { keys: ['1', 'Enter'], denyKeys: ['3', 'Enter'], taxonomy: 'org-policy', detail: commandApprovalDetail(pane), alwaysHuman: true }
     return null
+  },
+
+  /**
+   * GENERIC unknown blocking-modal detector (docs/17 — yolo-robustness). Fires for a numbered-select
+   * modal that halts the pty but matches NONE of the known signatures above (a new modal we did not
+   * foresee — the class that hung a live yolo peer). Returns null for the known signatures (checked by
+   * isKnownClaudeBlockingSignature) so the daemon routes those through their own tiers. The verbatim
+   * block + option-1 label let the daemon give the human EXPLICIT button semantics (Allow presses
+   * option 1 = "<option1>", Deny cancels via Esc). Detection is structural (bottom-most `❯` is a
+   * numbered option + ≥2 options) — see modalDetect.ts; the daemon's timing stuck-gate composes on top.
+   */
+  unknownBlockingModal(pane: string): { content: string; option1: string } | null {
+    if (isKnownClaudeBlockingSignature(pane)) return null
+    return detectNumberedModal(pane, CLAUDE_SELECT_GLYPH)
   },
 
   /**

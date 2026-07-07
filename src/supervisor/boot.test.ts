@@ -262,22 +262,35 @@ describe('nextNagAction — command-approval circuit-breaker (standard 3-option 
   })
 
   // BORIS HARD CRITERION: an org-policy prompt ("Your organization requires approval for this tool", an
-  // MCP restriction) MUST NOT be auto-pressed — the owner's org rule is human-only. Even though it wears
-  // the SAME 3-option layout, the matcher's explicit exclusion keeps it OUT.
-  test('org-policy prompt → NONE (never auto-Yes the owner org rule), despite the same 3-option layout', () => {
-    const orgPolicyPrompt = [
-      ' some_mcp__server__tool',
-      '',
-      ' Your ' + 'organization requires ' + 'approval' + ' for this tool',
-      '',
-      ' Do you want to ' + 'proceed?',
-      ' ❯ 1. Yes',
-      '   2. Yes, and don' + "'t ask again",
-      '   3. No',
-      '',
-      ' Esc to cancel · Tab to amend · ctrl+e to explain',
-    ].join('\n')
-    expect(nextNagAction(claudeAdapter, orgPolicyPrompt).kind).toBe('none')
+  // MCP restriction) MUST NOT be auto-pressed — the owner's org rule is human-only. docs/17 yolo-
+  // robustness: it is now a RECOGNIZED-but-ALWAYS-HUMAN class (alwaysHuman:true) — routed to the broker
+  // under BOTH modes, never auto-Yes, with its own taxonomy + the precise 3-option keys.
+  const orgPolicyPrompt = [
+    ' some_mcp__server__tool',
+    '',
+    ' Your ' + 'organization requires ' + 'approval' + ' for this tool',
+    '',
+    ' Do you want to ' + 'proceed?',
+    ' ❯ 1. Yes',
+    '   2. Yes, and don' + "'t ask again",
+    '   3. No',
+    '',
+    ' Esc to cancel · Tab to amend · ctrl+e to explain',
+  ].join('\n')
+  test('org-policy prompt → approve+alwaysHuman (never auto-Yes), taxonomy org-policy, precise 1/3 keys', () => {
+    const a = nextNagAction(claudeAdapter, orgPolicyPrompt)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('org-policy')
+    expect(a.alwaysHuman).toBe(true) // routed to the human even on a YOLO peer (owner rule: never auto)
+    expect(a.brokerKind).toBe('circuit-breaker')
+    expect(a.keys).toEqual(['1', 'Enter']) // Allow = 1.Yes
+    expect(a.denyKeys).toEqual(['3', 'Enter']) // Deny = 3.No (3-option layout)
+  })
+  test('org-policy is NOT reclassified as the generic unknown-modal (recognized → precise keys)', () => {
+    const a = nextNagAction(claudeAdapter, orgPolicyPrompt)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).not.toBe('unknown-modal')
   })
 
   test('a mere QUOTE of the prompt (ready composer ❯ below, not on "1. Yes") → none', () => {
@@ -310,6 +323,99 @@ describe('nextNagAction — command-approval circuit-breaker (standard 3-option 
 
   test('codex has no command-approval circuit-breaker → none', () => {
     expect(nextNagAction(codexAdapter, cmdApprovalPrompt).kind).toBe('none')
+  })
+})
+
+// docs/17 yolo-robustness — the GENERIC unknown-modal detector: a numbered-SELECT modal matching NONE of
+// the known signatures (a new modal Anthropic/OpenAI shipped). Detected structurally (bottom-most glyph
+// row is a numbered option + ≥2 options), routed ALWAYS to the human with fixed option-1-or-cancel keys.
+describe('nextNagAction — generic unknown blocking modal (docs/17 yolo-robustness)', () => {
+  // A REAL claude modal we do NOT have a needle for — e.g. an AskUserQuestion-style select. Its text
+  // matches no known signature, but structurally it IS a live numbered select that replaced the composer.
+  const unknownModal = [
+    'How should I handle the migration?',
+    '',
+    '❯ 1. Rewrite the schema in place',
+    '  2. Create a new versioned table',
+    '  3. Ask me again later',
+    '',
+    'Enter to confirm · Esc to cancel',
+  ].join('\n')
+
+  test('unknown numbered select → approve, taxonomy unknown-modal, alwaysHuman, Allow=1/Enter Deny=Escape', () => {
+    const a = nextNagAction(claudeAdapter, unknownModal)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('unknown-modal')
+    expect(a.alwaysHuman).toBe(true) // to the human in BOTH modes
+    expect(a.brokerKind).toBe('unknown-modal')
+    expect(a.keys).toEqual(['1', 'Enter']) // Allow presses option 1
+    expect(a.denyKeys).toEqual(['Escape']) // Deny cancels the modal (universal Esc)
+    expect(nagBytesOf(a)).toEqual(Buffer.from('1\r'))
+    expect(nagDenyBytesOf(a)).toEqual(Buffer.from('\x1b')) // Escape byte
+  })
+
+  test('carries the verbatim block + option-1 label (for explicit human button semantics)', () => {
+    const a = nextNagAction(claudeAdapter, unknownModal)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.option1).toBe('Rewrite the schema in place') // what an Allow will press — shown to the human
+    expect(a.detail).toContain('How should I handle the migration?') // verbatim question
+    expect(a.detail).toContain('2. Create a new versioned table') // verbatim options
+  })
+
+  test('Deny bytes are cursor-mode INDEPENDENT (Escape is a plain \\x1b either way)', () => {
+    expect(nagDenyBytesOf(nextNagAction(claudeAdapter, unknownModal, { appCursorKeys: true }))).toEqual(Buffer.from('\x1b'))
+  })
+
+  test('a lone numbered line (only "1.") is NOT a select → none (needs ≥2 options)', () => {
+    const lone = ['Here is step one:', '❯ 1. do the thing', '', '❯ '].join('\n')
+    expect(nextNagAction(claudeAdapter, lone).kind).toBe('none')
+  })
+
+  test('a QUOTE of a modal (ready composer ❯ is the bottom-most row) → none', () => {
+    const quote = [
+      'the peer pasted a menu into chat:',
+      '  1. Option A',
+      '  2. Option B',
+      '❯ ', // ready composer below the quote — bottom-most ❯ is not a numbered option
+      '  bypass permissions on',
+    ].join('\n')
+    expect(nextNagAction(claudeAdapter, quote).kind).toBe('none')
+  })
+
+  test('an idle composer / boot dialog is never seen as an unknown modal → none', () => {
+    expect(nextNagAction(claudeAdapter, '❯ \n  bypass permissions on').kind).toBe('none')
+    // a boot dialog (owned by the boot-driver) is excluded even though it is a numbered select
+    expect(nextNagAction(claudeAdapter, 'Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session').kind).toBe('none')
+  })
+
+  test('a KNOWN signature still wins its precise taxonomy (unknown detector is the last resort)', () => {
+    // the command-approval pane must classify as command-approval, NOT unknown-modal
+    const cmd = [' Bash command', '   ls', ' Do you want to ' + 'proceed?', ' ❯ 1. Yes', '   2. Yes, and always allow', '   3. No'].join('\n')
+    const a = nextNagAction(claudeAdapter, cmd)
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('command-approval')
+  })
+
+  test('codex — a "›"-glyph numbered select is caught too (non-hookable modal → human)', () => {
+    const codexModal = [
+      'Allow the MCP server to read this file?',
+      '',
+      '› 1. Yes, allow once',
+      '  2. No, deny',
+      '',
+      'Press enter to confirm or esc to go back',
+    ].join('\n')
+    const a = nextNagAction(codexAdapter, codexModal)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.taxonomy).toBe('unknown-modal')
+    expect(a.option1).toBe('Yes, allow once')
+  })
+
+  test('codex — a known boot dialog (hooks-review) is NOT re-routed as unknown (boot-driver owns it)', () => {
+    const hooks = ['Hooks need review', '', '› 1. Review hooks', '  2. Trust all and continue'].join('\n')
+    expect(nextNagAction(codexAdapter, hooks).kind).toBe('none')
   })
 })
 

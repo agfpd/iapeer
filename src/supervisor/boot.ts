@@ -34,29 +34,58 @@ export function nextBootAction(adapter: BootPredicates, viewport: string, enc: K
 }
 
 /** The slice of a RuntimeAdapter the MID-SESSION nag-watcher consumes — the optional nagDismissKeys
- *  (benign upsell → silent decline) + blockingConfirm (circuit-breaker → affirmative + audit log).
- *  claudeAdapter satisfies both; codex/router omit them → no action. */
+ *  (benign upsell → silent decline) + blockingConfirm (known circuit-breaker → affirmative/decision) +
+ *  unknownBlockingModal (docs/17 yolo-robustness — a numbered-select modal matching NO known signature →
+ *  always to the human). claudeAdapter satisfies all three; codex declares unknownBlockingModal only;
+ *  router omits all → no action. */
 export interface NagPredicate {
   nagDismissKeys?(pane: string): string[] | null
-  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null
+  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string; alwaysHuman?: boolean } | null
+  unknownBlockingModal?(pane: string): { content: string; option1: string } | null
 }
+
+// Fixed keys for a GENERIC unknown modal whose option layout we do NOT know (docs/17 fork 3): ALLOW
+// presses option 1 (the proceed/primary position in every known claude/codex select; the human is told
+// exactly what option 1 is), DENY presses Escape (the universal modal cancel — commits no numbered
+// choice, so it can never accidentally affirm; if a modal ignores Esc the daemon bounds re-enqueue and
+// safe-parks). v1 is BINARY (option-1-or-cancel); a >2-way choice on an unknown modal is a v2 extension.
+export const UNKNOWN_MODAL_ALLOW_KEYS = ['1', 'Enter']
+export const UNKNOWN_MODAL_DENY_KEYS = ['Escape']
 
 export type NagAction =
   | { kind: 'dismiss'; keys: string[]; bytes: Buffer } // benign upsell — press keys silently
-  // circuit-breaker — press `bytes` to AFFIRM (yolo auto-Yes / gated-approved) or `denyBytes` to DECLINE
-  // (gated-denied / broker fail-safe); LOG the taxonomy + detail either way.
-  | { kind: 'approve'; keys: string[]; bytes: Buffer; denyKeys: string[]; denyBytes: Buffer; taxonomy: string; detail: string }
+  // A blocking confirm/modal needing a Yes/No decision. Press `bytes` to AFFIRM or `denyBytes` to DECLINE.
+  //   - alwaysHuman=false (dangerous-rm / command-approval): yolo auto-Yes, gated → broker.
+  //   - alwaysHuman=true  (org-policy / unknown-modal): ALWAYS → broker (both modes; never auto-Yes).
+  // `brokerKind` is the broker taxonomy tag (docs/17); `option1` (unknown-modal only) is the verbatim
+  // label of option 1, so the human is shown EXACTLY what an Allow will press. `detail` is the audit
+  // trace (known) or the verbatim modal block (unknown-modal).
+  | {
+      kind: 'approve'
+      keys: string[]
+      bytes: Buffer
+      denyKeys: string[]
+      denyBytes: Buffer
+      taxonomy: string
+      detail: string
+      alwaysHuman: boolean
+      brokerKind: string
+      option1?: string
+    }
   | { kind: 'none' }
 
 /**
  * MID-SESSION nag/confirm step (livability) — the persistent sibling of nextBootAction. Unlike the
- * boot-driver (which STOPS at ready), the daemon loops this for the WHOLE session for TWO classes of
- * mid-session blocking prompt no headless peer can answer:
- *   1. a CIRCUIT-BREAKER confirm (blockingConfirm — e.g. the dangerous-rm guard above the permission
- *      layer) → press the affirmative AND surface a `detail`/`taxonomy` the caller logs (owner audit);
- *   2. a benign UPSELL modal (nagDismissKeys — e.g. "Try the new fullscreen-renderer?") → decline silently.
- * The circuit-breaker is checked FIRST (safety-relevant). The caller writes `action.bytes` (cooldown- +
- * stuck-gate-guarded so a cleared prompt is never double-answered). An adapter with neither → 'none'.
+ * boot-driver (which STOPS at ready), the daemon loops this for the WHOLE session over THREE classes of
+ * mid-session blocking prompt no headless peer can answer, checked most-specific FIRST:
+ *   1. a KNOWN circuit-breaker (blockingConfirm — dangerous-rm / command-approval / org-policy) → press
+ *      the affirmative/decision AND surface a `detail`/`taxonomy` the caller logs; `alwaysHuman` decides
+ *      whether a yolo peer auto-Yeses (false) or always routes to the human (true, org-policy);
+ *   2. a benign UPSELL modal (nagDismissKeys — e.g. "Try the new fullscreen-renderer?") → decline silently;
+ *   3. a GENERIC unknown modal (unknownBlockingModal — a numbered select matching no known signature) →
+ *      ALWAYS to the human with fixed option-1-or-cancel keys + the verbatim block (docs/17 yolo-robustness).
+ * The caller writes `action.bytes` (cooldown- + stuck-gate-guarded so a cleared prompt is never double-
+ * answered). An adapter with none of the three → 'none'.
  */
 export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyEncoding = {}): NagAction {
   const confirm = adapter.blockingConfirm?.(viewport)
@@ -69,9 +98,26 @@ export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyE
       denyBytes: keysToBytes(confirm.denyKeys, enc),
       taxonomy: confirm.taxonomy,
       detail: confirm.detail,
+      alwaysHuman: confirm.alwaysHuman ?? false,
+      brokerKind: 'circuit-breaker',
     }
   const keys = adapter.nagDismissKeys?.(viewport)
   if (keys && keys.length) return { kind: 'dismiss', keys, bytes: keysToBytes(keys, enc) }
+  // GENERIC residue — checked LAST so a known signature always wins its precise keys.
+  const unknown = adapter.unknownBlockingModal?.(viewport)
+  if (unknown)
+    return {
+      kind: 'approve',
+      keys: UNKNOWN_MODAL_ALLOW_KEYS,
+      bytes: keysToBytes(UNKNOWN_MODAL_ALLOW_KEYS, enc),
+      denyKeys: UNKNOWN_MODAL_DENY_KEYS,
+      denyBytes: keysToBytes(UNKNOWN_MODAL_DENY_KEYS, enc),
+      taxonomy: 'unknown-modal',
+      detail: unknown.content,
+      alwaysHuman: true,
+      brokerKind: 'unknown-modal',
+      option1: unknown.option1,
+    }
   return { kind: 'none' }
 }
 

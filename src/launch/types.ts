@@ -329,8 +329,33 @@ export interface RuntimeAdapter {
    * content mentioning the phrase never fires; else null. Optional (codex/router omit it). tui only.
    * Human-approval lands via the daemon broker (docs/17); the vault idea is "Human-approval
    * подтверждения действий пира через Telegram-кнопки".
+   *
+   * `alwaysHuman` (default false) marks a KNOWN class that must NEVER be auto-pressed on ANY peer —
+   * it always routes to the human broker regardless of approval mode (the owner's org-policy rule:
+   * "a barrier ABOVE us is never auto-answered"). yolo auto-Yes applies only to alwaysHuman=false
+   * classes (dangerous-rm / command-approval — the "yolo presses what it KNOWS" set).
    */
-  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string } | null
+  blockingConfirm?(pane: string): { keys: string[]; denyKeys: string[]; taxonomy: string; detail: string; alwaysHuman?: boolean } | null
+
+  /**
+   * GENERIC blocking-modal detector (docs/17 — yolo-robustness / unknown-modal). The residual sibling
+   * of blockingConfirm: a numbered-SELECT modal that halts the pty on a keypress but matches NONE of
+   * the adapter's KNOWN signatures (a new modal Anthropic/OpenAI shipped that we did not foresee — the
+   * class that hung a live yolo peer). Detected STRUCTURALLY, not by phrase: the bottom-most cursor-glyph
+   * row (`❯`/`›`) is a numbered option (`N.`) AND the contiguous block ending there carries ≥2 numbered
+   * options — i.e. a live select REPLACED the composer (the same idle→composer / modal→option invariant
+   * the known matchers rest on, minus the phrase gate). The adapter returns null for its OWN known
+   * signatures (checked first by the caller), so this fires ONLY for the unrecognized residue.
+   *
+   * Returns `{ content, option1 }`: `content` = the VERBATIM modal block (question + all option rows,
+   * CR-stripped, capped) shown to the human; `option1` = the verbatim label of option 1 (what an ALLOW
+   * will press — the supervisor injects ['1','Enter'] on allow, ['Escape'] to cancel on deny). The human
+   * sees the exact options and what Allow selects, so the decision is INFORMED (owner's "new I must SEE
+   * and confirm" — предметно). v1 is BINARY (option-1-or-cancel); a >2-way choice on an unknown modal is
+   * a v2 extension (most approvals are binary). The timing STUCK-gate (daemon) composes on top — this
+   * fires only on a genuinely frozen pane. Optional (router omits it). tui only.
+   */
+  unknownBlockingModal?(pane: string): { content: string; option1: string } | null
 
   /** Is the input surface ready for the first message? (tui: ready marker present
    *  AND startup dialogs gone). Router runtimes return true (no input surface).

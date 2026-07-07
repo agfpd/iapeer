@@ -43,6 +43,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
 import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
+import { detectNumberedModal } from './modalDetect.ts'
 import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +74,15 @@ function codexDirTrustActive(pane: string): boolean {
 }
 function codexHooksReviewActive(pane: string): boolean {
   return pane.includes('Hooks need review')
+}
+
+// codex's select-modal glyph (U+203A) — the same arrow isInputReady keys on (a numbered option row is
+// `› 1. …`; the composer is `› <text>`, no leading digit-dot).
+const CODEX_SELECT_GLYPH = '›'
+/** Does the pane carry a KNOWN codex boot dialog (update / dir-trust / hooks-review)? unknownBlockingModal
+ *  returns null for these so they stay owned by the boot-driver and are never re-routed to a human. */
+function isKnownCodexBlockingSignature(pane: string): boolean {
+  return codexUpdatePromptActive(pane) || codexDirTrustActive(pane) || codexHooksReviewActive(pane)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,6 +256,20 @@ export const codexAdapter: RuntimeAdapter = {
     if (codexDirTrustActive(pane)) return ['Enter']
     if (codexHooksReviewActive(pane)) return ['2']
     return null
+  },
+
+  /**
+   * GENERIC unknown blocking-modal detector (docs/17 — yolo-robustness). codex carries no known
+   * mid-session circuit-breaker (its tool approvals ride the PreToolUse hook under gated, and yolo
+   * bypasses them), so it declares no blockingConfirm/nagDismissKeys — but a NON-hookable modal
+   * (MCP-elicitation, a future codex prompt) can still surface on screen and hang the pty. This catches
+   * that residue structurally (bottom-most `›` is a numbered option + ≥2 options; see modalDetect.ts),
+   * excluding the known boot dialogs (owned by the boot-driver). The daemon routes it to the human with
+   * explicit button semantics + the timing stuck-gate on top.
+   */
+  unknownBlockingModal(pane: string): { content: string; option1: string } | null {
+    if (isKnownCodexBlockingSignature(pane)) return null
+    return detectNumberedModal(pane, CODEX_SELECT_GLYPH)
   },
 
   /**
