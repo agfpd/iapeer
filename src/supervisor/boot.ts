@@ -121,36 +121,54 @@ export function nextNagAction(adapter: NagPredicate, viewport: string, enc: KeyE
   return { kind: 'none' }
 }
 
-// ── В60 — stuck-gate for the nag-watcher (timing signal, closer to the root than text) ────────────
-// A REAL blocked modal freezes the pty: claude stops writing entirely (the dialog is static and the
-// session cannot proceed). A LIVE peer that merely RENDERS the modal text — reviewing this code,
-// quoting a bug report, editing the adapter (the В40 live incident class) — keeps WRITING (streamed
-// output, spinner frames). So "the pane has written NOTHING for a while" discriminates a genuinely
-// stuck modal from a working peer displaying the same glyphs, where any text/position match
-// structurally cannot. The gate composes WITH the В40 position match (both must pass); the watcher
-// stays load-bearing (В59 suppression-at-source is expected but unproven) — this gate just limits its
-// fire to a genuinely wedged session.
+/**
+ * Content signature of a NagAction for the stability gate (below) — identifies "the SAME wedged prompt"
+ * across ticks so a repainting modal is recognized as one persistent prompt, not fresh each frame.
+ *   - 'approve' → taxonomy + the verbatim `detail` (the modal block for unknown-modal, the command/target
+ *     trace for a known breaker) — stable and unique per prompt.
+ *   - 'dismiss' → the dismiss keys (constant while a given nag is up).
+ *   - 'none'    → null (nothing actionable → the gate re-arms).
+ */
+export function nagSignature(action: NagAction): string | null {
+  if (action.kind === 'approve') return `approve:${action.taxonomy}:${action.detail}`
+  if (action.kind === 'dismiss') return `dismiss:${action.keys.join(',')}`
+  return null
+}
+
+// ── В60/В61 — stability gate for the nag-watcher (content signature, NOT raw pty writes) ────────────
+// The watcher must fire ONLY on a genuinely WEDGED prompt, never on a live peer merely RENDERING modal-
+// like text (reviewing this code, quoting a bug report — the В40 incident class). The ORIGINAL В60 signal
+// was "the pty wrote NOTHING for a while" (writeSeq frozen): a claude modal freezes the pty, a working
+// peer keeps streaming. But codex DEFEATS that — it REPAINTS its native approval modal continuously (live
+// repro eph-cdxdet 08.07: pane-log grew ~788 B every 2 s while the RENDERED modal was byte-identical), so
+// writeSeq never froze and the watcher NEVER fired (0 events, peer hung on the modal). The correct signal
+// is one level up: the DETECTED action's CONTENT is stable. A wedged modal holds the SAME signature across
+// ticks even while its bytes churn; a working/streaming peer changes it (or shows no actionable modal) and
+// re-arms. This composes WITH the adapter's structural match (detectNumberedModal's composer-replaced guard
+// already rejects a quoted modal) — the gate just requires that match to PERSIST, so a transient render
+// never fires. Covers BOTH runtimes: claude's static modal and codex's repainting one stabilize identically.
 
 /** Mutable gate state the caller owns (one per watched session). */
-export interface StuckGate {
-  /** The last write-sequence observed (any pty output bumps it). -1 = not yet baselined. */
-  lastSeq: number
-  /** Wall-clock ms when the sequence last CHANGED (progress observed). */
+export interface StabilityGate {
+  /** The last content signature observed (nagSignature). null = not yet baselined / nothing actionable. */
+  lastSig: string | null
+  /** Wall-clock ms when the signature last CHANGED. */
   stableSinceMs: number
 }
 
-export function newStuckGate(nowMs: number): StuckGate {
-  return { lastSeq: -1, stableSinceMs: nowMs }
+export function newStabilityGate(nowMs: number): StabilityGate {
+  return { lastSig: null, stableSinceMs: nowMs }
 }
 
 /**
- * One gate step: feed the current write-sequence + clock; returns true iff the pane has been
- * COMPLETELY static (no pty writes) for at least `thresholdMs`. Any progress re-arms the gate.
- * Pure w.r.t. time (clock injected) — unit-testable.
+ * One gate step: feed the current content signature + clock; returns true iff the SAME NON-NULL signature
+ * has persisted for at least `thresholdMs`. A null signature (nothing actionable) or a CHANGED signature
+ * re-arms the gate (returns false) and records the new stableSince. Pure w.r.t. time (clock injected) —
+ * unit-testable, and INDEPENDENT of raw pty write cadence (a repainting-but-content-stable modal fires).
  */
-export function paneIsStuck(gate: StuckGate, seq: number, nowMs: number, thresholdMs: number): boolean {
-  if (seq !== gate.lastSeq) {
-    gate.lastSeq = seq
+export function signatureStable(gate: StabilityGate, sig: string | null, nowMs: number, thresholdMs: number): boolean {
+  if (sig === null || sig !== gate.lastSig) {
+    gate.lastSig = sig
     gate.stableSinceMs = nowMs
     return false
   }

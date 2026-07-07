@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
-import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootAction, type NagAction } from './boot.ts'
+import { nagSignature, newStabilityGate, nextBootAction, nextNagAction, signatureStable, type BootAction, type NagAction } from './boot.ts'
 
 // Fed the REAL runtime adapters (codexAdapter/claudeAdapter) — not fakes — so the test proves the
 // supervisor answers the exact dialogs the launch primitive answers, with byte-correct keys.
@@ -465,49 +465,142 @@ describe('nextNagAction — generic unknown blocking modal (docs/17 yolo-robustn
   })
 })
 
-// В60 — the nag-watcher's stuck-gate: a dismiss may fire only when the pane has been COMPLETELY
-// static (no pty writes) for the threshold. A live peer rendering the modal text keeps writing →
-// the gate never opens; a genuinely blocked modal freezes the pty → it opens after the threshold.
-describe('В60 — paneIsStuck (nag-watcher stuck-gate)', () => {
+// В60/В61 — the nag-watcher gate. The original writeSeq stuck-gate (fire only when the pty wrote NOTHING
+// for the threshold) was DEFEATED by codex, which repaints its native approval modal every ~2 s: writeSeq
+// churned while the modal was content-stable, so the watcher never fired (live repro eph-cdxdet 08.07 — 0
+// events, peer hung). Replaced with a CONTENT-signature stability gate: fire when the DETECTED modal/nag
+// signature has held for the threshold, regardless of byte churn.
+describe('В61 — signatureStable (content-stability gate) + nagSignature', () => {
   const T = 10_000
 
-  test('first observation only baselines — never stuck immediately', () => {
-    const g = newStuckGate(1000)
-    expect(paneIsStuck(g, 42, 1000, T)).toBe(false)
-    // even a huge clock jump on the SAME tick sequence counts from the baseline moment
-    expect(paneIsStuck(g, 42, 1000 + T, T)).toBe(true)
+  test('first observation baselines; a stable signature opens after the threshold', () => {
+    const g = newStabilityGate(1000)
+    expect(signatureStable(g, 'X', 1000, T)).toBe(false) // baseline
+    expect(signatureStable(g, 'X', 1000 + T - 1, T)).toBe(false)
+    expect(signatureStable(g, 'X', 1000 + T, T)).toBe(true) // same sig held → wedged
   })
 
-  test('progressing pane (seq moves) never opens the gate and RE-ARMS it', () => {
-    const g = newStuckGate(0)
-    expect(paneIsStuck(g, 1, 1000, T)).toBe(false)
-    expect(paneIsStuck(g, 2, 9000, T)).toBe(false) // wrote again → re-armed
-    expect(paneIsStuck(g, 3, 18_000, T)).toBe(false) // still writing
-    // stability restarts from the LAST write, not from the beginning
-    expect(paneIsStuck(g, 3, 18_000 + T - 1, T)).toBe(false)
-    expect(paneIsStuck(g, 3, 18_000 + T, T)).toBe(true)
+  test('a CHANGING signature (working/streaming peer) never opens the gate and RE-ARMS it', () => {
+    const g = newStabilityGate(0)
+    expect(signatureStable(g, 'a', 1000, T)).toBe(false)
+    expect(signatureStable(g, 'b', 9000, T)).toBe(false) // content changed → re-armed
+    expect(signatureStable(g, 'c', 18_000, T)).toBe(false)
+    expect(signatureStable(g, 'c', 18_000 + T - 1, T)).toBe(false)
+    expect(signatureStable(g, 'c', 18_000 + T, T)).toBe(true) // stabilized on 'c' → opens T later
   })
 
-  test('static pane under the threshold stays closed; over it — open until progress resumes', () => {
-    const g = newStuckGate(0)
-    expect(paneIsStuck(g, 7, 0, T)).toBe(false) // baseline
-    expect(paneIsStuck(g, 7, T - 1, T)).toBe(false)
-    expect(paneIsStuck(g, 7, T, T)).toBe(true)
-    expect(paneIsStuck(g, 7, T + 5000, T)).toBe(true) // stays open while still frozen
-    expect(paneIsStuck(g, 8, T + 6000, T)).toBe(false) // modal answered → repaint → re-armed
+  test('a NULL signature (nothing actionable) keeps the gate closed and re-arms', () => {
+    const g = newStabilityGate(0)
+    expect(signatureStable(g, 'X', 0, T)).toBe(false)
+    expect(signatureStable(g, null, 5000, T)).toBe(false) // modal cleared → re-arm
+    expect(signatureStable(g, 'X', 5000 + T, T)).toBe(false) // re-appeared → counts from HERE, not before
+    expect(signatureStable(g, 'X', 5000 + 2 * T, T)).toBe(true)
   })
 
-  test('composition: a LIVE peer rendering the modal text does NOT get keys (gate closed), a wedged one does', () => {
-    // the exact В40 false-fire pane: modal option row is the bottom-most ❯ row
-    const modalPane = ['Try the new fullscreen render' + 'er?', '❯ 1. Yes, ' + 'try it', '  2. No, keep the current renderer'].join('\n')
-    const g = newStuckGate(0)
-    // peer is actively writing (seq moves): even though the TEXT matches, the caller's gate stays shut
-    expect(paneIsStuck(g, 1, 2000, T)).toBe(false)
-    expect(paneIsStuck(g, 2, 4000, T)).toBe(false)
-    // pty froze on the real modal: gate opens after the threshold → THEN the text/position match fires
-    expect(paneIsStuck(g, 2, 4000 + T, T)).toBe(true)
-    const a = nextNagAction(claudeAdapter, modalPane)
-    expect(a.kind).toBe('dismiss')
-    expect(nagBytesOf(a)).toEqual(Buffer.from('2\r'))
+  test('THE CODEX FIX: a repainting modal (bytes churn, SAME detected content) opens the gate', () => {
+    // The gate sees ONLY the content signature — a modal whose bytes churn every tick but whose detected
+    // content is identical holds ONE stable signature, so it opens (the writeSeq gate never did → 0 events).
+    const g = newStabilityGate(0)
+    const sig = 'approve:unknown-modal:BLOCK'
+    expect(signatureStable(g, sig, 0, T)).toBe(false)
+    expect(signatureStable(g, sig, 4000, T)).toBe(false) // repaint tick — same sig, still under threshold
+    expect(signatureStable(g, sig, 8000, T)).toBe(false) // repaint tick — same sig
+    expect(signatureStable(g, sig, T, T)).toBe(true) // held ≥ T despite churn → fires
+  })
+
+  test('nagSignature: approve → taxonomy+detail, dismiss → keys, none → null', () => {
+    expect(nagSignature({ kind: 'none' })).toBeNull()
+    expect(nagSignature({ kind: 'dismiss', keys: ['2'], bytes: Buffer.from('2') })).toBe('dismiss:2')
+    const ap: NagAction = {
+      kind: 'approve',
+      keys: ['1'],
+      bytes: Buffer.alloc(0),
+      denyKeys: ['2'],
+      denyBytes: Buffer.alloc(0),
+      taxonomy: 'dangerous-rm',
+      detail: 'cmd="rm -rf /x"',
+      alwaysHuman: false,
+      brokerKind: 'circuit-breaker',
+    }
+    expect(nagSignature(ap)).toBe('approve:dangerous-rm:cmd="rm -rf /x"')
+  })
+})
+
+// Boris's strengthened re-acceptance criterion: the gate is SHARED across THREE classes, so changing it
+// must prove NON-REGRESSION of ALL three, not only the new codex case. Each must (a) still be detected by
+// nextNagAction and (b) yield a STABLE nagSignature across a repaint (byte-different panes, same detected
+// prompt) so the content-stability gate opens for it.
+describe('В61 — 3-class non-regression under the content-stability gate', () => {
+  const T = 10_000
+  // Feed the SAME sig across a "repaint" tick, then past the threshold: opens iff the class stabilizes.
+  const stableFires = (sig: string | null): boolean => {
+    const g = newStabilityGate(0)
+    signatureStable(g, sig, 0, T) // baseline
+    signatureStable(g, sig, 4000, T) // a repaint tick — same sig
+    return signatureStable(g, sig, T, T) // held ≥ T
+  }
+
+  test('class 1 — codex native approval modal: detected + repaint-stable signature → gate opens', () => {
+    const codexModal = (tip: string): string =>
+      [
+        tip, // a top tip/status line that codex repaints — must NOT reset the gate
+        '',
+        '  Would you like to run the following command?',
+        '',
+        "  $ printf 'x' > /Users/x/outside.txt",
+        '',
+        '› 1. Yes, proceed (y)',
+        "  2. Yes, and don't ask again (p)",
+        '  3. No, and tell Codex what to do differently (esc)',
+        '',
+        '  Press enter to confirm or esc to cancel',
+      ].join('\n')
+    const a1 = nextNagAction(codexAdapter, codexModal('Tip: alpha'))
+    const a2 = nextNagAction(codexAdapter, codexModal('Tip: beta — a REPAINTED frame')) // churned bytes, same modal
+    expect(a1.kind).toBe('approve')
+    if (a1.kind !== 'approve') throw new Error('expected approve')
+    expect(a1.brokerKind).toBe('unknown-modal')
+    expect(a1.taxonomy).toBe('unknown-modal')
+    expect(a1.option1).toBe('Yes, proceed (y)')
+    expect(nagSignature(a1)).toBe(nagSignature(a2)) // repaint does not change the signature
+    expect(stableFires(nagSignature(a1))).toBe(true)
+  })
+
+  test('class 2 — claude unknown numbered modal: detected + stable signature → gate opens (no regress)', () => {
+    const claudeUnknown = ['Pick one to continue?', '❯ 1. Option A', '  2. Option B', 'Enter to select · ↑/↓ to navigate · Esc to cancel'].join('\n')
+    const a = nextNagAction(claudeAdapter, claudeUnknown)
+    expect(a.kind).toBe('approve')
+    if (a.kind !== 'approve') throw new Error('expected approve')
+    expect(a.brokerKind).toBe('unknown-modal')
+    expect(stableFires(nagSignature(a))).toBe(true)
+  })
+
+  test('class 3 — dangerous-rm breaker (fail-safe): detected + stable signature → gate opens, static OR repaint', () => {
+    // The MOST critical class (headless-hang fail-safe: gated=broker, yolo=auto-Yes). Must still open under
+    // the new gate — and a repainting spinner ABOVE the breaker must NOT re-arm it. Needles split-literal (В40).
+    const rmPrompt = (spinner: string): string =>
+      [
+        spinner, // a status/spinner line that repaints
+        ' Bash command',
+        '',
+        '   rm -rf /tmp/iapeer-rmrepro-cwd-XY',
+        '',
+        ' Dangerous r' + 'm operation on working directory or its ' + 'ancestor:',
+        ' /tmp/iapeer-rmrepro-cwd-XY',
+        '',
+        ' Do you want to ' + 'proceed?',
+        ' ❯ 1. Yes',
+        '   2. No',
+        '',
+        ' Esc to cancel · Tab to amend · ctrl+e to explain',
+      ].join('\n')
+    const aStatic = nextNagAction(claudeAdapter, rmPrompt('  working…'))
+    const aRepaint = nextNagAction(claudeAdapter, rmPrompt('  working……')) // churned spinner, same breaker
+    expect(aStatic.kind).toBe('approve')
+    if (aStatic.kind !== 'approve') throw new Error('expected approve')
+    expect(aStatic.taxonomy).toBe('dangerous-rm')
+    expect(nagBytesOf(aStatic)).toEqual(Buffer.from('1\r')) // auto-Yes bytes intact (fail-safe preserved)
+    expect(nagSignature(aStatic)).toBe(nagSignature(aRepaint)) // repaint does not change the signature
+    expect(stableFires(nagSignature(aStatic))).toBe(true)
   })
 })

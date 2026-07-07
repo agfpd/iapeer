@@ -27,7 +27,7 @@ import {
 } from './protocol.ts'
 import { formatEventLine } from '../storage/rotatelog.ts'
 import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
-import { newStuckGate, nextBootAction, nextNagAction, paneIsStuck, type BootPredicates, type NagPredicate } from './boot.ts'
+import { newStabilityGate, nagSignature, nextBootAction, nextNagAction, signatureStable, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
@@ -725,25 +725,18 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     // (writeSeq advance) so a later, DIFFERENT modal is handled fresh.
     let unknownModalAttempts = 0
     let unknownModalParked = false
-    let lastNagSeq = -1
-    // В60 — stuck-gate: a REAL blocked modal freezes the pty entirely, while a live peer merely
-    // RENDERING the modal text (code review / quoted report — the В40 false-fire class) keeps
-    // writing. Fire the dismiss ONLY when the pane has been completely static (writeSeq unchanged)
-    // for NAG_STUCK_MS — the timing signal composes with the adapter's position match.
-    const stuckGate = newStuckGate(Date.now())
+    let lastNagSig: string | null = null
+    // В60/В61 — fire ONLY on a genuinely WEDGED prompt, gated on the detected modal/nag's CONTENT
+    // STABILITY, not raw pty writes: codex REPAINTS its native approval modal every ~2 s, so a writeSeq
+    // stuck-gate never froze and the watcher never fired (live repro eph-cdxdet 08.07: 0 events, peer hung).
+    // The SAME signature persisting for NAG_STUCK_MS is the "wedged" signal; a working/streaming peer changes
+    // it (or shows no modal) and re-arms. Composes with the adapter's structural match. See signatureStable.
+    const stabilityGate = newStabilityGate(Date.now())
     const nagWatch = setInterval(() => {
       if (down) {
         clearInterval(nagWatch)
         return
       }
-      // Pane made PROGRESS since last tick → the modal (if any) cleared / the peer moved on: reset the
-      // unknown-modal re-enqueue counters so a subsequent, different modal starts a fresh budget.
-      if (writeSeq !== lastNagSeq) {
-        lastNagSeq = writeSeq
-        unknownModalAttempts = 0
-        unknownModalParked = false
-      }
-      if (!paneIsStuck(stuckGate, writeSeq, Date.now(), NAG_STUCK_MS)) return // progressing → not a wedged modal
       if (Date.now() - nagFiredMs < NAG_COOLDOWN_MS) return // let a just-answered modal repaint away first
       let action
       try {
@@ -752,6 +745,16 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       } catch {
         return // transient model read — retry next tick
       }
+      // Debounce on the detected action's CONTENT signature (not writeSeq — codex repaints its modal, so
+      // writeSeq churns while the modal is stable). A NEW/absent signature (a different modal, or the modal
+      // cleared) resets the unknown-modal re-enqueue budget so a later modal starts a fresh budget.
+      const sig = nagSignature(action)
+      if (sig !== lastNagSig) {
+        lastNagSig = sig
+        unknownModalAttempts = 0
+        unknownModalParked = false
+      }
+      if (!signatureStable(stabilityGate, sig, Date.now(), NAG_STUCK_MS)) return // not stable long enough → not wedged
       if (action.kind === 'dismiss') {
         child.terminal.write(action.bytes)
         nagFiredMs = Date.now()
