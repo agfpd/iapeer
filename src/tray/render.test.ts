@@ -38,6 +38,7 @@ const SNAP: TraySnapshot = {
       launchd_managed: false,
       wake_policy: 'ephemeral',
       queue_depth: 3,
+      approval_mode: 'gated', // a gated (human-approval) working agent → 🛡 badge
     },
     { personality: 'aida', runtimes: [{ runtime: 'claude', status: 'stopped' }], attached: false, launchd_managed: false, wake_policy: 'warm' },
     // an UNKNOWN future field must be ignored, not throw (client obligation 2)
@@ -97,10 +98,16 @@ describe('renderSwiftBar', () => {
     expect(out).toContain('param3=interrupt param4=boris')
   })
 
-  test('sorting: live peers first, then asleep, then stopped; alpha within a group', () => {
+  test('sorting: 🔒 launchd block on top (before the first working agent); within each block live→asleep→stopped, then alpha', () => {
     const peerRows = lines.filter(l => /^[a-z]+ {2}/.test(l)).map(l => l.split(' ')[0])
-    // live: boris, nova, timer | asleep: scriber, zeno | stopped: aida
-    expect(peerRows).toEqual(['boris', 'nova', 'timer', 'scriber', 'zeno', 'aida'])
+    // lock block (launchd_managed): timer | then working agents: live boris, nova | asleep scriber, zeno | stopped aida
+    expect(peerRows).toEqual(['timer', 'boris', 'nova', 'scriber', 'zeno', 'aida'])
+  })
+
+  test('approval mode: gated peer shows 🛡; yolo (default) peers do NOT', () => {
+    expect(lines.find(l => l.startsWith('scriber '))!).toContain('🛡') // scriber is gated
+    expect(lines.find(l => l.startsWith('boris '))!).not.toContain('🛡') // boris has no approval_mode → yolo
+    expect(lines.find(l => l.startsWith('aida '))!).not.toContain('🛡')
   })
 
   test('no explicit Refresh item in the reachable-daemon menu (streamable is always fresh)', () => {

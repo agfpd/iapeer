@@ -43,6 +43,8 @@ export interface TrayPeer {
   last_active_ms?: number
   attached?: boolean
   launchd_managed?: boolean
+  /** Human-approval mode (docs/17). ABSENT ⇒ `yolo` (client obligation — a pre-approval daemon omits it). */
+  approval_mode?: 'yolo' | 'gated'
   wake_policy?: 'warm' | 'ephemeral'
   queue_depth?: number
 }
@@ -133,6 +135,12 @@ function aggregate(p: TrayPeer): 'live' | 'asleep' | 'stopped' {
 
 const RANK: Record<'live' | 'asleep' | 'stopped', number> = { live: 0, asleep: 1, stopped: 2 }
 
+// 🔒 launchd-managed peers (the human channel + service infra — arthur/timer/watcher) are
+// NON-clickable status rows. They form ONE contiguous block at the very TOP, before the first
+// working agent, regardless of live/asleep — so the bar separates "service, don't touch" from the
+// working agents at a glance (owner UX). `attachable` (= !launchd_managed) is the same predicate.
+const lockRank = (p: TrayPeer): number => (p.launchd_managed ? 0 : 1)
+
 // ── renderers ─────────────────────────────────────────────────────────────────
 
 const MANAGE_COMMANDS: Array<{ cmd: string; label: string }> = [
@@ -150,6 +158,10 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
   const now = opts.now ?? Date.now()
   const bin = opts.binPath
   const peers = [...snapshot.peers].sort((a, b) => {
+    // primary: the 🔒 lock block first (service/human infra), working agents below
+    const l = lockRank(a) - lockRank(b)
+    if (l !== 0) return l
+    // secondary (within EACH block): the existing live→asleep→stopped, then alpha
     const r = RANK[aggregate(a)] - RANK[aggregate(b)]
     return r !== 0 ? r : a.personality.localeCompare(b.personality)
   })
@@ -241,9 +253,14 @@ function attachable(p: TrayPeer): boolean {
 function renderPeerRow(p: TrayPeer, bin: string, now: number, pendingCount = 0): string {
   const agg = aggregate(p)
   const detail = p.runtimes.map(r => `${r.runtime}${GLYPH[r.status]}`).join(' ')
+  // approval mode (docs/17): the whole fleet defaults to `yolo`, so showing it on every row is
+  // noise — mark ONLY the exception, `gated` (this peer's blocking approvals go to a human), with a
+  // 🛡 shield. No badge ⇒ yolo (the default; also how a pre-approval snapshot with the field absent
+  // renders). So the row reads the mode: 🛡 = gated, bare = yolo.
   const badges =
     (p.attached ? ' 👤' : '') +
     (p.launchd_managed ? ' 🔒' : '') +
+    (p.approval_mode === 'gated' ? ' 🛡' : '') +
     (p.wake_policy === 'ephemeral' && (p.queue_depth ?? 0) > 0 ? ` ⏳${p.queue_depth}` : '')
   const ageStr = p.last_active_ms ? `  ${fmtAge(p.last_active_ms, now)}` : ''
   // HIGHLIGHT a peer with a pending approval: a ⚠ prefix + a red count badge + the row painted red

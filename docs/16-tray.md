@@ -24,11 +24,16 @@ activation that also installs SwiftBar.app when it is absent.
   daemon any other way; the built-in TUI keeps its direct read path for that case, see
   [15](15-fleet-api.md)).
 - **Dropdown:** a host header (`iapeer <version> · up <uptime>`) and the memory/voice
-  provider heartbeats, then one row per peer:
+  provider heartbeats, then one row per peer, in **two groups**: the `🔒` **launchd block**
+  (the human channel + service infra — non-clickable status rows) is pulled to the **top as
+  one contiguous block, before the first working agent**, regardless of live/asleep — so the
+  bar separates "service, don't touch" from the working agents at a glance. Working agents
+  follow. Within **each** group the order is live → asleep → stopped, then alphabetical.
   - `<peer>  <runtime><glyph> …  <age>` with the same glyph semantics as the CLI —
     `●` live · `○` asleep · `✕` stopped — green when any runtime is live. Badges: `👤`
-    a human is attached, `🔒` launchd-managed (H4 read-only), `⏳N` an ephemeral peer's
-    queue depth.
+    a human is attached, `🔒` launchd-managed (H4 read-only), `🛡` the peer runs in **gated**
+    human-approval mode (docs/17; `yolo` is the fleet default and carries no badge — a bare
+    row reads as yolo), `⏳N` an ephemeral peer's queue depth.
   - **Click an agent peer → Terminal.app running `iapeer attach <peer>`.** The row itself is
     the attach action (no submenu, so a click attaches rather than merely expanding). The
     handoff goes through `iapeer tray attach-term`, which writes a per-peer `.command`
