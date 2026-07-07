@@ -34,24 +34,28 @@ activation that also installs SwiftBar.app when it is absent.
     a human is attached, `🔒` launchd-managed (H4 read-only), `🛡` the peer runs in **gated**
     human-approval mode (docs/17; `yolo` is the fleet default and carries no badge — a bare
     row reads as yolo), `⏳N` an ephemeral peer's queue depth.
-  - **Click an agent peer → Terminal.app running `iapeer attach <peer>`.** The row itself is
-    the attach action (no submenu, so a click attaches rather than merely expanding). The
-    handoff goes through `iapeer tray attach-term`, which writes a per-peer `.command`
-    launcher and `open`s it — `open <file>.command` hands the file to Terminal.app with
-    **no Automation/Accessibility permission prompt**. This deliberately avoids SwiftBar's
-    own `terminal=true`, whose Terminal launch drives a `Cmd-T` System-Events keystroke that
-    silently no-ops unless SwiftBar holds Accessibility permission. **Launchd-managed infra
-    peers (telegram / notifier, `🔒`) are not pty-attachable** — their rows are plain status
-    lines. Lifecycle actions (Stop / Start / New / Interrupt / Refresh / Compact) live
-    in the **Manage** submenu, each a `POST /fleet/v1/peers/<peer>/<cmd>` via `iapeer tray cmd`.
-    (No Wake item — a peer-row click already wakes a sleeping peer before it attaches, so
-    it was redundant.) For an agentic peer the Manage submenu also carries an
-    **approval-mode toggle** (docs/17): it reads the current mode and flips it via the local
-    `iapeer approval-mode <peer> <mode>` verb, applied on the peer's **next fresh session**
-    (a click never respawns a live session). The friction is asymmetric to the security
-    weight: `yolo → gated` (adds human approval) is one safe tap; `gated → yolo` (REMOVES the
-    approval perimeter) sits behind the submenu as an explicit red ⚠ confirm, so it is never
-    dropped by a stray click.
+  - **Each peer is a SUBMENU** — one unified list (no separate Manage section; the peer rows
+    and a parallel Manage list of every peer used to be a visible dupe). Clicking a peer
+    EXPANDS it; its actions are the children, in order:
+    - **Attach** (agent peers only) — the FIRST child. Runs `iapeer tray attach-term <peer>`,
+      which writes a per-peer `.command` launcher and `open`s it — `open <file>.command` hands
+      the file to Terminal.app with **no Automation/Accessibility permission prompt** (this
+      deliberately avoids SwiftBar's own `terminal=true`, whose Terminal launch drives a `Cmd-T`
+      System-Events keystroke that silently no-ops unless SwiftBar holds Accessibility). Attach
+      is now expand-then-Attach (two clicks) — the trade for a single dupe-free list.
+    - **Lifecycle** — Stop / Start / New / Interrupt / Refresh / Compact, each a
+      `POST /fleet/v1/peers/<peer>/<cmd>` via `iapeer tray cmd`. (No Wake item — a peer-row
+      click path already wakes a sleeping peer before it attaches, so it was redundant.)
+    - **Approval-mode toggle** (agent peers only, docs/17): reads the current mode and flips it
+      via the local `iapeer approval-mode <peer> <mode>` verb, applied on the peer's **next fresh
+      session** (a click never respawns a live session). The friction is asymmetric to the
+      security weight: `yolo → gated` (adds human approval) is one safe tap; `gated → yolo`
+      (REMOVES the approval perimeter) sits one level deeper behind an explicit red ⚠ confirm, so
+      it is never dropped by a stray click.
+
+    **Launchd-managed infra peers (telegram / notifier, `🔒`)** are not pty-attachable, so their
+    submenu carries **no Attach** and **no approval toggle** (always yolo) — just the lifecycle
+    commands (service Stop / Start etc.).
 - **Pending approvals (docs/17):** when the queue is non-empty, the **top of the dropdown** shows
   each pending request **expanded, with no extra clicks** — a header (`<peer> · <tool>`), the
   **verbatim action content** (the command / diff / plan, monospace, capped for the menu; the FULL

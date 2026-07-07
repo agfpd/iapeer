@@ -198,18 +198,16 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
   if (providers) lines.push(line(0, providers, { color: COLOR.meta }))
   lines.push('---')
 
-  // ── peers (each row is a DIRECT attach action — click → Terminal) ──
+  // ── peers — each peer is a SUBMENU: expand → Attach (first) + its actions. ONE list
+  //    (no separate Manage section): the peer rows and their lifecycle used to be two
+  //    parallel lists of every peer (a click-attach list + a Manage list) — a visible
+  //    dupe. Folded here (owner decision — 2 clicks to attach: expand peer → Attach). ──
   if (peers.length === 0) {
     lines.push(line(0, 'no peers registered', { color: COLOR.meta }))
   }
   for (const p of peers) {
-    lines.push(renderPeerRow(p, bin, now, pendingByPeer.get(p.personality) ?? 0))
+    lines.push(...renderPeerSubmenu(p, bin, now, pendingByPeer.get(p.personality) ?? 0))
   }
-
-  // ── Manage submenu (lifecycle commands per peer; kept off the rows so a row click
-  //    attaches instead of just expanding a submenu) ──
-  lines.push('---')
-  lines.push(...renderManage(peers, bin))
 
   // ── footer ──
   // No explicit "Refresh" item: the plugin is streamable + SSE-driven, so the menu is
@@ -243,64 +241,52 @@ function attachable(p: TrayPeer): boolean {
   return !p.launchd_managed
 }
 
-/**
- * One peer row. For an ATTACHABLE peer the row IS a DIRECT attach action (no submenu,
- * so a click attaches instead of merely expanding): clicking runs `iapeer tray
- * attach-term <peer>` in the BACKGROUND (terminal=false), which opens a `.command` via
- * `open` — a system-Terminal handoff that needs NO Accessibility/Automation TCC. This
- * deliberately AVOIDS SwiftBar's own `terminal=true`, whose Terminal.app launch drives a
- * `Cmd-T` System-Events keystroke that silently no-ops without Accessibility permission.
- * Infra (launchd) rows are plain status lines. Lifecycle lives in the Manage submenu.
- */
-function renderPeerRow(p: TrayPeer, bin: string, now: number, pendingCount = 0): string {
-  const agg = aggregate(p)
+/** The status label for a peer's submenu-parent row: `<peer>  <rt><glyph> … <badges> <age>`.
+ *  Badges: 👤 attached · 🔒 launchd · 🛡 gated approval (docs/17; yolo=fleet default=no badge) ·
+ *  ⏳N ephemeral queue. A pending approval prepends ⚠ + a 🔴N count so the owner sees WHICH peer
+ *  waits (the Allow/Deny itself lives in the top approvals section, not here). */
+function peerLabel(p: TrayPeer, now: number, pendingCount: number): string {
   const detail = p.runtimes.map(r => `${r.runtime}${GLYPH[r.status]}`).join(' ')
-  // approval mode (docs/17): the whole fleet defaults to `yolo`, so showing it on every row is
-  // noise — mark ONLY the exception, `gated` (this peer's blocking approvals go to a human), with a
-  // 🛡 shield. No badge ⇒ yolo (the default; also how a pre-approval snapshot with the field absent
-  // renders). So the row reads the mode: 🛡 = gated, bare = yolo.
   const badges =
     (p.attached ? ' 👤' : '') +
     (p.launchd_managed ? ' 🔒' : '') +
     (p.approval_mode === 'gated' ? ' 🛡' : '') +
     (p.wake_policy === 'ephemeral' && (p.queue_depth ?? 0) > 0 ? ` ⏳${p.queue_depth}` : '')
   const ageStr = p.last_active_ms ? `  ${fmtAge(p.last_active_ms, now)}` : ''
-  // HIGHLIGHT a peer with a pending approval: a ⚠ prefix + a red count badge + the row painted red
-  // so the owner sees WHICH peer is waiting (owner criterion — the static-menu equivalent of a pulse;
-  // SwiftBar cannot animate). The highlight wins over the live/meta color.
   const prefix = pendingCount > 0 ? '⚠ ' : ''
   const pendingBadge = pendingCount > 0 ? ` 🔴${pendingCount}` : ''
-  const label = `${prefix}${p.personality}  ${detail}${badges}${pendingBadge}${ageStr}`
-  const rowColor = pendingCount > 0 ? COLOR.down : agg === 'live' ? COLOR.live : COLOR.meta
-  if (!attachable(p)) return line(0, label, { color: rowColor })
-  return line(0, label, { color: rowColor, bash: bin, param1: 'tray', param2: 'attach-term', param3: p.personality, terminal: false })
+  return `${prefix}${p.personality}  ${detail}${badges}${pendingBadge}${ageStr}`
 }
 
-/** The Manage submenu: one sub-submenu per peer with its lifecycle commands, each a
- *  `iapeer tray cmd <c> <peer>` → POST /fleet/v1/peers/<peer>/<c> (terminal=false,
- *  refresh to reflect the outcome). Kept OFF the peer rows so a row click attaches. */
-function renderManage(peers: TrayPeer[], bin: string): string[] {
-  const out: string[] = [line(0, 'Manage', { sfimage: 'slider.horizontal.3' })]
-  for (const p of peers) {
-    out.push(line(1, p.personality))
-    for (const c of MANAGE_COMMANDS) {
-      // No refresh=true: the SSE stream reflects the command's lifecycle event on its
-      // own (streamable is always fresh); a refresh would only restart the stream.
-      out.push(
-        line(2, c.label, {
-          bash: bin,
-          param1: 'tray',
-          param2: 'cmd',
-          param3: c.cmd,
-          param4: p.personality,
-          terminal: false,
-        }),
-      )
-    }
-    // approval-mode toggle — only for agentic (attachable) peers; meaningless for the
-    // human channel / notifier infra (arthur/timer/watcher), which are always yolo.
-    if (attachable(p)) out.push(...renderApprovalToggle(p, bin))
+/**
+ * One peer as a SUBMENU (single unified list — no separate Manage). The parent row is the
+ * status label (no direct action — clicking EXPANDS); the children are, in order:
+ *   1. **Attach** (agentic peers only) — the terminal handoff, unchanged (0.4.67): `iapeer tray
+ *      attach-term <peer>` in the BACKGROUND (terminal=false) opens a `.command` via `open`, needing
+ *      NO Accessibility/Automation TCC (avoids SwiftBar's `terminal=true` Cmd-T keystroke). This is
+ *      the ONE trade Arthur accepted: attach is now expand-then-Attach (2 clicks) for a dupe-free list.
+ *   2. lifecycle commands (Stop/Start/New/Interrupt/Refresh/Compact) — `iapeer tray cmd <c> <peer>`.
+ *   3. approval-mode toggle (agentic peers only — docs/17).
+ *
+ * Launchd-managed peers (arthur/timer/watcher, 🔒): NO Attach (no pty session) and NO approval toggle
+ * (always yolo); they keep the lifecycle submenu (service Stop/Start etc — the SAME set the old Manage
+ * already offered them, just relocated under the peer). Per-infra-type trimming (e.g. dropping
+ * Interrupt/Compact for the human peer) is a separate call, out of scope for a de-dupe render change.
+ */
+function renderPeerSubmenu(p: TrayPeer, bin: string, now: number, pendingCount = 0): string[] {
+  const rowColor = pendingCount > 0 ? COLOR.down : aggregate(p) === 'live' ? COLOR.live : COLOR.meta
+  const out: string[] = [line(0, peerLabel(p, now, pendingCount), { color: rowColor })]
+  // 1) Attach FIRST (agentic only — launchd infra/human peers have no pty session to attach)
+  if (attachable(p)) {
+    out.push(line(1, 'Attach', { bash: bin, param1: 'tray', param2: 'attach-term', param3: p.personality, terminal: false }))
   }
+  // 2) lifecycle commands — each `iapeer tray cmd <c> <peer>` → POST /fleet/v1/peers/<peer>/<c>.
+  //    No refresh=true: the SSE stream reflects the outcome (streamable is always fresh).
+  for (const c of MANAGE_COMMANDS) {
+    out.push(line(1, c.label, { bash: bin, param1: 'tray', param2: 'cmd', param3: c.cmd, param4: p.personality, terminal: false }))
+  }
+  // 3) approval-mode toggle (agentic only)
+  if (attachable(p)) out.push(...renderApprovalToggle(p, bin, 1))
   return out
 }
 
@@ -325,7 +311,7 @@ function renderManage(peers: TrayPeer[], bin: string): string[] {
  * stray click. SwiftBar has no native confirm dialog — the nested explicit item IS the
  * confirm.
  */
-function renderApprovalToggle(p: TrayPeer, bin: string): string[] {
+function renderApprovalToggle(p: TrayPeer, bin: string, depth: number): string[] {
   const flip = (target: 'gated' | 'yolo'): Record<string, string | boolean> => ({
     bash: bin,
     param1: 'approval-mode',
@@ -337,12 +323,12 @@ function renderApprovalToggle(p: TrayPeer, bin: string): string[] {
   if (p.approval_mode === 'gated') {
     // WEAKEN — current on the parent (no action); the flip is an explicit red confirm child.
     return [
-      line(2, 'Approval: gated 🛡', { color: COLOR.warn }),
-      line(3, '⚠ Switch to yolo — removes human approval (next session)', { color: COLOR.down, ...flip('yolo') }),
+      line(depth, 'Approval: gated 🛡', { color: COLOR.warn }),
+      line(depth + 1, '⚠ Switch to yolo — removes human approval (next session)', { color: COLOR.down, ...flip('yolo') }),
     ]
   }
   // STRENGTHEN (yolo → gated) — safe, one tap.
-  return [line(2, 'Approval: yolo → gated 🛡 (next session)', flip('gated'))]
+  return [line(depth, 'Approval: yolo → gated 🛡 (next session)', flip('gated'))]
 }
 
 // ── approval renderers (docs/17 — the always-on approval channel in the bar) ─────

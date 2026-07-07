@@ -62,70 +62,73 @@ describe('renderSwiftBar', () => {
     expect(out).toContain('mem ● 0.4.17 · voice ○ 0.2.0 | color=#8b949e')
   })
 
-  test('attachable row is a DIRECT attach action (terminal=false, no submenu) — click → attach', () => {
-    const row = lines.find(l => l.startsWith('boris '))!
-    expect(row).toContain('claude● codex○')
-    expect(row).toContain('color=#3fb950')
-    // routed through tray attach-term (opens a .command via `open`), terminal=false
-    expect(row).toContain(`bash=${BIN} param1=tray param2=attach-term param3=boris terminal=false`)
-    expect(row).toContain('👤') // a human is attached
-    // the row must NOT be a submenu parent (the line right after is another top-level row)
-    const i = lines.indexOf(row)
-    expect(lines[i + 1]!.startsWith('--')).toBe(false)
+  test('agentic peer is a SUBMENU: parent has no direct action, Attach is the FIRST child', () => {
+    const parent = lines.find(l => l.startsWith('boris '))!
+    expect(parent).toContain('claude● codex○')
+    expect(parent).toContain('color=#3fb950')
+    expect(parent).toContain('👤') // a human is attached
+    expect(parent).not.toContain('bash=') // parent EXPANDS (2-click attach); no direct action
+    const i = lines.indexOf(parent)
+    // FIRST child = Attach — same attach-term document-open (terminal=false, no TCC), unchanged
+    expect(lines[i + 1]).toBe(`--Attach | bash=${BIN} param1=tray param2=attach-term param3=boris terminal=false`)
+    // then lifecycle commands (depth 1)
+    expect(lines[i + 2]).toContain('--Stop |')
   })
 
   test('NO row uses terminal=true (SwiftBar Cmd-T keystroke needs Accessibility — avoided)', () => {
     expect(out).not.toContain('terminal=true')
   })
 
-  test('launchd/infra peers are NOT attachable (plain status row, no bash action)', () => {
-    const timerRow = lines.find(l => l.startsWith('timer '))!
-    expect(timerRow).toContain('🔒')
-    expect(timerRow).not.toContain('bash=')
-    expect(timerRow).not.toContain('attach-term')
+  test('launchd/infra peer (🔒) submenu: NO Attach child (no pty), parent has no bash', () => {
+    const parent = lines.find(l => l.startsWith('timer '))!
+    expect(parent).toContain('🔒')
+    expect(parent).not.toContain('bash=')
+    expect(out).not.toContain('param3=timer') // never an attach-term for a launchd peer
+    const i = lines.indexOf(parent)
+    // first child is a lifecycle command (Stop), NOT Attach
+    expect(lines[i + 1]).not.toContain('attach-term')
+    expect(lines[i + 1]).toContain('--Stop |')
   })
 
   test('badges: ephemeral queue depth on an attachable peer', () => {
     expect(lines.find(l => l.startsWith('scriber '))!).toContain('⏳3')
   })
 
-  test('Manage submenu carries per-peer lifecycle commands (kept off the rows)', () => {
-    expect(lines.some(l => l.startsWith('Manage'))).toBe(true)
-    expect(out).toContain('\n--boris\n') // a peer sub-submenu parent at depth 1
-    // Wake was DROPPED from the submenu (a row click already wakes-then-attaches).
-    expect(out).not.toContain('param3=wake')
-    expect(out).not.toContain('----Wake ')
-    // Stop/Start and the rest remain; lifecycle commands carry NO refresh=true (the SSE
-    // stream reflects their outcome — streamable is always fresh).
-    expect(out).toContain(`----Stop | bash=${BIN} param1=tray param2=cmd param3=stop param4=boris terminal=false`)
-    expect(out).toContain('param3=start param4=boris')
+  test('single unified list — NO separate Manage section, each peer appears ONCE, Wake dropped', () => {
+    // the old "Manage" peer-dupe list is gone entirely
+    expect(lines.some(l => l === 'Manage | sfimage=slider.horizontal.3')).toBe(false)
+    expect(out).not.toContain('slider.horizontal.3')
+    // each peer is a submenu parent exactly once (no second listing under Manage)
+    expect(lines.filter(l => l.startsWith('boris ')).length).toBe(1)
+    expect(out).not.toContain('\n--boris\n')
+    // lifecycle commands live UNDER the peer (depth 1), Wake dropped
+    expect(out).toContain(`--Stop | bash=${BIN} param1=tray param2=cmd param3=stop param4=boris terminal=false`)
     expect(out).toContain('param3=interrupt param4=boris')
+    expect(out).not.toContain('param3=wake')
   })
 
-  test('approval-mode toggle: yolo peer → one-tap strengthen (→ gated), refresh to re-render', () => {
+  test('approval-mode toggle: yolo peer → one-tap strengthen (→ gated) at depth 1', () => {
     // boris is yolo (no approval_mode) → a single safe item flipping to gated
-    expect(out).toContain(`----Approval: yolo → gated 🛡 (next session) | bash=${BIN} param1=approval-mode param2=boris param3=gated terminal=false refresh=true`)
+    expect(out).toContain(`--Approval: yolo → gated 🛡 (next session) | bash=${BIN} param1=approval-mode param2=boris param3=gated terminal=false refresh=true`)
   })
 
-  test('approval-mode toggle: gated peer → current on parent + red ⚠ confirm CHILD (weaken behind a submenu)', () => {
-    // scriber is gated → the current mode shows on the (action-less) parent, and the
+  test('approval-mode toggle: gated peer → current on parent (depth 1) + red ⚠ confirm CHILD (depth 2)', () => {
+    // scriber is gated → the current mode shows on the (action-less) submenu item, and the
     // yolo flip is an explicit red confirm one level deeper (perimeter-weakening friction)
-    expect(lines.some(l => l === '----Approval: gated 🛡 | color=#d29922')).toBe(true)
-    const child = lines.find(l => l.startsWith('------⚠ Switch to yolo'))!
+    expect(lines.some(l => l === '--Approval: gated 🛡 | color=#d29922')).toBe(true)
+    const child = lines.find(l => l.startsWith('----⚠ Switch to yolo'))!
     expect(child).toContain('color=#f85149') // red weight on the weakening action
     expect(child).toContain(`param1=approval-mode param2=scriber param3=yolo terminal=false refresh=true`)
   })
 
   test('approval-mode toggle: NOT offered for launchd infra/human peers (always yolo)', () => {
-    // timer is launchd-managed (arthur/timer/watcher class) → no approval control
-    const timerBlockStart = lines.indexOf('--timer')
-    expect(timerBlockStart).toBeGreaterThan(-1)
-    // no Approval line assigned to timer (scan its submenu block until the next depth-1 parent)
+    const start = lines.findIndex(l => l.startsWith('timer '))
+    expect(start).toBeGreaterThan(-1)
+    // scan timer's submenu children (all `--`-prefixed) until the next depth-0 line
     let sawApproval = false
-    for (let i = timerBlockStart + 1; i < lines.length; i++) {
-      const l = lines[i]!
-      if (/^--[^-]/.test(l)) break // next peer's depth-1 parent
-      if (l.includes('param1=approval-mode')) sawApproval = true
+    for (let i = start + 1; i < lines.length; i++) {
+      if (!lines[i]!.startsWith('--')) break
+      if (lines[i]!.includes('param1=approval-mode')) sawApproval = true
     }
     expect(sawApproval).toBe(false)
   })
