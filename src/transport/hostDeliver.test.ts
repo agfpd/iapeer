@@ -224,16 +224,16 @@ describe('transcriptCarriesEnvelope — message-specific landed-confirm (real fs
     const baseline = compactDoneBaseline('claude', cwd, { env })
 
     // nothing new yet → not carried
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(false)
 
     // the receiver's OWN turn writes (no envelope) → STILL not carried (this is the false-OK case the
     // old mtime proxy got wrong: mtime moved, but the message was NOT accepted)
     appendFileSync(file, JSON.stringify({ type: 'assistant', message: { content: 'working on it…' } }) + '\n')
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(false)
 
     // the session enqueues OUR paste → queue-operation content = envelope verbatim → carried
     appendFileSync(file, JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: sampleEnvelope }) + '\n')
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(true)
   })
 
   test('claude idle: a user-turn record carrying the envelope confirms', () => {
@@ -245,7 +245,28 @@ describe('transcriptCarriesEnvelope — message-specific landed-confirm (real fs
     writeFileSync(file, '')
     const baseline = compactDoneBaseline('claude', cwd, { env })
     appendFileSync(file, JSON.stringify({ type: 'user', message: { role: 'user', content: sampleEnvelope } }) + '\n')
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(true)
+  })
+
+  test('fresh session: a NEW jsonl born AFTER the baseline (self-fresh) carrying the envelope CONFIRMS', () => {
+    // Incident 2026-07-10: a self-fresh/eager-fresh session writes its NEW session file LAZILY on the
+    // first delivered turn — AFTER the pre-deliver baseline snapshot. Iterating baseline-only scanned the
+    // dead OLD file and false-FAILed a message the session actually accepted. The confirm must pick up a
+    // post-baseline file (from offset 0).
+    const { env, home, cwd } = tmpHomeAndCwd()
+    const slug = realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, '-')
+    const dir = join(home, '.claude', 'projects', slug)
+    mkdirSync(dir, { recursive: true })
+    // baseline captured with ONLY the previous (soon-dead) session's file present
+    const oldFile = join(dir, 'old-session.jsonl')
+    appendFileSync(oldFile, JSON.stringify({ type: 'assistant', message: { content: 'prior turn' } }) + '\n')
+    const baseline = compactDoneBaseline('claude', cwd, { env })
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(false)
+
+    // the FRESH session comes up and creates a NEW jsonl (absent from the baseline) carrying our envelope
+    const freshFile = join(dir, 'fresh-session.jsonl')
+    appendFileSync(freshFile, JSON.stringify({ type: 'user', message: { role: 'user', content: sampleEnvelope } }) + '\n')
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(true)
   })
 
   test('a pre-baseline copy of the same envelope does NOT confirm (only bytes past the offset count)', () => {
@@ -258,7 +279,7 @@ describe('transcriptCarriesEnvelope — message-specific landed-confirm (real fs
     writeFileSync(file, JSON.stringify({ type: 'user', message: { content: sampleEnvelope } }) + '\n')
     const baseline = compactDoneBaseline('claude', cwd, { env })
     // no NEW record → must not confirm off the stale copy
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(false)
   })
 
   test('codex: a user-input response_item (nested) carrying the envelope confirms; the session is found by cwd', () => {
@@ -269,12 +290,12 @@ describe('transcriptCarriesEnvelope — message-specific landed-confirm (real fs
     // session_meta with payload.cwd === the peer cwd → compactCandidateFiles picks this file
     writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { cwd: realpathSync(cwd) } }) + '\n')
     const baseline = compactDoneBaseline('codex', cwd, { env })
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(false)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(false)
     appendFileSync(
       file,
       JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: sampleEnvelope }] } }) + '\n',
     )
-    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope)).toBe(true)
+    expect(transcriptCarriesEnvelope(baseline, sampleEnvelope, { env })).toBe(true)
   })
 })
 

@@ -307,7 +307,7 @@ async function deliverViaHost(
   // a short grace covers it. The receiver's own assistant/tool turn never reproduces the
   // `<iap from-personality=…>` wrapper, so it cannot forge a confirm. No such record within the grace →
   // false-FAIL (the sender retries) — NOT a false-OK (silent loss the contract forbids).
-  const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload))
+  const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload, { env }))
   const sleep = seam.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   const graceMs = confirmGraceMs()
   const graceDeadline = monotonicMs() + graceMs
@@ -579,20 +579,37 @@ function jsonStringValuesContain(value: unknown, needle: string): boolean {
  * the full envelope is UNFORGEABLE by a concurrent turn — no false-OK. Because only bytes PAST the
  * baseline offset are read, a pre-existing copy of an identical earlier message cannot pass either.
  *
- * Iterates the baseline file LIST verbatim — it does NOT re-scan the runtime's session dir each poll
- * (unlike the minutes-long compact-done gate). A delivery's confirm window is seconds, so a brand-new
- * session file appearing mid-delivery (a resume mid-flight) is negligible, and missing it fails in the
- * SAFE direction (false-FAIL → the sender retries, never a silent loss). For codex this also avoids a
- * full recursive `~/.codex/sessions` re-scan on every ~100ms poll (the active session file is already
- * in the baseline), keeping the hot delivery path cheap.
+ * Scans each baseline file from its captured offset AND any session file that APPEARS AFTER the baseline
+ * from offset 0 — the post-baseline pickup is load-bearing. A FRESH session (self-fresh/eager-fresh)
+ * writes its NEW jsonl LAZILY on the first delivered turn, so the confirming record for the FIRST delivery
+ * into that session lands in a file the baseline never captured (the fresh jsonl is born ~a beat AFTER the
+ * pre-deliver baseline snapshot). Iterating baseline-only made EVERY such first-delivery a false-FAIL: the
+ * dead OLD session file gets scanned, the live NEW one is ignored, and the confirm reported "not delivered"
+ * for a message the session had actually accepted + processed (verified live 2026-07-10: telegram-arthur →
+ * mrmechanic ok=false, yet the envelope stood in the fresh jsonl at +0.3s, within the grace). A
+ * post-baseline file is BRAND-NEW for this cwd, so reading it from 0 cannot match a pre-existing copy
+ * (nothing pre-existed), and the full `<iap from-personality=…>` envelope is unforgeable by the receiver's
+ * own assistant/tool turn — the SAME false-OK safety `compactTranscriptHasDone` already relies on. In
+ * production this loop runs ONLY for claude (codex confirms by the socket-ack BEFORE reaching here), so the
+ * per-poll re-list is a single cheap readdirSync of one project dir — never a recursive `~/.codex/sessions`
+ * walk. `env` scopes the re-list under a test HOME (default process.env).
  */
-export function transcriptCarriesEnvelope(baseline: CompactDoneBaseline, envelope: string): boolean {
+export function transcriptCarriesEnvelope(
+  baseline: CompactDoneBaseline,
+  envelope: string,
+  opts: { env?: NodeJS.ProcessEnv } = {},
+): boolean {
   const needle = envelope.replace(/\r/g, '')
   if (!needle) return false
-  for (const { path, size: offset } of baseline.files) {
-    // Read ONLY the tail past the baseline offset — a full readFileSync here re-read the ENTIRE
-    // transcript (hundreds of MB for a long-running peer) on every ~100ms confirm-poll, stalling the
-    // single-threaded router event loop for the whole fleet.
+  // Baseline files at their pre-deliver offset; a file NOT in the baseline (born after it) is read from 0.
+  const offsets = new Map(baseline.files.map(f => [f.path, f.size]))
+  for (const path of compactCandidateFiles(baseline.runtime, baseline.cwd, opts.env)) {
+    if (!offsets.has(path)) offsets.set(path, 0)
+  }
+  for (const [path, offset] of offsets) {
+    // Read ONLY the tail past the offset — a full readFileSync here re-read the ENTIRE transcript
+    // (hundreds of MB for a long-running peer) on every ~100ms confirm-poll, stalling the single-threaded
+    // router event loop for the whole fleet.
     const tail = readFileTailFrom(path, offset)
     if (!tail) continue
     for (const line of tail.split(/\r?\n/)) {
