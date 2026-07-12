@@ -215,13 +215,19 @@ export const launch: LaunchFn = async (
       // BOOT: the supervisor's boot-driver dismisses startup dialogs internally; wait for the input
       // surface via the pane-log model, then deliver over the socket + ready-gate on a model turn —
       // the SAME shape as the tmux boot/deliver/ready-gate below, with host equivalents.
-      const baselineMtime = adapter.newestActivityMtime(cwd) ?? 0
       const isReady = await waitHostReady(
         { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte, approvalMode: spec.approvalMode, env },
         sleep,
       )
       if (!isReady) return fail(identity, 'never-became-ready (hosted: supervisor input surface not ready)')
       if (firstMessage.trim().length === 0) return ready(identity) // bare bring-up — no message to deliver
+      // В18 — snap the ready-gate baseline AFTER boot, not before. newestActivityMtime is a raw
+      // transcript-file mtime that BOOT ITSELF advances: codex writes its rollout-jsonl on start,
+      // a claude-resume re-saves the transcript. Captured before waitHostReady, those boot writes
+      // alone push mtime past the baseline, so the gate below fires on the boot write — NOT on the
+      // model PROCESSING firstMessage — returning ready/taskDelivered while the message is unseen
+      // (silent loss). Snapped here — post-boot, pre-deliver — only the model's own turn advances it.
+      const baselineMtime = adapter.newestActivityMtime(cwd) ?? 0
       // INSTRUMENTATION (premature-ready diagnosis): record the session-start boundary and how much THIS
       // session had written into the shared pane-log by the time the ready-gate fired. On a recurrence,
       // paneLogBytes ≈ paneLogStartByte (ready seen though the new session wrote ~nothing) localizes a
