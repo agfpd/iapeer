@@ -312,4 +312,18 @@ describe('SwiftBar login autostart', () => {
     expect(s.autostart.registered).toBe(true)
     expect(s.autostart.path).toBe(swiftBarAutostartPlistPath(aenv))
   })
+
+  test('trayStatus reports the persisted icon visibility (NSStatusItem VisibleCC ground truth)', () => {
+    // visible: defaults read returns 1
+    const vis = makeRunner([['NSStatusItem VisibleCC iapeer.10s.sh', { status: 0, stdout: '1\n', stderr: '' }]])
+    expect(trayStatus({ env: aenv, run: vis.run, probeApp: () => true }).swiftbar.iconVisible).toBe(true)
+    expect(vis.calls.some(c => c.includes('NSStatusItem VisibleCC iapeer.10s.sh'))).toBe(true)
+    // hidden: persisted 0 — the "icon is gone" smoking gun
+    const hid = makeRunner([['NSStatusItem VisibleCC iapeer.10s.sh', { status: 0, stdout: '0\n', stderr: '' }]])
+    expect(trayStatus({ env: aenv, run: hid.run, probeApp: () => true }).swiftbar.iconVisible).toBe(false)
+    // key absent (defaults exits non-zero) → undefined, and SwiftBar-absent → undefined
+    const none = makeRunner([['NSStatusItem VisibleCC iapeer.10s.sh', { status: 1, stdout: '', stderr: 'does not exist' }]])
+    expect(trayStatus({ env: aenv, run: none.run, probeApp: () => true }).swiftbar.iconVisible).toBeUndefined()
+    expect(trayStatus({ env: aenv, run: makeRunner().run, probeApp: () => false }).swiftbar.iconVisible).toBeUndefined()
+  })
 })

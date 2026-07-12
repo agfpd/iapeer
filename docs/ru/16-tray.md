@@ -81,7 +81,7 @@ SwiftBar.app, если его нет.
 | `iapeer tray render [--stream]` | Печатает вывод плагина SwiftBar. `--stream` — streamable-цикл, который крутит плагин; одноразовая форма — поллинг-фолбэк и тест-поверхность. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST fleet-команды (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — lifecycle-пункты меню зовут это. |
 | `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Резолв ожидающего human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` через тот же unix-first fleet-клиент. Пункты Allow/Deny меню зовут это; инвариант единой очереди — резолв виден каждому каналу (CLI, telegram). |
-| `iapeer tray status` | Только чтение: жив ли fleet API (из `router.json`), установлен ли SwiftBar и где его каталог плагинов, на месте ли файл плагина, **зарегистрирован ли супервизор tray-хоста**. Ничего не чинит. |
+| `iapeer tray status` | Только чтение: жив ли fleet API (из `router.json`), установлен ли SwiftBar и где его каталог плагинов, на месте ли файл плагина, **зарегистрирован ли супервизор tray-хоста** и **видима ли иконка в менюбаре прямо сейчас** (персистентное состояние `NSStatusItem VisibleCC` — ground truth, который читают первым при жалобе «иконка пропала»; экран не нужен). Ничего не чинит. |
 
 ## Как устроено
 

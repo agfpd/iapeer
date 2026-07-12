@@ -85,7 +85,7 @@ whole dashboard twice.
 | `iapeer tray render [--stream]` | Print the SwiftBar plugin output. `--stream` is the streamable loop the plugin runs; the one-shot form is the poll fallback and the test surface. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST a fleet command (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — the menu's lifecycle actions call this. |
 | `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Resolve a pending human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` over the same unix-first fleet client. The menu's Allow/Deny items call these; the single-queue invariant means the resolution is seen by every channel (CLI, telegram). |
-| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present, **is the tray-host supervisor registered**. Repairs nothing. |
+| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present, **is the tray-host supervisor registered**, and **is the menu-bar icon visible right now** (the persisted `NSStatusItem VisibleCC` state — the ground truth to read first when "the icon is gone" is reported; no screen needed). Repairs nothing. |
 
 ## How it is wired
 

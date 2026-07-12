@@ -2607,8 +2607,10 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
                 `  sock: ${s.daemon.sock ?? '—'}\n` +
                 `  tcp:  ${s.daemon.tcp ?? '—'}\n` +
                 `SwiftBar: ${s.swiftbar.installed ? `installed (plugin dir: ${s.swiftbar.pluginDir ?? 'unset'})` : 'not installed'}\n` +
+                // the persisted NSStatusItem visibility — ground truth for "the icon is gone"
+                `menu-bar icon: ${s.swiftbar.iconVisible === undefined ? 'unknown (no persisted state)' : s.swiftbar.iconVisible ? 'visible' : 'HIDDEN (persisted NSStatusItem VisibleCC=0)'}\n` +
                 `plugin: ${s.plugin.installed ? s.plugin.path : 'not installed'}\n` +
-                `login autostart: ${s.autostart.registered ? s.autostart.path : 'not registered'}\n`,
+                `supervisor (autostart): ${s.autostart.registered ? s.autostart.path : 'not registered'}\n`,
             )
             return 0
           }

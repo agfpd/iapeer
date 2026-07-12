@@ -486,9 +486,18 @@ export function trayAttachTerm(opts: {
 
 export interface TrayStatus {
   daemon: { fleet: boolean; version?: string; sock?: string; tcp?: string }
-  swiftbar: { installed: boolean; pluginDir?: string }
+  swiftbar: {
+    installed: boolean
+    pluginDir?: string
+    /** GROUND TRUTH of the menu-bar icon: AppKit persists NSStatusItem visibility per
+     *  autosaveName in SwiftBar's defaults (`NSStatusItem VisibleCC <plugin>`). false =
+     *  the icon is hidden RIGHT NOW (whatever hid it — a mid-chunk decode nil on an old
+     *  binary, a ⌘-drag removal); undefined = key absent / SwiftBar not installed. The
+     *  first thing to read when "the icon is gone" is reported — no screen needed. */
+    iconVisible?: boolean
+  }
   plugin: { installed: boolean; path?: string }
-  /** Login-autostart LaunchAgent: registered (our plist present) + its path. */
+  /** Tray-host supervisor LaunchAgent: registered (our plist present) + its path. */
   autostart: { registered: boolean; path?: string }
 }
 
@@ -503,9 +512,14 @@ export function trayStatus(opts: { env?: NodeJS.ProcessEnv; run?: Runner; probeA
   const found = searchDirs.map(d => join(d, PLUGIN_BASENAME)).find(f => existsSync(f))
   const autostartPath = swiftBarAutostartPlistPath(env)
   const autostartOurs = existsSync(autostartPath) && isFoundationOwnedPlist(autostartPath)
+  let iconVisible: boolean | undefined
+  if (installed) {
+    const r = run('defaults', ['read', SWIFTBAR_DOMAIN, `NSStatusItem VisibleCC ${PLUGIN_BASENAME}`])
+    if (r.status === 0) iconVisible = r.stdout.trim() === '1'
+  }
   return {
     daemon: { fleet: addr.fleet === 1, version: addr.version, sock: addr.sock, tcp: addr.tcp },
-    swiftbar: { installed, pluginDir: cfgDir },
+    swiftbar: { installed, pluginDir: cfgDir, iconVisible },
     plugin: { installed: Boolean(found), path: found },
     autostart: { registered: autostartOurs, path: autostartOurs ? autostartPath : undefined },
   }
