@@ -76,12 +76,12 @@ SwiftBar.app, если его нет.
 
 | Verb | Что делает |
 |---|---|
-| `iapeer tray install [--plugin-only]` | Доустановит SwiftBar.app, если его нет (санкция владельца), нацелит его на каталог плагинов, запишет плагин, запустит + обновит. `--plugin-only` пишет только файл плагина (без приложения и запуска — так делает foundation-install). Идемпотентно. |
-| `iapeer tray uninstall` | Удалит файл плагина и обновит SwiftBar. **Флот не трогает** — демон, TUI и доставка живут; SwiftBar.app остаётся (может держать другие плагины). |
+| `iapeer tray install [--plugin-only]` | Доустановит SwiftBar.app, если его нет (санкция владельца), нацелит его на каталог плагинов, запишет плагин, запустит + обновит **и зарегистрирует LaunchAgent автозапуска при логине**. `--plugin-only` пишет только файл плагина (без приложения, запуска и автозапуска — так делает foundation-install). Идемпотентно. |
+| `iapeer tray uninstall` | Удалит файл плагина, обновит SwiftBar **и снесёт LaunchAgent автозапуска**. **Флот не трогает** — демон, TUI и доставка живут; SwiftBar.app остаётся (может держать другие плагины). |
 | `iapeer tray render [--stream]` | Печатает вывод плагина SwiftBar. `--stream` — streamable-цикл, который крутит плагин; одноразовая форма — поллинг-фолбэк и тест-поверхность. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST fleet-команды (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — lifecycle-пункты меню зовут это. |
 | `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Резолв ожидающего human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` через тот же unix-first fleet-клиент. Пункты Allow/Deny меню зовут это; инвариант единой очереди — резолв виден каждому каналу (CLI, telegram). |
-| `iapeer tray status` | Только чтение: жив ли fleet API (из `router.json`), установлен ли SwiftBar и где его каталог плагинов, на месте ли файл плагина. Ничего не чинит. |
+| `iapeer tray status` | Только чтение: жив ли fleet API (из `router.json`), установлен ли SwiftBar и где его каталог плагинов, на месте ли файл плагина, **зарегистрирован ли автозапуск**. Ничего не чинит. |
 
 ## Как устроено
 
@@ -96,6 +96,25 @@ SwiftBar.app, если его нет.
 него через `defaults write com.ameba.SwiftBar PluginDirectory` — обычный строковый default,
 который SwiftBar читает при запуске (он не sandboxed и не хранит security-scoped bookmark),
 поэтому окно выбора папки пропускается.
+
+Автозапуск при логине: активация трея регистрирует пользовательский LaunchAgent
+`~/Library/LaunchAgents/com.agfpd.iapeer.tray.plist` (RunAtLoad, без KeepAlive), чьи
+`ProgramArguments` — `open -g -b com.ameba.SwiftBar`, так что SwiftBar (а с ним fleet-дашборд
+и бейдж аппрувов) сам поднимается после перезагрузки, без ручного `open -a SwiftBar`.
+**LaunchAgent** выбран намеренно, не «Login Item» через System Events и не SMAppService: Login
+Item требует, чтобы вызывающий процесс держал Automation-TCC на System Events (грант
+атрибутируется тому родителю, что запустил verb — хрупко в headless / `iapeer update`
+контексте), а SMAppService умеет регистрировать только хелпер, который несёт *само* целевое
+приложение (сторонний SwiftBar так из CLI не зарегистрировать). LaunchAgent не требует TCC и
+переиспользует идемпотентный plist-жизненный цикл foundation: plist байт-стабилен (пишется
+только при изменении), несёт sentinel владения `com.iapeer.managed` и bootstrap'ится/
+пересоздаётся undead-safe — повторная активация не плодит дубль. Он **RunAtLoad-only** (сработать
+один раз при логине), а не KeepAlive, потому что процесс `open` завершается сразу, как SwiftBar
+поднят (KeepAlive устроил бы respawn-шторм), а супервизия самого SwiftBar боролась бы с
+пользователем, который его закрыл. `tray uninstall` делает bootout и удаляет plist (только наш
+файл с sentinel — чужой plist на этом лейбле не трогается). Лейбл живёт в собственном namespace
+foundation `com.agfpd.*`, никогда не `com.iapeer.<personality>` (флот persistent-пиров), поэтому
+H4-страж launchd-owned пиров не может принять его за пира.
 
 Авторизация — как у Fleet API: на open-local хосте bearer не нужен; если демон настроен с
 `IAPEER_BEARER_TOKEN`, окружение плагина тоже должно его нести.

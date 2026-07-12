@@ -2581,6 +2581,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
                 `  plugin dir: ${r.pluginDir} (${r.dir})\n` +
                 `  SwiftBar: ${r.app}${r.appReason ? ` — ${r.appReason}` : ''}\n` +
                 (r.launched ? '  launched + refreshed SwiftBar\n' : '') +
+                (r.autostart
+                  ? `  login autostart: ${r.autostart.state}${r.autostart.detail ? ` — ${r.autostart.detail}` : ''} (${r.autostart.plistPath})\n`
+                  : '') +
                 (r.app === 'absent' || r.app === 'install-failed'
                   ? '  (SwiftBar not active — run `iapeer tray install` to install it, then it appears in the menu bar)\n'
                   : ''),
@@ -2592,6 +2595,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             out(
               (r.removed.length ? `removed:\n${r.removed.map(f => `  ${f}`).join('\n')}\n` : 'no tray plugin file found\n') +
                 (r.refreshed ? '  refreshed SwiftBar\n' : '') +
+                `  login autostart: ${r.autostart.state}${r.autostart.removed ? ` (${r.autostart.plistPath})` : ''}\n` +
                 '  fleet untouched (daemon / TUI / delivery unaffected)\n',
             )
             return 0
@@ -2603,7 +2607,8 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
                 `  sock: ${s.daemon.sock ?? '—'}\n` +
                 `  tcp:  ${s.daemon.tcp ?? '—'}\n` +
                 `SwiftBar: ${s.swiftbar.installed ? `installed (plugin dir: ${s.swiftbar.pluginDir ?? 'unset'})` : 'not installed'}\n` +
-                `plugin: ${s.plugin.installed ? s.plugin.path : 'not installed'}\n`,
+                `plugin: ${s.plugin.installed ? s.plugin.path : 'not installed'}\n` +
+                `login autostart: ${s.autostart.registered ? s.autostart.path : 'not registered'}\n`,
             )
             return 0
           }

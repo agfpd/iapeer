@@ -4,14 +4,18 @@
 // the app-install path, uninstall leaving the fleet untouched, and the sandbox guard.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   buildPluginShim,
   dedicatedPluginDir,
+  ensureSwiftBarAutostart,
   installTray,
   PLUGIN_BASENAME,
+  removeSwiftBarAutostart,
+  renderSwiftBarAutostartPlist,
+  swiftBarAutostartPlistPath,
   trayAttachTerm,
   trayStatus,
   uninstallTray,
@@ -184,5 +188,97 @@ describe('sandbox guard', () => {
   test('refuses to install into the REAL ~/.iapeer under IAPEER_TEST_SANDBOX=1', () => {
     const unsafe = { HOME: process.env.HOME, IAPEER_TEST_SANDBOX: '1' } // no IAPEER_ROOT ⇒ resolves to ~/.iapeer
     expect(() => installTray({ env: unsafe, run: makeRunner().run, probeApp: () => false })).toThrow(/REAL ~\/\.iapeer/)
+  })
+})
+
+describe('SwiftBar login autostart', () => {
+  // Isolate the LaunchAgents dir so the plist write is hermetic (never touches
+  // ~/Library/LaunchAgents); IAPEER_TEST_SANDBOX still skips every launchctl call.
+  let agents: string
+  let aenv: NodeJS.ProcessEnv
+  beforeEach(() => {
+    agents = join(root, 'LaunchAgents')
+    aenv = { ...env, IAPEER_LAUNCHAGENTS_DIR: agents }
+  })
+
+  test('renders a RunAtLoad-only agent (no KeepAlive) that opens SwiftBar by bundle id, with the ownership sentinel', () => {
+    const plist = renderSwiftBarAutostartPlist()
+    expect(plist).toContain('<key>Label</key>\n    <string>com.agfpd.iapeer.tray</string>')
+    expect(plist).toContain('<key>com.iapeer.managed</key>') // foundation ownership sentinel
+    expect(plist).toContain('<string>/usr/bin/open</string>')
+    expect(plist).toContain('<string>-b</string>')
+    expect(plist).toContain('<string>com.ameba.SwiftBar</string>')
+    expect(plist).toContain('<key>RunAtLoad</key>')
+    // DELIBERATELY no KeepAlive: `open` exits immediately → KeepAlive would respawn-storm.
+    expect(plist).not.toContain('KeepAlive')
+  })
+
+  test('writes the plist under the isolated LaunchAgents dir; idempotent (no dup on repeat)', () => {
+    const path = swiftBarAutostartPlistPath(aenv)
+    expect(path).toBe(join(agents, 'com.agfpd.iapeer.tray.plist'))
+    const r1 = ensureSwiftBarAutostart(aenv)
+    expect(r1.wrote).toBe(true)
+    expect(r1.state).toBe('skipped-sandbox') // launchctl not touched under sandbox
+    expect(existsSync(path)).toBe(true)
+    expect(readFileSync(path, 'utf8')).toBe(renderSwiftBarAutostartPlist())
+    // second run: byte-stable → nothing rewritten (idempotent)
+    const r2 = ensureSwiftBarAutostart(aenv)
+    expect(r2.wrote).toBe(false)
+  })
+
+  test('under sandbox WITHOUT an isolated dir it writes NOTHING (no leaked real plist)', () => {
+    // env has no IAPEER_LAUNCHAGENTS_DIR ⇒ the path resolves to the REAL ~/Library/
+    // LaunchAgents; the guard must early-return BEFORE any write. Proven hermetically by
+    // wrote:false + skipped-sandbox (do NOT existsSync the real host — CI rule).
+    const r = ensureSwiftBarAutostart(env)
+    expect(r.state).toBe('skipped-sandbox')
+    expect(r.wrote).toBe(false)
+    expect(r.detail).toContain('IAPEER_LAUNCHAGENTS_DIR')
+  })
+
+  test('installTray(launch) registers autostart; the plist lands', () => {
+    const r = installTray({ env: aenv, run: makeRunner().run, probeApp: () => true, launch: true })
+    expect(r.launched).toBe(true)
+    expect(r.autostart).toBeDefined()
+    expect(existsSync(swiftBarAutostartPlistPath(aenv))).toBe(true)
+  })
+
+  test('plugin-only install (no launch) does NOT register autostart', () => {
+    const r = installTray({ env: aenv, run: makeRunner().run, probeApp: () => false })
+    expect(r.autostart).toBeUndefined()
+    expect(existsSync(swiftBarAutostartPlistPath(aenv))).toBe(false)
+  })
+
+  test('removeSwiftBarAutostart removes OUR plist, leaves a foreign one untouched', () => {
+    ensureSwiftBarAutostart(aenv)
+    const path = swiftBarAutostartPlistPath(aenv)
+    expect(existsSync(path)).toBe(true)
+    const r = removeSwiftBarAutostart(aenv)
+    expect(r.removed).toBe(true)
+    expect(r.state).toBe('removed')
+    expect(existsSync(path)).toBe(false)
+    // a sentinel-less file at the same label is foreign → never removed
+    mkdirSync(agents, { recursive: true })
+    writeFileSync(path, '<plist>not ours</plist>')
+    const r2 = removeSwiftBarAutostart(aenv)
+    expect(r2.removed).toBe(false)
+    expect(r2.state).toBe('foreign')
+    expect(existsSync(path)).toBe(true)
+  })
+
+  test('uninstallTray tears down the autostart plist', () => {
+    ensureSwiftBarAutostart(aenv)
+    expect(existsSync(swiftBarAutostartPlistPath(aenv))).toBe(true)
+    const r = uninstallTray({ env: aenv, run: makeRunner().run, launch: false, probeApp: () => false })
+    expect(r.autostart.state).toBe('removed')
+    expect(existsSync(swiftBarAutostartPlistPath(aenv))).toBe(false)
+  })
+
+  test('trayStatus reports autostart registration', () => {
+    expect(trayStatus({ env: aenv, run: makeRunner().run, probeApp: () => false }).autostart.registered).toBe(false)
+    ensureSwiftBarAutostart(aenv)
+    const s = trayStatus({ env: aenv, run: makeRunner().run, probeApp: () => false })
+    expect(s.autostart.registered).toBe(true)
+    expect(s.autostart.path).toBe(swiftBarAutostartPlistPath(aenv))
   })
 })

@@ -21,12 +21,20 @@
 // so IAPEER_ROOT isolates it in tests); every external side-effect (defaults / brew /
 // open) goes through an injectable Runner so tests stay hermetic.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { iapeerBinPath } from '../install/index.ts'
+import {
+  IAPEER_PLIST_OWNER_KEY,
+  bootoutLaunchdJob,
+  bootstrapLaunchdJob,
+  cycleLaunchdJob,
+  isFoundationOwnedPlist,
+  launchAgentsDir,
+} from '../launch/launchd.ts'
 import { resolveFleetAddress } from './client.ts'
 
 /** Streamable plugin: the `.10s.` token is the RESPAWN cadence SwiftBar uses if the
@@ -34,6 +42,16 @@ import { resolveFleetAddress } from './client.ts'
  *  ignored. The basename is stable — install rewrites the same file (idempotent). */
 export const PLUGIN_BASENAME = 'iapeer.10s.sh'
 const SWIFTBAR_DOMAIN = 'com.ameba.SwiftBar'
+// SwiftBar's `defaults` domain IS its bundle identifier — reuse it for the autostart
+// LaunchAgent's `open -b <bundleid>` (bundle-id launch survives the app moving/renaming
+// between /Applications and ~/Applications, unlike a baked absolute path or `-a <name>`).
+const SWIFTBAR_BUNDLE_ID = SWIFTBAR_DOMAIN
+// The login-autostart LaunchAgent's label. Foundation namespace (`com.agfpd.*` = the
+// foundation's own jobs), DELIBERATELY not `com.iapeer.<personality>` — that namespace
+// is the persistent-peer fleet keyed on personality, and the tray autostart is neither a
+// peer nor daemon-managed. Distinct label ⇒ it can never be mistaken for a peer plist by
+// the H4 launchd-owned sweep-guard.
+const SWIFTBAR_AUTOSTART_LABEL = 'com.agfpd.iapeer.tray'
 const SWIFTBAR_APP_PATHS = ['/Applications/SwiftBar.app', join(homedir(), 'Applications', 'SwiftBar.app')]
 
 export type RunResult = { status: number | null; stdout: string; stderr: string }
@@ -114,6 +132,147 @@ export function buildPluginShim(binPath: string): string {
   ].join('\n')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Login autostart — a RunAtLoad LaunchAgent that brings SwiftBar up at login, so the
+// fleet dashboard + approval badge survive a reboot without a manual `open -a SwiftBar`.
+//
+// MECHANISM CHOICE (owner-relevant): a user LaunchAgent, not a System Events "Login
+// Item" and not SMAppService.
+//   • System Events Login Item (osascript `make login item`) — the manual stop-gap —
+//     requires the INVOKING process to hold Automation TCC over System Events; that
+//     grant is attributed to whatever parent runs the activation verb (Terminal / the
+//     daemon / an onboard run), so it silently no-ops or prompts in a headless / update
+//     context. A LaunchAgent needs no TCC at all — pure filesystem + launchctl.
+//   • SMAppService (macOS 13+) is the modern path, but it registers a helper the TARGET
+//     app ships — we cannot register a THIRD-PARTY GUI app (SwiftBar) with it from a CLI.
+//   • The LaunchAgent reuses the foundation's proven idempotent plist lifecycle
+//     (write-if-changed + undead-safe bootstrap/cycle, sandbox-guarded) and carries the
+//     ownership sentinel so uninstall can recognize + remove exactly our artifact.
+//
+// RunAtLoad-ONLY, no KeepAlive: the ProgramArguments launch SwiftBar via `open` (which
+// exits immediately once SwiftBar is up), so KeepAlive would respawn-storm `open` every
+// throttle window. A login-autostart only needs to fire once per session; keeping
+// SwiftBar itself supervised (relaunch-on-quit) would fight the user quitting it and
+// duplicate SwiftBar's own launch-at-login — out of scope for "start it at login".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Absolute path of the tray autostart LaunchAgent plist (IAPEER_LAUNCHAGENTS_DIR
+ *  isolates it under test/sandbox; else ~/Library/LaunchAgents). */
+export function swiftBarAutostartPlistPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(launchAgentsDir(env), `${SWIFTBAR_AUTOSTART_LABEL}.plist`)
+}
+
+/** Render the RunAtLoad SwiftBar-autostart plist. PURE/deterministic (golden-testable).
+ *  Launch is `open -g -b <bundleid>`: LaunchServices activates the app correctly as a
+ *  menu-bar agent (`-g` = don't steal focus), and bundle-id targeting survives the app
+ *  moving. Carries the foundation ownership sentinel (inert `<key>` launchd ignores). */
+export function renderSwiftBarAutostartPlist(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${SWIFTBAR_AUTOSTART_LABEL}</string>
+    <key>${IAPEER_PLIST_OWNER_KEY}</key>
+    <true/>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-g</string>
+        <string>-b</string>
+        <string>${SWIFTBAR_BUNDLE_ID}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+`
+}
+
+export type AutostartState =
+  | 'loaded' // bootstrapped now (was not loaded)
+  | 'already-loaded' // job already in the gui domain → no-op
+  | 'restarted' // plist changed → cycled (bootout+bootstrap) onto the new content
+  | 'skipped-sandbox' // IAPEER_TEST_SANDBOX=1 → never touch a real plist / launchctl
+  | 'failed' // launchctl bootstrap/cycle failed
+export interface EnsureAutostartResult {
+  plistPath: string
+  /** Whether the plist bytes changed (false = already current). */
+  wrote: boolean
+  state: AutostartState
+  detail?: string
+}
+
+/**
+ * Idempotently register the SwiftBar login-autostart LaunchAgent (write the plist if its
+ * bytes changed, then load/restart it). Safe to repeat — a changed plist is cycled, an
+ * unloaded one is bootstrapped, an unchanged-and-loaded one is a no-op (never a dup).
+ * SANDBOX FAIL-SAFE: under IAPEER_TEST_SANDBOX with no isolated IAPEER_LAUNCHAGENTS_DIR
+ * it writes NOTHING (a leaked real autostart would outlive the test) and touches no
+ * launchctl; with an isolated dir it writes there but still skips launchctl (host-global).
+ */
+export function ensureSwiftBarAutostart(env: NodeJS.ProcessEnv = process.env): EnsureAutostartResult {
+  const plistPath = swiftBarAutostartPlistPath(env)
+  const content = renderSwiftBarAutostartPlist()
+  const sandbox = env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1'
+  const realAgents = join(homedir(), 'Library', 'LaunchAgents')
+  if (sandbox && plistPath.startsWith(`${realAgents}/`)) {
+    return {
+      plistPath,
+      wrote: false,
+      state: 'skipped-sandbox',
+      detail: 'IAPEER_TEST_SANDBOX=1 without IAPEER_LAUNCHAGENTS_DIR — refusing to write a real LaunchAgents plist',
+    }
+  }
+  mkdirSync(launchAgentsDir(env), { recursive: true })
+  let wrote = false
+  if (!existsSync(plistPath) || readFileSync(plistPath, 'utf8') !== content) {
+    // atomic write (tmp+rename): an interrupted direct write could leave a sentinel-less
+    // stub that the ownership guard then reads as foreign.
+    const tmp = `${plistPath}.tmp-${process.pid}`
+    writeFileSync(tmp, content, { mode: 0o644 })
+    renameSync(tmp, plistPath)
+    wrote = true
+  }
+  if (sandbox) return { plistPath, wrote, state: 'skipped-sandbox' }
+  // Live: load / restart onto the plist now on disk.
+  const bootstrap = (): EnsureAutostartResult => {
+    const bs = bootstrapLaunchdJob(SWIFTBAR_AUTOSTART_LABEL, plistPath, env)
+    const state: AutostartState =
+      bs.state === 'loaded' ? 'loaded' : bs.state === 'already-loaded' ? 'already-loaded' : 'failed'
+    return { plistPath, wrote, state, detail: bs.detail }
+  }
+  if (!wrote) return bootstrap()
+  const cyc = cycleLaunchdJob(SWIFTBAR_AUTOSTART_LABEL, plistPath, env)
+  if (cyc.state === 'restarted') return { plistPath, wrote, state: 'restarted' }
+  if (cyc.state === 'not-loaded') return bootstrap() // first install: nothing to cycle → load it
+  return { plistPath, wrote, state: 'failed', detail: cyc.detail }
+}
+
+export interface RemoveAutostartResult {
+  plistPath: string
+  removed: boolean
+  state: 'removed' | 'not-present' | 'foreign' | 'skipped-sandbox'
+}
+
+/**
+ * Tear down the SwiftBar login-autostart LaunchAgent (bootout the job, remove the plist)
+ * — the symmetric counterpart of ensureSwiftBarAutostart, run on `tray uninstall`. Only
+ * removes OUR plist (ownership sentinel present); a sentinel-less file at the label is
+ * left untouched (`foreign`). Sandbox-safe.
+ */
+export function removeSwiftBarAutostart(env: NodeJS.ProcessEnv = process.env): RemoveAutostartResult {
+  const plistPath = swiftBarAutostartPlistPath(env)
+  const sandbox = env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1'
+  const realAgents = join(homedir(), 'Library', 'LaunchAgents')
+  if (sandbox && plistPath.startsWith(`${realAgents}/`)) return { plistPath, removed: false, state: 'skipped-sandbox' }
+  if (!existsSync(plistPath)) return { plistPath, removed: false, state: 'not-present' }
+  if (!isFoundationOwnedPlist(plistPath)) return { plistPath, removed: false, state: 'foreign' }
+  bootoutLaunchdJob(SWIFTBAR_AUTOSTART_LABEL, env) // unload the running job (sandbox-safe no-op)
+  rmSync(plistPath, { force: true })
+  return { plistPath, removed: true, state: 'removed' }
+}
+
 /** Fail-closed sandbox guard (in spirit with install/scaffoldHostDocs): never write
  *  into the REAL ~/.iapeer under a sandboxed test that forgot to set IAPEER_ROOT. */
 function assertTraySandboxIsolated(env: NodeJS.ProcessEnv): void {
@@ -143,6 +302,8 @@ export interface InstallTrayResult {
   app: 'present' | 'installed' | 'install-failed' | 'absent'
   appReason?: string
   launched: boolean
+  /** Login-autostart registration outcome (only when launched + SwiftBar present). */
+  autostart?: EnsureAutostartResult
 }
 
 /**
@@ -208,22 +369,28 @@ export function installTray(opts: InstallTrayOptions = {}): InstallTrayResult {
     }
   }
 
-  // 4 — launch + refresh
+  // 4 — launch + refresh + register login autostart (so a reboot brings the tray back).
   let launched = false
+  let autostart: EnsureAutostartResult | undefined
   if (opts.launch && present) {
     dequarantineApp(run)
     launchSwiftBar(run)
     refreshSwiftBar(run)
     launched = true
+    // Idempotent: the plist is byte-stable and the bootstrap is a no-op when loaded, so
+    // re-activation never plants a duplicate autostart.
+    autostart = ensureSwiftBarAutostart(env)
   }
 
-  return { pluginFile, pluginDir, wrote, dir, app, appReason, launched }
+  return { pluginFile, pluginDir, wrote, dir, app, appReason, launched, autostart }
 }
 
 export interface UninstallTrayResult {
   removed: string[]
   /** SwiftBar was refreshed to drop the now-missing plugin. */
   refreshed: boolean
+  /** Login-autostart teardown outcome (the GUI-face activation is being removed). */
+  autostart: RemoveAutostartResult
 }
 
 /**
@@ -257,7 +424,11 @@ export function uninstallTray(
     refreshSwiftBar(run)
     refreshed = true
   }
-  return { removed, refreshed }
+  // Tear down the login-autostart LaunchAgent too — removing the GUI face should not
+  // leave a reboot re-launching SwiftBar. Never touches the fleet (bootout of our own
+  // com.agfpd.* label only).
+  const autostart = removeSwiftBarAutostart(env)
+  return { removed, refreshed, autostart }
 }
 
 /**
@@ -294,6 +465,8 @@ export interface TrayStatus {
   daemon: { fleet: boolean; version?: string; sock?: string; tcp?: string }
   swiftbar: { installed: boolean; pluginDir?: string }
   plugin: { installed: boolean; path?: string }
+  /** Login-autostart LaunchAgent: registered (our plist present) + its path. */
+  autostart: { registered: boolean; path?: string }
 }
 
 /** Read-only diagnostics — never repairs anything. */
@@ -305,9 +478,12 @@ export function trayStatus(opts: { env?: NodeJS.ProcessEnv; run?: Runner; probeA
   const cfgDir = installed ? readSwiftBarPluginDir(run) : undefined
   const searchDirs = [cfgDir, dedicatedPluginDir(env)].filter(Boolean) as string[]
   const found = searchDirs.map(d => join(d, PLUGIN_BASENAME)).find(f => existsSync(f))
+  const autostartPath = swiftBarAutostartPlistPath(env)
+  const autostartOurs = existsSync(autostartPath) && isFoundationOwnedPlist(autostartPath)
   return {
     daemon: { fleet: addr.fleet === 1, version: addr.version, sock: addr.sock, tcp: addr.tcp },
     swiftbar: { installed, pluginDir: cfgDir },
     plugin: { installed: Boolean(found), path: found },
+    autostart: { registered: autostartOurs, path: autostartOurs ? autostartPath : undefined },
   }
 }

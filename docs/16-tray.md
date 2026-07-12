@@ -80,12 +80,12 @@ whole dashboard twice.
 
 | Verb | What it does |
 |---|---|
-| `iapeer tray install [--plugin-only]` | Install SwiftBar.app when absent (owner-sanctioned), point it at the plugin dir, write the plugin, launch + refresh. `--plugin-only` writes just the plugin file (no app, no launch — what the foundation install does). Idempotent. |
-| `iapeer tray uninstall` | Remove the plugin file and refresh SwiftBar. **Never touches the fleet** — the daemon, TUI and delivery keep running; SwiftBar.app is left installed (it may host other plugins). |
+| `iapeer tray install [--plugin-only]` | Install SwiftBar.app when absent (owner-sanctioned), point it at the plugin dir, write the plugin, launch + refresh, **and register the login-autostart LaunchAgent**. `--plugin-only` writes just the plugin file (no app, no launch, no autostart — what the foundation install does). Idempotent. |
+| `iapeer tray uninstall` | Remove the plugin file, refresh SwiftBar, **and tear down the login-autostart LaunchAgent**. **Never touches the fleet** — the daemon, TUI and delivery keep running; SwiftBar.app is left installed (it may host other plugins). |
 | `iapeer tray render [--stream]` | Print the SwiftBar plugin output. `--stream` is the streamable loop the plugin runs; the one-shot form is the poll fallback and the test surface. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST a fleet command (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — the menu's lifecycle actions call this. |
 | `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Resolve a pending human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` over the same unix-first fleet client. The menu's Allow/Deny items call these; the single-queue invariant means the resolution is seen by every channel (CLI, telegram). |
-| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present. Repairs nothing. |
+| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present, **is the login autostart registered**. Repairs nothing. |
 
 ## How it is wired
 
@@ -101,6 +101,26 @@ plugin is installed into the user's own dir); otherwise a dedicated
 `defaults write com.ameba.SwiftBar PluginDirectory` — a plain-string default SwiftBar
 reads on launch (it is not sandboxed and stores no security-scoped bookmark), so the
 folder picker is skipped.
+
+Login autostart: activating the tray registers a user LaunchAgent
+`~/Library/LaunchAgents/com.agfpd.iapeer.tray.plist` (RunAtLoad, no KeepAlive) whose
+`ProgramArguments` are `open -g -b com.ameba.SwiftBar` — so SwiftBar (and with it the
+fleet dashboard + approval badge) comes back on its own after a reboot, with no manual
+`open -a SwiftBar`. A **LaunchAgent** is used deliberately, not a System Events "Login
+Item" nor SMAppService: a Login Item needs the invoking process to hold Automation TCC
+over System Events (attributed to whatever parent runs the verb — fragile in a headless /
+`iapeer update` context), and SMAppService can only register a helper the *target* app
+ships (we cannot register the third-party SwiftBar with it from a CLI). The LaunchAgent
+needs no TCC and reuses the foundation's idempotent plist lifecycle: the plist is
+byte-stable (write-if-changed), carries the `com.iapeer.managed` ownership sentinel, and
+is bootstrapped/cycled undead-safe — so re-activation never plants a duplicate. It is
+**RunAtLoad-only** (fire once at login) rather than KeepAlive, because the `open` process
+exits immediately once SwiftBar is up (KeepAlive would respawn-storm it) and supervising
+SwiftBar itself would fight the user quitting it. `tray uninstall` boots it out and
+removes the plist (only our own sentinel-marked file — a foreign plist at the label is
+left untouched). The label lives in the foundation's own `com.agfpd.*` namespace, never
+`com.iapeer.<personality>` (the persistent-peer fleet), so the H4 launchd-owned
+sweep-guard can never mistake it for a peer.
 
 Auth follows the Fleet API: on an open-local host no bearer is needed; when the daemon is
 configured with `IAPEER_BEARER_TOKEN`, the plugin's environment must carry it too.

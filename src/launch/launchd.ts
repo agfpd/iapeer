@@ -453,6 +453,57 @@ export function cycleLaunchdJob(
 }
 
 /**
+ * Idempotently ensure ANY launchd job is LOADED in the gui domain — bootstrap when
+ * absent, no-op when already loaded. The generic sibling of `bootstrapDaemon` for a
+ * caller-supplied label/plist pair (e.g. the tray SwiftBar-autostart LaunchAgent).
+ * The CALLER owns any ownership/fleet guard; this primitive only loads the concrete
+ * label/plist. Composed on bootstrapJobCore (undead-job-safe wait-for-gone + backoff).
+ * SANDBOX FAIL-SAFE: never calls launchctl under IAPEER_TEST_SANDBOX (`bootstrap
+ * gui/<uid>` is host-global regardless of IAPEER_ROOT) — consulting BOTH the passed and
+ * the process env, the same fail-closed rule as launchctlBootstrap.
+ */
+export function bootstrapLaunchdJob(
+  label: string,
+  plistPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): BootstrapResult {
+  if (env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1') {
+    return { state: 'skipped-sandbox', label, detail: 'IAPEER_TEST_SANDBOX=1 — not loading a real launchd job' }
+  }
+  const uid = currentUid()
+  const core = bootstrapJobCore(uid, label, plistPath, {
+    run: args => {
+      const r = spawnSync('launchctl', args, { encoding: 'utf8' })
+      return { status: r.status, stderr: r.stderr ?? '' }
+    },
+    sleepMs: ms => spawnSync('sleep', [String(ms / 1000)]),
+  })
+  return core.state === 'failed' ? { state: 'failed', label, detail: core.detail } : { state: core.state, label }
+}
+
+export interface BootoutResult {
+  state: 'booted-out' | 'not-loaded' | 'skipped-sandbox' | 'failed'
+  detail?: string
+}
+
+/**
+ * Unload a launchd job from the gui domain (`launchctl bootout gui/<uid>/<label>`) —
+ * the teardown primitive (used to remove the tray SwiftBar-autostart LaunchAgent on
+ * `tray uninstall`). Idempotent: an un-loaded label is `not-loaded` (no-op). The CALLER
+ * removes the plist file (this only unloads the running job). Sandbox-safe: never calls
+ * launchctl under IAPEER_TEST_SANDBOX.
+ */
+export function bootoutLaunchdJob(label: string, env: NodeJS.ProcessEnv = process.env): BootoutResult {
+  if (env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1') {
+    return { state: 'skipped-sandbox' }
+  }
+  const uid = currentUid()
+  if (!isLaunchdLoaded(label, uid)) return { state: 'not-loaded' }
+  const r = spawnSync('launchctl', ['bootout', `gui/${uid}/${label}`], { encoding: 'utf8' })
+  return r.status === 0 ? { state: 'booted-out' } : { state: 'failed', detail: (r.stderr ?? '').trim() || `exit ${r.status}` }
+}
+
+/**
  * AUTO-bootstrap a freshly-provisioned foundation plist into the gui domain
  * (`launchctl bootstrap gui/<uid> <plist>`) — the "load it now, don't write-and-wait
  * for the operator" step (contract Установка / Фаза §5). Designed to be SAFE on a
