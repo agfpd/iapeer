@@ -61,6 +61,8 @@ The daemon's supervisory tick is fixed — once a minute, not configurable.
 | `IAPEER_LIFECYCLE_LOG_KEEP` | `5` | How many `lifecycle.log` rotations to keep. |
 | `IAPEER_DELIVERY_LOG_MAX_BYTES` | `5 MiB` | The `delivery.log` size for rotation. |
 | `IAPEER_DELIVERY_LOG_KEEP` | `5` | How many `delivery.log` rotations to keep. |
+| `IAPEER_PANELOG_MAX_BYTES` | `16 MiB` | The per-peer pane-log (`logs/lifecycle/<runtime>-<peer>.log`, the raw terminal byte stream) size at which rotation happens. |
+| `IAPEER_PANELOG_KEEP` | `2` | How many rotated pane-log copies to keep (`<log>.1` newest … `.N`). |
 | `IAPEER_SUPERVISE_LOG_VERBOSE` | off | A verbose log of supervisory ticks (by default only decisions are written, not routine "doing nothing"). |
 | `IAPEER_DAEMON_LOG` | off | An extended daemon log. |
 
@@ -79,6 +81,8 @@ The daemon keeps three durable logs in `~/.iapeer/logs/iapeer/`:
 - **`lifecycle.log`** — lifecycle decisions: wakes, sleeps, restarts, supervisory-tick outcomes. The first place to look if a peer is behaving wrong.
 - **`delivery.log`** — the outcome of each delivery: who, to whom, into which runtime, the result, sizes, topic. Metadata only — **the message body is not written**.
 - **`exits.log`** — session deaths with postmortem data: the supervisor records the cause (exit code / signal) at the moment a session dies.
+
+Per-peer **pane-logs** live separately under `~/.iapeer/logs/lifecycle/<runtime>-<peer>.log` — the raw terminal (pty) byte stream the supervisor appends for a session's whole life (occupancy/typing detection, the boot ready-gate, and `tail`-based monitors read them). They are rotated on the supervise tick by **copytruncate** (`IAPEER_PANELOG_MAX_BYTES` × `IAPEER_PANELOG_KEEP`, default 16 MiB × 2): the base file keeps its path and inode (its last 8 MiB tail is retained in place, so the live writer and every reader are undisturbed) while the preceding window is promoted to `<log>.1` … `.N`. Total per peer is bounded by roughly `MAX_BYTES × (KEEP + 1)`.
 
 ### Postmortem diagnostics
 

@@ -26,7 +26,7 @@ import {
 } from '../core/constants.ts'
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { err, ok, type Result } from '../core/errors.ts'
-import { capPaneLogs } from '../launch/cmdlog.ts'
+import { capPaneLogs, paneLogRotateConfig } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { resolveMemoryWritableRoots } from '../status/index.ts'
 import { approvalModeOf, readPeerProfile, resolveIdentity, type ApprovalMode } from '../identity/index.ts'
@@ -1491,14 +1491,16 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const isAlive = deps.sessionAlive ?? ((sock: string, identity: string) => sessionAlive(sock, identity, env))
   const kill = deps.killSession ?? ((sock: string, identity: string) => killSession(sock, identity, env))
   const verbose = superviseLogVerbose(env)
-  // Pane-log volume cap (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
+  // Pane-log volume ROTATION (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
-  // append for a session's whole life — it had NO bound and grew to hundreds of MB
-  // per warm peer on an always-on host. Tail-keep it each tick (KEEP ≥ the occupancy
-  // reader's 4 MiB seed window, so capping never starves composer detection).
-  // Not H4-gated: log janitoring is orthogonal to lifecycle ownership, so launchd-
-  // managed peers' pane-logs are capped too. Best-effort by construction.
-  capPaneLogs(cfg.logDir)
+  // append for a session's whole life — it had NO copies-rotation and grew to tens of MB
+  // per warm peer AND per always-on router on this host. Copytruncate-rotate it each tick
+  // (base kept in place — reader seed + telegram mtime-occupancy intact; last maxBytes
+  // snapshotted to <path>.1..N). Threshold/copies from IAPEER_PANELOG_MAX_BYTES /
+  // IAPEER_PANELOG_KEEP (defaults 16 MiB × 2). Not H4-gated: log janitoring is orthogonal
+  // to lifecycle ownership, so launchd-managed routers' pane-logs are rotated too.
+  const paneLogRc = paneLogRotateConfig(env)
+  capPaneLogs(cfg.logDir, paneLogRc.maxBytes, paneLogRc.copies)
   // Durable decision trace (eventlog.ts): every reap/death/eager-fresh gets a line
   // so a postmortem can answer "when & how did peer X's prior session end" even
   // after the .idle-reaped / .deaths markers are consumed. alive / skipped-launchd
