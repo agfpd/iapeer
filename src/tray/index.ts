@@ -11,6 +11,7 @@
 //     across daemon restarts / down windows. Degrades to the daemon-down block.
 //   • cmd — POST a fleet command (wake/stop/…): dogfoods the command endpoints.
 
+import { writeSync } from 'fs'
 import { resolveFleetAddress, fleetGetJson, fleetPostJson, streamFleetEvents } from './client.ts'
 import { renderSwiftBar, renderDaemonDown, type TraySnapshot } from './render.ts'
 import { iapeerBinPath } from '../install/index.ts'
@@ -52,6 +53,74 @@ export async function renderTrayOnce(env: NodeJS.ProcessEnv): Promise<string> {
   }
 }
 
+// ── UTF-8-atomic stdout sink ─────────────────────────────────────────────────────
+// WHY (root cause of the vanishing menu-bar icon, 13.07.2026): SwiftBar v2.0.1 decodes
+// EVERY pipe chunk independently — RunScript.swift: `String(data: availableData, .utf8)`
+// per readabilityHandler fire. A chunk boundary that lands INSIDE a multi-byte UTF-8
+// character makes that decode nil; StreamablePlugin treats nil as "clear content" and
+// MenuBarItem._updateMenu answers empty content with hide() → the NSStatusItem vanishes
+// (and AppKit PERSISTS the hidden state as `NSStatusItem VisibleCC <plugin>` = 0 via the
+// item's autosaveName, so it survives SwiftBar restarts). Our menu block is ~35 KB of
+// emoji/box-glyph-rich text written in ONE write(2): the kernel delivers it to the reader
+// in pipe-buffer-fill chunks (measured live: 16384+16384+2400 — byte-arbitrary
+// boundaries), so a mid-character split — and a hidden icon — was a stochastic certainty.
+//
+// FIX (kills the class by construction): emit in quanta of ≤512 bytes (PIPE_BUF on
+// macOS — writes ≤PIPE_BUF into a pipe are ATOMIC, all-or-nothing) with every quantum
+// ending on a UTF-8 character boundary. The pipe buffer then only ever contains whole
+// quanta, and a full-drain read (what FileHandle.availableData does — verified with a
+// live harness) always returns a concatenation of whole quanta ⇒ every chunk SwiftBar
+// can ever see is valid UTF-8. See docs/16-tray.md §icon-visibility.
+
+const PIPE_ATOMIC_MAX = 512
+
+/** Split `s` into Buffers of ≤`max` bytes, each ending on a UTF-8 character boundary.
+ *  Exported for tests. */
+export function utf8AtomicQuanta(s: string, max = PIPE_ATOMIC_MAX): Buffer[] {
+  const buf = Buffer.from(s, 'utf8')
+  const quanta: Buffer[] = []
+  let i = 0
+  while (i < buf.length) {
+    let end = Math.min(i + max, buf.length)
+    if (end < buf.length) {
+      // buf[end] is the first byte of the NEXT quantum — it must start a character.
+      // 0b10xxxxxx = UTF-8 continuation byte ⇒ step back to the character's first byte.
+      while (end > i && (buf[end]! & 0xc0) === 0x80) end--
+      // Defensive only (a valid UTF-8 char is ≤4 B < max): never stall on garbage input.
+      if (end === i) end = Math.min(i + max, buf.length)
+    }
+    quanta.push(buf.subarray(i, end))
+    i = end
+  }
+  return quanta
+}
+
+function sleepSyncMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** The default stream sink: synchronous atomic-quantum writes to stdout (fd 1).
+ *  EPIPE ⇒ the reader (SwiftBar) is gone — exit cleanly so a dead tray-host never
+ *  accumulates orphaned `tray render --stream` processes. */
+function writeStdoutAtomic(s: string): void {
+  for (const q of utf8AtomicQuanta(s)) {
+    let off = 0
+    while (off < q.length) {
+      try {
+        off += writeSync(1, q, off, q.length - off)
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (code === 'EAGAIN') {
+          sleepSyncMs(2) // pipe full — the reader is momentarily busy
+          continue
+        }
+        if (code === 'EPIPE') process.exit(0)
+        throw e
+      }
+    }
+  }
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal?.aborted) return resolve()
@@ -69,7 +138,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  */
 export async function streamTray(
   env: NodeJS.ProcessEnv,
-  out: (s: string) => void = s => process.stdout.write(s),
+  // Default sink is the UTF-8-atomic quantum writer — NOT a plain stdout.write: a single
+  // big write reaches SwiftBar in byte-arbitrary chunks whose per-chunk UTF-8 decode can
+  // fail and hide the menu-bar icon (see writeStdoutAtomic above).
+  out: (s: string) => void = writeStdoutAtomic,
   signal?: AbortSignal,
 ): Promise<void> {
   // Serialize all emits through a promise chain so a `~~~`+block is never interleaved.

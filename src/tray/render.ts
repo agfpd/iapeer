@@ -125,6 +125,13 @@ export function fmtAge(ms: number, now: number): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
+/** Local wall-clock `HH:MM:SS` for the footer freshness stamp. */
+export function fmtClock(now: number): string {
+  const d = new Date(now)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 // ── peer status aggregation ─────────────────────────────────────────────────────
 
 function aggregate(p: TrayPeer): 'live' | 'asleep' | 'stopped' {
@@ -214,8 +221,17 @@ export function renderSwiftBar(snapshot: TraySnapshot, opts: RenderOptions): str
   // always current on open — a manual refresh gives the user nothing and (being a
   // SwiftBar refresh) just closes the dropdown. The emergency "restart the plugin" lever
   // lives in SwiftBar's own service menu (right-click → Refresh).
+  //
+  // The trailing clock is LOAD-BEARING, not cosmetic: it makes every rendered block
+  // unique, so each streamable heartbeat emit DIFFERS from the previous one and
+  // SwiftBar's content-change publisher fires every time. SwiftBar's _updateMenu()
+  // starts with show() (NSStatusItem.isVisible = true) — that is the tray's self-heal:
+  // a menu-bar icon hidden for ANY reason (SwiftBar's per-chunk UTF-8 decode nil
+  // hiding the item, an accidental ⌘-drag removal, a stale persisted
+  // `NSStatusItem VisibleCC` flag) comes back within one heartbeat (≤15 s) instead of
+  // staying invisible until the fleet next changes. See docs/16-tray.md §icon-visibility.
   lines.push('---')
-  lines.push(line(0, `iapeer · fleet dashboard`, { color: COLOR.meta, size: 11 }))
+  lines.push(line(0, `iapeer · fleet dashboard · ${fmtClock(now)}`, { color: COLOR.meta, size: 11 }))
   return lines.join('\n') + '\n'
 }
 
@@ -396,6 +412,7 @@ function renderApprovals(approvals: TrayApproval[], bin: string): string[] {
  *  dashboard that cannot reach any advertised address should render the daemon as
  *  down"). Distinct menu-bar icon + a red header; a Refresh item to retry. */
 export function renderDaemonDown(reason: string, opts: RenderOptions): string {
+  const now = opts.now ?? Date.now()
   const lines: string[] = []
   lines.push(line(0, '', { sfimage: 'exclamationmark.triangle.fill', color: COLOR.down }))
   lines.push('---')
@@ -403,5 +420,10 @@ export function renderDaemonDown(reason: string, opts: RenderOptions): string {
   lines.push(line(0, reason, { color: COLOR.meta }))
   lines.push('---')
   lines.push(line(0, 'Refresh', { refresh: true, sfimage: 'arrow.clockwise' }))
+  // Same load-bearing uniqueness stamp as renderSwiftBar's footer: the down-block is
+  // re-emitted every few seconds while the daemon is away — the changing clock keeps
+  // the ⚠ icon visible (show() fires per update) instead of a stale hidden item.
+  lines.push('---')
+  lines.push(line(0, `iapeer · ${fmtClock(now)}`, { color: COLOR.meta, size: 11 }))
   return lines.join('\n') + '\n'
 }

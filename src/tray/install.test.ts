@@ -201,16 +201,22 @@ describe('SwiftBar login autostart', () => {
     aenv = { ...env, IAPEER_LAUNCHAGENTS_DIR: agents }
   })
 
-  test('renders a RunAtLoad-only agent (no KeepAlive) that opens SwiftBar by bundle id, with the ownership sentinel', () => {
+  test('renders a KeepAlive supervisor agent (sh watchdog loop) with the ownership sentinel', () => {
     const plist = renderSwiftBarAutostartPlist()
     expect(plist).toContain('<key>Label</key>\n    <string>com.agfpd.iapeer.tray</string>')
     expect(plist).toContain('<key>com.iapeer.managed</key>') // foundation ownership sentinel
-    expect(plist).toContain('<string>/usr/bin/open</string>')
-    expect(plist).toContain('<string>-b</string>')
-    expect(plist).toContain('<string>com.ameba.SwiftBar</string>')
+    // The job is a long-lived /bin/sh watchdog loop, NOT a one-shot `open` (KeepAlive on
+    // `open` itself would respawn-storm — the 0.4.82 lesson).
+    expect(plist).toContain('<string>/bin/sh</string>')
+    expect(plist).toContain('<string>-c</string>')
+    // liveness poll + relaunch, absolute paths (launchd minimal PATH), app-absent backoff
+    expect(plist).toContain('/usr/bin/pgrep -xq SwiftBar')
+    expect(plist).toContain('/usr/bin/open -g -b com.ameba.SwiftBar')
+    expect(plist).toContain('|| /bin/sleep 300')
+    expect(plist).toContain('/bin/sleep 5; done')
     expect(plist).toContain('<key>RunAtLoad</key>')
-    // DELIBERATELY no KeepAlive: `open` exits immediately → KeepAlive would respawn-storm.
-    expect(plist).not.toContain('KeepAlive')
+    expect(plist).toContain('<key>KeepAlive</key>')
+    expect(plist).toContain('<key>ProcessType</key>')
   })
 
   test('writes the plist under the isolated LaunchAgents dir; idempotent (no dup on repeat)', () => {
@@ -247,6 +253,31 @@ describe('SwiftBar login autostart', () => {
     const r = installTray({ env: aenv, run: makeRunner().run, probeApp: () => false })
     expect(r.autostart).toBeUndefined()
     expect(existsSync(swiftBarAutostartPlistPath(aenv))).toBe(false)
+  })
+
+  test('plugin-only install UPGRADES an existing foundation-owned autostart plist in place', () => {
+    // The host opted in earlier — an OLD-generation plist (0.4.82 one-shot RunAtLoad,
+    // carrying our sentinel) is on disk. A foundation install (launch:false — the
+    // `iapeer update` path) must rewrite it to the current supervisor content.
+    const path = swiftBarAutostartPlistPath(aenv)
+    mkdirSync(agents, { recursive: true })
+    writeFileSync(
+      path,
+      '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n' +
+        '    <key>Label</key>\n    <string>com.agfpd.iapeer.tray</string>\n' +
+        '    <key>com.iapeer.managed</key>\n    <true/>\n' +
+        '    <key>ProgramArguments</key>\n    <array>\n        <string>/usr/bin/open</string>\n    </array>\n' +
+        '    <key>RunAtLoad</key>\n    <true/>\n</dict>\n</plist>\n',
+    )
+    const r = installTray({ env: aenv, run: makeRunner().run, probeApp: () => false })
+    expect(r.autostart).toBeDefined()
+    expect(r.autostart!.wrote).toBe(true)
+    expect(readFileSync(path, 'utf8')).toBe(renderSwiftBarAutostartPlist())
+    // a FOREIGN (sentinel-less) plist at the label is never touched
+    writeFileSync(path, '<plist>not ours</plist>')
+    const r2 = installTray({ env: aenv, run: makeRunner().run, probeApp: () => false })
+    expect(r2.autostart).toBeUndefined()
+    expect(readFileSync(path, 'utf8')).toBe('<plist>not ours</plist>')
   })
 
   test('removeSwiftBarAutostart removes OUR plist, leaves a foreign one untouched', () => {

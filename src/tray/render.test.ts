@@ -250,6 +250,26 @@ describe('renderDaemonDown', () => {
   })
 })
 
+// The footer clock is LOAD-BEARING (icon self-heal): every emit must differ from the
+// previous one so SwiftBar's content-change publisher fires show() on each heartbeat —
+// a hidden NSStatusItem (per-chunk decode nil / ⌘-drag / stale VisibleCC pref) recovers
+// within one heartbeat instead of staying invisible while the fleet is static.
+describe('footer freshness stamp', () => {
+  test('renderSwiftBar: two renders one second apart differ (uniqueness per emit)', () => {
+    const snap: TraySnapshot = { peers: [] }
+    const a = renderSwiftBar(snap, { binPath: BIN, now: NOW })
+    const b = renderSwiftBar(snap, { binPath: BIN, now: NOW + 1000 })
+    expect(a).not.toBe(b)
+    expect(a).toMatch(/iapeer · fleet dashboard · \d{2}:\d{2}:\d{2} \|/)
+  })
+  test('renderDaemonDown: down-blocks re-emitted over time differ too', () => {
+    const a = renderDaemonDown('x', { binPath: BIN, now: NOW })
+    const b = renderDaemonDown('x', { binPath: BIN, now: NOW + 1000 })
+    expect(a).not.toBe(b)
+    expect(a).toMatch(/iapeer · \d{2}:\d{2}:\d{2} \|/)
+  })
+})
+
 describe('time helpers', () => {
   test('fmtUptime', () => {
     expect(fmtUptime(45)).toBe('45s')

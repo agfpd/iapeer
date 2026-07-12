@@ -80,12 +80,12 @@ whole dashboard twice.
 
 | Verb | What it does |
 |---|---|
-| `iapeer tray install [--plugin-only]` | Install SwiftBar.app when absent (owner-sanctioned), point it at the plugin dir, write the plugin, launch + refresh, **and register the login-autostart LaunchAgent**. `--plugin-only` writes just the plugin file (no app, no launch, no autostart — what the foundation install does). Idempotent. |
-| `iapeer tray uninstall` | Remove the plugin file, refresh SwiftBar, **and tear down the login-autostart LaunchAgent**. **Never touches the fleet** — the daemon, TUI and delivery keep running; SwiftBar.app is left installed (it may host other plugins). |
+| `iapeer tray install [--plugin-only]` | Install SwiftBar.app when absent (owner-sanctioned), point it at the plugin dir, write the plugin, launch + refresh, **and register the tray-host supervisor LaunchAgent** (login autostart + relaunch-on-death). `--plugin-only` writes just the plugin file (no app, no launch, no autostart — what the foundation install does). Idempotent. |
+| `iapeer tray uninstall` | Remove the plugin file, refresh SwiftBar, **and tear down the tray-host supervisor LaunchAgent**. **Never touches the fleet** — the daemon, TUI and delivery keep running; SwiftBar.app is left installed (it may host other plugins). |
 | `iapeer tray render [--stream]` | Print the SwiftBar plugin output. `--stream` is the streamable loop the plugin runs; the one-shot form is the poll fallback and the test surface. |
 | `iapeer tray cmd <command> <peer> [runtime]` | POST a fleet command (`wake`/`stop`/`start`/`new`/`refresh`/`interrupt`/`compact`) — the menu's lifecycle actions call this. |
 | `iapeer tray approve <id>` · `iapeer tray deny <id> [reason]` | Resolve a pending human-approval (docs/17) — `POST /fleet/v1/approvals/<id>/(approve\|deny)` over the same unix-first fleet client. The menu's Allow/Deny items call these; the single-queue invariant means the resolution is seen by every channel (CLI, telegram). |
-| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present, **is the login autostart registered**. Repairs nothing. |
+| `iapeer tray status` | Read-only: is the fleet API up (from `router.json`), is SwiftBar installed and where is its plugin dir, is the plugin file present, **is the tray-host supervisor registered**. Repairs nothing. |
 
 ## How it is wired
 
@@ -102,31 +102,70 @@ plugin is installed into the user's own dir); otherwise a dedicated
 reads on launch (it is not sandboxed and stores no security-scoped bookmark), so the
 folder picker is skipped.
 
-Login autostart: activating the tray registers a user LaunchAgent
-`~/Library/LaunchAgents/com.agfpd.iapeer.tray.plist` (RunAtLoad, no KeepAlive) whose
-`ProgramArguments` are `open -g -b com.ameba.SwiftBar` — so SwiftBar (and with it the
-fleet dashboard + approval badge) comes back on its own after a reboot, with no manual
-`open -a SwiftBar`. A **LaunchAgent** is used deliberately, not a System Events "Login
-Item" nor SMAppService: a Login Item needs the invoking process to hold Automation TCC
-over System Events (attributed to whatever parent runs the verb — fragile in a headless /
-`iapeer update` context), and SMAppService can only register a helper the *target* app
-ships (we cannot register the third-party SwiftBar with it from a CLI). The LaunchAgent
-needs no TCC and reuses the foundation's idempotent plist lifecycle: the plist is
-byte-stable (write-if-changed), carries the `com.iapeer.managed` ownership sentinel, and
-is bootstrapped/cycled undead-safe — so re-activation never plants a duplicate. It is
-**RunAtLoad-only** (fire once at login) rather than KeepAlive, because the `open` process
-exits immediately once SwiftBar is up (KeepAlive would respawn-storm it) and supervising
-SwiftBar itself would fight the user quitting it. `tray uninstall` boots it out and
-removes the plist (only our own sentinel-marked file — a foreign plist at the label is
-left untouched). The label lives in the foundation's own `com.agfpd.*` namespace, never
-`com.iapeer.<personality>` (the persistent-peer fleet), so the H4 launchd-owned
-sweep-guard can never mistake it for a peer.
+Tray-host supervision: activating the tray registers a user LaunchAgent
+`~/Library/LaunchAgents/com.agfpd.iapeer.tray.plist` (RunAtLoad **and KeepAlive**) that
+runs a tiny `/bin/sh` watchdog loop: every 5 s, if no SwiftBar process exists, `open -g
+-b com.ameba.SwiftBar` (a no-op activation when it is already running — race-safe, never
+a duplicate instance; an absent SwiftBar.app backs off 5 min). So SwiftBar — and with it
+the fleet dashboard + approval badge — comes back on its own after a reboot AND within
+seconds after a crash or a stray kill. The tray is the owner's fleet-visibility surface;
+a silently-dead SwiftBar hides the state of the whole system, so its lifetime is
+supervised, not fire-and-forget. Deliberate consequence: quitting SwiftBar by hand also
+relaunches it — the supported off-switch is `iapeer tray uninstall`. launchd must NOT
+KeepAlive `open` itself (it exits the moment SwiftBar is up — KeepAlive on it is a
+respawn storm); KeepAlive guards the long-lived loop process. A **LaunchAgent** is used
+deliberately, not a System Events "Login Item" nor SMAppService: a Login Item needs the
+invoking process to hold Automation TCC over System Events (attributed to whatever
+parent runs the verb — fragile in a headless / `iapeer update` context), and
+SMAppService can only register a helper the *target* app ships (we cannot register the
+third-party SwiftBar with it from a CLI). The LaunchAgent needs no TCC and reuses the
+foundation's idempotent plist lifecycle: the plist is byte-stable (write-if-changed),
+carries the `com.iapeer.managed` ownership sentinel, and is bootstrapped/cycled
+undead-safe — so re-activation never plants a duplicate, and a foundation install
+(`iapeer update`) upgrades an already-registered agent's plist in place (bytes-changed →
+re-cycle). `tray uninstall` boots it out and removes the plist (only our own
+sentinel-marked file — a foreign plist at the label is left untouched). The label lives
+in the foundation's own `com.agfpd.*` namespace, never `com.iapeer.<personality>` (the
+persistent-peer fleet), so the H4 launchd-owned sweep-guard can never mistake it for a
+peer.
 
 Auth follows the Fleet API: on an open-local host no bearer is needed; when the daemon is
 configured with `IAPEER_BEARER_TOKEN`, the plugin's environment must carry it too.
 
 Config: `IAPEER_TRAY_HEARTBEAT_MS` tunes the heartbeat cadence (default 15 s, clamped
 1 s…10 min).
+
+## Icon visibility (why the stream writes in 512-byte quanta)
+
+SwiftBar v2.0.1 decodes **every pipe chunk independently** (`RunScript.swift`:
+`String(data: availableData, encoding: .utf8)` per readability callback). A chunk
+boundary that lands inside a multi-byte UTF-8 character makes that decode `nil`;
+`StreamablePlugin` treats `nil` as "clear content", and `MenuBarItem._updateMenu` answers
+empty content with `hide()` — the `NSStatusItem` vanishes from the menu bar. Worse, the
+item has an `autosaveName`, so AppKit **persists** the hidden state
+(`NSStatusItem VisibleCC <plugin>` = 0 in SwiftBar's defaults): the icon stays gone
+across SwiftBar restarts until some later update calls `show()`.
+
+The tray's menu block is tens of kilobytes of emoji/box-glyph-rich text; a single
+`write(2)` of it reaches the reader in pipe-buffer-fill chunks (measured live:
+16384+16384+2400 — byte-arbitrary boundaries), so with a static fleet the same bad
+boundary recurred every heartbeat and the icon stayed invisible for hours (owner
+incident 13.07.2026, reproduced deterministically with a probe plugin that split an
+emoji across two writes).
+
+Two layers make the class impossible:
+
+1. **Atomic UTF-8 quanta** — `tray render --stream` writes its output in chunks of
+   ≤512 bytes (`PIPE_BUF`: writes of at most that size into a pipe are atomic,
+   all-or-nothing), each ending on a UTF-8 character boundary. The pipe buffer then only
+   ever contains whole quanta and every chunk SwiftBar can see is valid UTF-8 — the nil
+   decode cannot happen by construction.
+2. **Freshness stamp** — every rendered block (and every daemon-down block) carries a
+   `HH:MM:SS` footer clock, so consecutive emits always differ and SwiftBar runs its
+   update path (which starts with `show()`) on every heartbeat. Any hidden icon —
+   whatever hid it (an accidental ⌘-drag removal, a stale persisted `VisibleCC` flag, a
+   future SwiftBar quirk) — recovers within one heartbeat (≤15 s) instead of staying
+   invisible while the fleet is static.
 
 ## Client obligations
 

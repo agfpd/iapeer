@@ -133,8 +133,12 @@ export function buildPluginShim(binPath: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Login autostart — a RunAtLoad LaunchAgent that brings SwiftBar up at login, so the
-// fleet dashboard + approval badge survive a reboot without a manual `open -a SwiftBar`.
+// Tray-host supervision — a KeepAlive LaunchAgent running a tiny /bin/sh watchdog loop
+// that brings SwiftBar up at login AND brings it back within seconds whenever it dies.
+// The tray is the owner's fleet-visibility surface: a silently-dead SwiftBar hides the
+// state of the whole system (owner incident 13.07.2026), so its lifetime is supervised,
+// not fire-and-forget. The deliberate consequence: quitting SwiftBar by hand also
+// relaunches it — the supported off-switch is `iapeer tray uninstall`.
 //
 // MECHANISM CHOICE (owner-relevant): a user LaunchAgent, not a System Events "Login
 // Item" and not SMAppService.
@@ -149,11 +153,12 @@ export function buildPluginShim(binPath: string): string {
 //     (write-if-changed + undead-safe bootstrap/cycle, sandbox-guarded) and carries the
 //     ownership sentinel so uninstall can recognize + remove exactly our artifact.
 //
-// RunAtLoad-ONLY, no KeepAlive: the ProgramArguments launch SwiftBar via `open` (which
-// exits immediately once SwiftBar is up), so KeepAlive would respawn-storm `open` every
-// throttle window. A login-autostart only needs to fire once per session; keeping
-// SwiftBar itself supervised (relaunch-on-quit) would fight the user quitting it and
-// duplicate SwiftBar's own launch-at-login — out of scope for "start it at login".
+// WATCHDOG SHAPE: launchd must NOT KeepAlive `open` itself — `open` exits the moment
+// SwiftBar is up, so KeepAlive on it is a respawn storm (the 0.4.82 lesson). Instead the
+// job runs a long-lived poll loop: every 5 s, if no SwiftBar process exists, `open -g -b`
+// it (a no-op activation when it IS running — race-safe, never a duplicate instance;
+// absolute /usr/bin//bin paths — launchd's PATH is minimal). An absent SwiftBar.app
+// backs off 5 min instead of churning. KeepAlive guards the LOOP process itself.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Absolute path of the tray autostart LaunchAgent plist (IAPEER_LAUNCHAGENTS_DIR
@@ -162,11 +167,17 @@ export function swiftBarAutostartPlistPath(env: NodeJS.ProcessEnv = process.env)
   return join(launchAgentsDir(env), `${SWIFTBAR_AUTOSTART_LABEL}.plist`)
 }
 
-/** Render the RunAtLoad SwiftBar-autostart plist. PURE/deterministic (golden-testable).
+/** Render the SwiftBar tray-host supervisor plist. PURE/deterministic (golden-testable).
  *  Launch is `open -g -b <bundleid>`: LaunchServices activates the app correctly as a
  *  menu-bar agent (`-g` = don't steal focus), and bundle-id targeting survives the app
  *  moving. Carries the foundation ownership sentinel (inert `<key>` launchd ignores). */
 export function renderSwiftBarAutostartPlist(): string {
+  // Single-line sh loop (see WATCHDOG SHAPE above): 5 s liveness poll, no-op when
+  // SwiftBar runs, 5 min backoff when the app is not installed at all.
+  const loop =
+    'while :; do ' +
+    `if ! /usr/bin/pgrep -xq SwiftBar; then /usr/bin/open -g -b ${SWIFTBAR_BUNDLE_ID} || /bin/sleep 300; fi; ` +
+    '/bin/sleep 5; done'
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -177,13 +188,16 @@ export function renderSwiftBarAutostartPlist(): string {
     <true/>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/open</string>
-        <string>-g</string>
-        <string>-b</string>
-        <string>${SWIFTBAR_BUNDLE_ID}</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>${loop}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
 </dict>
 </plist>
 `
@@ -302,7 +316,8 @@ export interface InstallTrayResult {
   app: 'present' | 'installed' | 'install-failed' | 'absent'
   appReason?: string
   launched: boolean
-  /** Login-autostart registration outcome (only when launched + SwiftBar present). */
+  /** Tray-host supervisor (autostart) registration outcome: set when activated
+   *  (launch && SwiftBar present) OR upgraded in place (our plist already on disk). */
   autostart?: EnsureAutostartResult
 }
 
@@ -369,7 +384,8 @@ export function installTray(opts: InstallTrayOptions = {}): InstallTrayResult {
     }
   }
 
-  // 4 — launch + refresh + register login autostart (so a reboot brings the tray back).
+  // 4 — launch + refresh + register the tray-host supervisor (login autostart +
+  // relaunch-on-death), so a reboot or a SwiftBar crash brings the tray back by itself.
   let launched = false
   let autostart: EnsureAutostartResult | undefined
   if (opts.launch && present) {
@@ -379,6 +395,13 @@ export function installTray(opts: InstallTrayOptions = {}): InstallTrayResult {
     launched = true
     // Idempotent: the plist is byte-stable and the bootstrap is a no-op when loaded, so
     // re-activation never plants a duplicate autostart.
+    autostart = ensureSwiftBarAutostart(env)
+  } else if (existsSync(swiftBarAutostartPlistPath(env)) && isFoundationOwnedPlist(swiftBarAutostartPlistPath(env))) {
+    // UPGRADE-IN-PLACE: this host opted into the autostart earlier (our plist is on
+    // disk). The foundation `install` verb runs installTray with launch:false — without
+    // this branch a deploy (`iapeer update` → install) would leave an OUTDATED agent
+    // (e.g. the 0.4.82 one-shot RunAtLoad plist) registered forever. ensure() rewrites
+    // the plist only when its bytes changed and re-cycles the job onto the new content.
     autostart = ensureSwiftBarAutostart(env)
   }
 
