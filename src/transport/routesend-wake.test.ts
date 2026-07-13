@@ -16,34 +16,24 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { spawnSync } from 'child_process'
 import { hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
 import { ok } from '../core/errors.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
 
 let root: string
-let sockDir: string
 const prevRoot = process.env.IAPEER_ROOT
 
-// These suites spawn a REAL tmux session (the live-delivery path). Skip where
-// tmux is absent — a clean CI runner has none, and an unguarded live-tmux test
-// is what kept main's CI red (fail: "tmux new-session failed: null"). The
-// foundation's preversion gate runs the full suite locally (this machine has
-// tmux), so the release path keeps the live coverage; CI gates the rest.
-const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
-
-// Target peer: NON-TUI runtime (telegram) → the C-j delivery path lands into a
-// plain `cat` pane with no TUI prompt machinery; capture-pane then shows the
-// envelope text verbatim.
-// NB: keep names SHORT — the tmux socket lives under mkdtemp and the unix
-// socket path limit on macOS is 104 bytes.
+// Target peers exist ONLY in the temp registry (no live sessions): these suites
+// exercise routeSend's resolve/refuse/wake/queue seams hermetically. The old
+// live-tmux helpers (spawn a `cat` pane + capture-pane) were a TMUX-ERA relic:
+// after the pty-cutover a delivery speaks the SUPERVISOR socket protocol, which
+// a bare tmux server on the same path does not — building on them false-greens
+// the path while the protocol can't work (vault grabli 14.07). Live-delivery
+// proof lives in deliverWarm's seam tests (hostDeliver.test.ts) + the deployed
+// daemon; capture-invariants here cover the routing layer.
 const TARGET = 'fpw'
-const SESSION = `telegram-${TARGET}`
-const sockPath = () => join(sockDir, `tmux-iap-telegram-${TARGET}.sock`)
 const TUI_TARGET = 'tq'
-const TUI_SESSION = `codex-${TUI_TARGET}`
-const tuiSockPath = () => join(sockDir, `tmux-iap-codex-${TUI_TARGET}.sock`)
 
 const callerRecord = {
   personality: 'boris',
@@ -68,37 +58,11 @@ const caller: ResolvedCaller = {
   record: callerRecord,
 }
 
-function startTargetSession(): void {
-  const r = spawnSync('tmux', ['-S', sockPath(), 'new-session', '-d', '-x', '200', '-y', '50', '-s', SESSION, 'cat'], {
-    encoding: 'utf8',
-  })
-  if (r.status !== 0) throw new Error(`tmux new-session failed: ${r.stderr}`)
-}
-
-function killTargetSession(): void {
-  spawnSync('tmux', ['-S', sockPath(), 'kill-server'], { encoding: 'utf8' })
-}
-
-function capturePane(): string {
-  const r = spawnSync('tmux', ['-S', sockPath(), 'capture-pane', '-p', '-t', SESSION], { encoding: 'utf8' })
-  return r.stdout ?? ''
-}
-
-function startTuiSession(): void {
-  const r = spawnSync('tmux', ['-S', tuiSockPath(), 'new-session', '-d', '-x', '200', '-y', '50', '-s', TUI_SESSION, 'cat'], {
-    encoding: 'utf8',
-  })
-  if (r.status !== 0) throw new Error(`tmux new-session failed: ${r.stderr}`)
-}
-
-function killTuiSession(): void {
-  spawnSync('tmux', ['-S', tuiSockPath(), 'kill-server'], { encoding: 'utf8' })
-}
-
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'fpw-'))
-  sockDir = join(root, 'socks')
-  mkdirSync(sockDir, { recursive: true })
+  // <root>/socks is the resolveSockDir convention dir — created EMPTY so "no live
+  // sessions" is deterministic for every resolve in these suites.
+  mkdirSync(join(root, 'socks'), { recursive: true })
   writeFileSync(
     join(root, 'peers-profiles.json'),
     JSON.stringify({
@@ -113,8 +77,6 @@ beforeAll(() => {
   process.env.IAPEER_ROOT = root
 })
 afterAll(() => {
-  killTargetSession()
-  killTuiSession()
   if (prevRoot === undefined) delete process.env.IAPEER_ROOT
   else process.env.IAPEER_ROOT = prevRoot
   rmSync(root, { recursive: true, force: true })

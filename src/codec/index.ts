@@ -1,10 +1,17 @@
-// IAP envelope codec — encoder + decoder, both halves in one module.
+// IAP envelope codec — wire encoder + read-both decoder + agent-facing render.
 //
-// Encoder: inter-agent-protocol/src/lib/preamble.ts buildEnvelope (wins as-is).
-// Decoder: telegram-runtime/src/cli.ts parseIapEnvelope/extractIapEnvelopes,
-//   rewritten CDATA-AWARE (blueprint-v2 codec-fixes) so that an envelope whose
-//   message contains `</iap>`, `</message>`, `]]>` or a literal CR round-trips
-//   by FIELD-semantic equivalence, not byte-equality.
+// Three halves (envelope-compaction F, 0.4.86):
+//   buildEnvelope          → the WIRE form (legacy attr names, always-CDATA, full-ISO ts) —
+//                            what bridges parse and durable stores hold; never slims.
+//   decodeEnvelope         → READ-BOTH (legacy + compact names, <message>/<msg>, ts),
+//                            CDATA-AWARE so a body containing `</iap>`, `</message>`,
+//                            `]]>` or a literal CR round-trips by FIELD-semantic
+//                            equivalence, not byte-equality.
+//   renderEnvelopeForAgent → the compact presentation for LLM-context hops (bottom).
+//
+// Historic origin: encoder from inter-agent-protocol preamble.ts; decoder from
+// telegram-runtime parseIapEnvelope/extractIapEnvelopes (the sibling runtimes still
+// run their own copies of that older shape — the wire form stays compatible with them).
 //
 // Deliberately NO CR→LF fold here. The old telegram decoder did
 // `xml.replace(/\r\n?/g, '\n')` to repair tmux paste (which rewrites LF→CR).
@@ -45,19 +52,20 @@ export interface EnvelopeInput {
   message: string
 }
 
+const pad2 = (n: number): string => String(n).padStart(2, '0')
+
 /** Format a Date as ISO-8601 LOCAL time with numeric offset, second precision:
  *  `2026-07-14T01:23:45+03:00`. Local (not UTC-Z) on purpose: the fleet's agents
  *  compare envelope timestamps against their LOCAL statusline clock — a Z-form
  *  invites silent off-by-offset misreads by an LLM reader. */
 export function formatSentAt(date: Date): string {
-  const pad = (n: number): string => String(n).padStart(2, '0')
   const offMin = -date.getTimezoneOffset() // minutes EAST of UTC
   const sign = offMin >= 0 ? '+' : '-'
   const abs = Math.abs(offMin)
   return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
-    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` +
+    `T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}` +
+    `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
   )
 }
 
@@ -351,11 +359,10 @@ function presentBody(value: string): string {
 function renderTsForAgent(sentAt: string, now: Date): string {
   const d = new Date(sentAt)
   if (Number.isNaN(d.getTime())) return sentAt
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
   const sameLocalDay =
     d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
-  return sameLocalDay ? time : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`
+  return sameLocalDay ? time : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${time}`
 }
 
 /**

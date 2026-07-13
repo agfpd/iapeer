@@ -308,11 +308,13 @@ async function deliverViaHost(
   // codex took the socket-ack short-circuit above). A bare transcript/pane-log mtime BUMP is NOT proof
   // the session took THIS message: a receiver in an active turn advances both mtimes with its OWN
   // rendering even when our paste was swallowed at the turn boundary (incident 2026-06-23: ok=true,
-  // message gone). The ONLY proof is a NEW transcript record CARRYING our envelope — for claude, a
-  // queue-operation `content` (busy → enqueued) or the user-turn message (idle), written sub-second so
-  // a short grace covers it. The receiver's own assistant/tool turn never reproduces the
-  // `<iap from-personality=…>` wrapper, so it cannot forge a confirm. No such record within the grace →
-  // false-FAIL (the sender retries) — NOT a false-OK (silent loss the contract forbids).
+  // message gone). The ONLY proof is a NEW transcript record CARRYING the DELIVERED payload (for an
+  // agent target that is the compact `<iap from=…>` presentation — deliverWarm rendered it before this
+  // point, so the needle matches what was actually pasted) — for claude, a queue-operation `content`
+  // (busy → enqueued) or the user-turn message (idle), written sub-second so a short grace covers it.
+  // The receiver's own assistant/tool turn never reproduces the full delivered envelope verbatim, so it
+  // cannot forge a confirm. No such record within the grace → false-FAIL (the sender retries) — NOT a
+  // false-OK (silent loss the contract forbids).
   const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload, { env }))
   const sleep = seam.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   const graceMs = confirmGraceMs()
