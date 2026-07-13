@@ -10,8 +10,11 @@
 //   renderEnvelopeForAgent → the compact presentation for LLM-context hops (bottom).
 //
 // Historic origin: encoder from inter-agent-protocol preamble.ts; decoder from
-// telegram-runtime parseIapEnvelope/extractIapEnvelopes (the sibling runtimes still
-// run their own copies of that older shape — the wire form stays compatible with them).
+// telegram-runtime parseIapEnvelope/extractIapEnvelopes. The sibling runtimes run
+// their own copies of the decoder, SYNCED to this canon 14.07.2026 (telegram-runtime
+// 0.26.0, notifier-runtime 0.3.6, voicetalk-runtime 0.1.1 — anchored attrValue, В37/В38,
+// read-both); a decoder-behavior change here should be mirrored there (or flagged to
+// their implementers). The wire form stays compatible with all of them regardless.
 //
 // Deliberately NO CR→LF fold here. The old telegram decoder did
 // `xml.replace(/\r\n?/g, '\n')` to repair tmux paste (which rewrites LF→CR).
