@@ -1320,10 +1320,17 @@ interface SuperviseCtx {
  */
 function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
   const { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace } = ctx
-  // H4 — FIRST, before any reap. A launchd-managed peer is read-only.
+  // H4 — FIRST, before any reap. A launchd-managed peer is read-only: never wake,
+  // never kill, never sweep its PROCESS. Its stale `.session` however is the
+  // DAEMON'S own supervisory record (written back when the peer was daemon-owned),
+  // not the peer's — a peer that moved under launchd would otherwise re-enter this
+  // skip on every tick forever (follow-up 09.06: latent garbage, not a delivery
+  // bug). Drop the record once; if the plist is ever removed again, the next wake
+  // recreates it.
   if (isLaunchdManaged(s.personality, env)) {
-    if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4' })
-    return { identity: s.identity, action: 'skipped-launchd' }
+    removeSessionState(cfg, s.identity)
+    if (verbose) trace({ identity: s.identity, action: 'skipped-launchd', outcome: 'read-only-h4-stale-state-dropped' })
+    return { identity: s.identity, action: 'skipped-launchd', reason: 'launchd-managed; stale daemon .session dropped' }
   }
   const sock = buildSocketPath(s.runtime, s.personality, cfg.sockDir)
   if (!isAlive(sock, s.identity)) {

@@ -217,15 +217,20 @@ describe('superviseTick H4 guard', () => {
   }
   const env = () => ({ ...process.env, IAPEER_LAUNCHAGENTS_DIR: laDir })
 
-  test('a launchd-managed peer (plist present) is SKIPPED first — never reaped', () => {
+  test('a launchd-managed peer (plist present) is SKIPPED first — never reaped, stale .session dropped', () => {
     // a fake plist in the TEMP LaunchAgents dir (real ~/Library is untouched)
     writeFileSync(join(laDir, 'com.iapeer.iapeer-fakelaunchd.plist'), '')
     const id = writeState('iapeer-fakelaunchd')
     const out = superviseTick(cfg(), { env: env(), nowMs: Date.now() })
     const o = out.find(x => x.identity === id)
     expect(o?.action).toBe('skipped-launchd')
-    // read-only: its session-state is NOT removed
-    expect(existsSync(join(stateDir, `${id}.session`))).toBe(true)
+    // H4 read-only protects the peer's PROCESS (no wake/kill/sweep). The `.session`
+    // is the DAEMON'S own stale supervisory record from the pre-launchd era — kept
+    // forever it re-entered this skip every tick (follow-up 09.06). Dropped once:
+    expect(existsSync(join(stateDir, `${id}.session`))).toBe(false)
+    // and the NEXT tick no longer lists the peer at all (the skip loop is gone)
+    const second = superviseTick(cfg(), { env: env(), nowMs: Date.now() })
+    expect(second.find(x => x.identity === id)).toBeUndefined()
   })
 
   test('a STOPPED peer with a dead session → skipped-stopped: no death record, park marker ensured', () => {
