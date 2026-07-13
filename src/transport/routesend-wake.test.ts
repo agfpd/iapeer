@@ -18,6 +18,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
+import { ok } from '../core/errors.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
 
@@ -278,5 +279,65 @@ describe('Б7 routeSend env isolation (registry read is sandboxed by deps.env)',
     } finally {
       rmSync(sandbox, { recursive: true, force: true })
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envelope-compaction F — routeSend stamps `ts` once: the recipient-side envelope
+// attribute and the sender-side result `ts` are the SAME string (sent≡ts), and a
+// BRIDGE target receives the WIRE form (legacy names + full-ISO ts + CDATA).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('F: wire ts ≡ result ts', () => {
+  test('wake path: the boot task is the WIRE envelope carrying ts=<full local ISO>', async () => {
+    let capturedTask = ''
+    await routeSend(
+      caller,
+      { personality: TARGET, message: 'wire probe' },
+      {
+        wake: async req => {
+          capturedTask = req.task
+          return { status: 'FAILED', woke: false, reason: 'capture-only' }
+        },
+      },
+    )
+    expect(capturedTask).toContain('from-personality="boris"') // wire keeps legacy names
+    expect(capturedTask).toContain('<message><![CDATA[wire probe]]></message>') // wire keeps CDATA
+    const m = /\bts="([^"]+)"/.exec(capturedTask)
+    expect(m).not.toBeNull()
+    // full local ISO with offset — the durable, unambiguous wire form
+    expect(m![1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/)
+  })
+
+  test('ephemeral path: routeSend hands the SAME instant to the envelope ts AND deliver args.sentAt', async () => {
+    // The real makeEphemeralRouteDeps echoes args.sentAt as the ACK's `ts`, so this
+    // capture proves the sender-visible ts ≡ recipient-visible envelope ts without
+    // mocking the equality itself.
+    let captured: { envelope: string; sentAt?: string } | null = null
+    const r = await routeSend(
+      caller,
+      { personality: TARGET, message: 'ephemeral ts probe' },
+      {
+        ephemeral: {
+          isEphemeral: () => true,
+          deliver: async args => {
+            captured = { envelope: args.envelope, sentAt: args.sentAt }
+            return ok({
+              ok: true as const,
+              delivered_to: { personality: TARGET, runtime: 'telegram' },
+              woke: false,
+              queued: true,
+              ts: args.sentAt ?? 'missing',
+            })
+          },
+        },
+      },
+    )
+    expect(r.ok).toBe(true)
+    expect(captured).not.toBeNull()
+    const envTs = /\bts="([^"]+)"/.exec(captured!.envelope)
+    expect(envTs).not.toBeNull()
+    expect(captured!.sentAt).toBe(envTs![1]) // one instant, both sides
+    if (r.ok) expect(r.value.ts).toBe(envTs![1])
   })
 })

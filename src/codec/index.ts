@@ -30,9 +30,35 @@ export interface EnvelopeInput {
   fromPersonality: string
   fromRuntime: Runtime
   fromIntelligence: Intelligence
+  /** ISO-8601 LOCAL instant with offset (formatSentAt) — the moment the router
+   *  ACCEPTED the send; the same string is returned to the sender as the `ts`
+   *  field of its send_to_peer result, so recipient-side `ts` and sender-side
+   *  `ts` correspond literally. Rendered as the `ts` open-tag attribute.
+   *  ADDITIVE and optional: every known envelope consumer reads attributes by
+   *  NAME and ignores unknown ones; absent on legacy envelopes. On the WIRE this
+   *  is always the FULL date-time (durable stores — disk queues, pane logs —
+   *  must be unambiguous); the agent-facing render compacts it (see
+   *  renderEnvelopeForAgent). */
+  sentAt?: string
   topic?: string
   attachments?: readonly string[]
   message: string
+}
+
+/** Format a Date as ISO-8601 LOCAL time with numeric offset, second precision:
+ *  `2026-07-14T01:23:45+03:00`. Local (not UTC-Z) on purpose: the fleet's agents
+ *  compare envelope timestamps against their LOCAL statusline clock — a Z-form
+ *  invites silent off-by-offset misreads by an LLM reader. */
+export function formatSentAt(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const offMin = -date.getTimezoneOffset() // minutes EAST of UTC
+  const sign = offMin >= 0 ? '+' : '-'
+  const abs = Math.abs(offMin)
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
+    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  )
 }
 
 function escapeAttr(value: string): string {
@@ -49,12 +75,20 @@ function cdata(value: string): string {
   return `<![CDATA[${value.replaceAll(']]>', ']]]]><![CDATA[>')}]]>`
 }
 
+/** WIRE encoder — the canonical durable form (disk queues, bridge deliveries,
+ *  pane logs): legacy attribute names + always-CDATA body, so every deployed
+ *  sibling parser (telegram-/notifier-/voicetalk-runtime) keeps working
+ *  unchanged. `ts` is the only additive attribute (envelope-compaction F).
+ *  Agent-bound deliveries are re-rendered compactly at the LAST hop — see
+ *  renderEnvelopeForAgent; the wire form itself never slims (its bytes cost no
+ *  tokens; only the LLM-context presentation does). */
 export function buildEnvelope(input: EnvelopeInput): string {
   const attrs = [
     `from-personality="${escapeAttr(input.fromPersonality)}"`,
     `from-runtime="${escapeAttr(input.fromRuntime)}"`,
     `from-intelligence="${escapeAttr(input.fromIntelligence)}"`,
   ]
+  if (input.sentAt) attrs.push(`ts="${escapeAttr(input.sentAt)}"`)
   const topic = input.topic?.trim()
   if (topic) {
     attrs.push(`topic="${escapeAttr(topic.slice(0, MAX_TOPIC_LEN))}"`)
@@ -146,13 +180,21 @@ export interface IapEnvelope {
   fromPersonality: string
   fromRuntime: Runtime
   fromIntelligence?: Intelligence
+  /** The sender's dispatch instant (`ts` attribute) — full local ISO on the wire;
+   *  absent on legacy envelopes. */
+  sentAt?: string
   topic?: string
   attachments: string[]
   message: string
 }
 
+/** NAME-ANCHORED attribute lookup. The anchor `(^|\s)` is load-bearing: the old
+ *  unanchored regex made `runtime="` match the TAIL of `from-runtime="…"` (and
+ *  `intelligence="` the tail of `from-intelligence="…"`) — a latent mine that the
+ *  read-both decoder below would have stepped on (the short-name lookup must NOT
+ *  be satisfied by a legacy long-name attribute). */
 function attrValue(attrs: string, name: string): string | undefined {
-  const re = new RegExp(`${name}="([^"]*)"`)
+  const re = new RegExp(`(?:^|\\s)${name}="([^"]*)"`)
   const m = re.exec(attrs)
   return m ? unescapeAttr(m[1]) : undefined
 }
@@ -167,25 +209,34 @@ function unescapeAttr(value: string): string {
     .replace(/&amp;/g, '&')
 }
 
+/** READ-BOTH decoder: accepts the legacy wire names (`from-personality` /
+ *  `from-runtime` / `from-intelligence`, `<message>`) AND the compact
+ *  presentation names (`from` / `runtime` / `intelligence`, `<msg>`) — so any
+ *  envelope form ever emitted on this host (wire, agent-facing render, historic
+ *  transcripts) decodes. Short names win when both are present. */
 export function decodeEnvelope(xml: string): IapEnvelope {
   const open = /^<iap\s+([^>]*)>/.exec(xml.trim())
   if (!open) throw new IapError('invalid IAP envelope: missing <iap ...>')
-  const fromPersonality = attrValue(open[1], 'from-personality')
-  const fromRuntime = attrValue(open[1], 'from-runtime')
+  const fromPersonality = attrValue(open[1], 'from') ?? attrValue(open[1], 'from-personality')
+  const fromRuntime = attrValue(open[1], 'runtime') ?? attrValue(open[1], 'from-runtime')
   if (!fromPersonality || !fromRuntime) {
     throw new IapError('invalid IAP envelope: missing from-personality/from-runtime')
   }
   // READ-COMPAT: a legacy peer (live telegram) may stamp from-intelligence="human";
   // normalize human→natural / scripted→absent, drop a genuinely unknown value.
-  const fromIntelligence = normalizeIntelligenceValue(attrValue(open[1], 'from-intelligence'))
-  const message = readTagContent(xml, 'message')
+  const fromIntelligence = normalizeIntelligenceValue(
+    attrValue(open[1], 'intelligence') ?? attrValue(open[1], 'from-intelligence'),
+  )
+  const message = readTagContent(xml, 'message') ?? readTagContent(xml, 'msg')
   if (message === undefined) throw new IapError('invalid IAP envelope: missing message')
   const attachmentsRaw = readTagContent(xml, 'attachments')
   const topic = attrValue(open[1], 'topic')
+  const sentAt = attrValue(open[1], 'ts')
   return {
     fromPersonality,
     fromRuntime,
     ...(fromIntelligence ? { fromIntelligence } : {}),
+    ...(sentAt ? { sentAt } : {}),
     ...(topic ? { topic } : {}),
     attachments: attachmentsRaw
       ? attachmentsRaw.split('\n').map(item => item.trim()).filter(Boolean)
@@ -209,7 +260,12 @@ function openTagVerdict(candidate: string): 'valid' | 'invalid' | 'incomplete' {
     return unclosed && candidate.length <= MAX_OPEN_TAG_LEN ? 'incomplete' : 'invalid'
   }
   if (m[0].length > MAX_OPEN_TAG_LEN) return 'invalid'
-  return m[1].includes('from-personality="') && m[1].includes('from-runtime="') ? 'valid' : 'invalid'
+  // Read-both (envelope-compaction F): a real open tag carries the required pair
+  // under EITHER naming — legacy wire (from-personality/from-runtime) or compact
+  // presentation (from/runtime, name-anchored so a legacy tail never satisfies it).
+  const hasPersonality = m[1].includes('from-personality="') || /(?:^|\s)from="/.test(m[1])
+  const hasRuntime = m[1].includes('from-runtime="') || /(?:^|\s)runtime="/.test(m[1])
+  return hasPersonality && hasRuntime ? 'valid' : 'invalid'
 }
 
 /**
@@ -255,5 +311,87 @@ export function extractEnvelopes(buffer: string): { envelopes: string[]; rest: s
     }
     envelopes.push(candidate)
     rest = rest.slice(envelopeEnd)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent-facing presentation render (envelope-compaction F)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Presentation-hybrid gate: a body that itself contains envelope machinery
+ *  (a quoted envelope, tag markers, CDATA syntax) or a literal CR keeps its
+ *  CDATA wrapping in the presentation too — the cost of the gate firing is
+ *  purely COSMETIC (the agent sees today's CDATA form), whereas rendering such
+ *  a body raw would show the agent a "broken" nested envelope. Plain `<` (code
+ *  snippets etc.) renders raw: nothing parses the presentation. */
+const PRESENTATION_CDATA_MARKERS = [
+  '<iap ',
+  '</iap>',
+  '<message>',
+  '</message>',
+  '<msg>',
+  '</msg>',
+  '<attachments>',
+  '</attachments>',
+  '<![CDATA[',
+  ']]>',
+  '\r',
+] as const
+
+function presentBody(value: string): string {
+  return PRESENTATION_CDATA_MARKERS.some(marker => value.includes(marker)) ? cdata(value) : value
+}
+
+/** Compact the wire `ts` (full local ISO with offset) for the agent's eyes:
+ *  time-only `01:23:45` when the send happened on the SAME local calendar day
+ *  as the render (the normal case), date-prefixed `2026-07-13 01:23:45` when it
+ *  did not (queue drains, long sleeps, midnight crossings) — so a stale message
+ *  can never masquerade as fresh. Renders happen at the LAST delivery hop, so
+ *  "today" is delivery-time local. An unparseable ts passes through verbatim. */
+function renderTsForAgent(sentAt: string, now: Date): string {
+  const d = new Date(sentAt)
+  if (Number.isNaN(d.getTime())) return sentAt
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  const sameLocalDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  return sameLocalDay ? time : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`
+}
+
+/**
+ * Render a WIRE envelope into the compact agent-facing presentation:
+ *
+ *   <iap from="boris" runtime="claude" intelligence="artificial" ts="01:23:45">
+ *   Reply via send_to_peer.
+ *   <msg>raw body…</msg>
+ *   </iap>
+ *
+ * Short attribute names, time-only `ts` (cross-day rule above), raw body
+ * (hybrid CDATA when the body quotes envelope machinery). Called ONLY at the
+ * two hops where text enters an LLM context (composeFirstMessage — wake boot +
+ * ephemeral drain; deliverWarm — live paths, gated on agent runtimes); bridge
+ * targets always receive the wire form their parsers expect.
+ *
+ * FAIL-OPEN: any decode/render problem returns the wire text unchanged — a
+ * presentation hiccup must never lose or mangle a delivery.
+ */
+export function renderEnvelopeForAgent(wire: string, now: Date = new Date()): string {
+  try {
+    const env = decodeEnvelope(wire)
+    const attrs = [`from="${escapeAttr(env.fromPersonality)}"`, `runtime="${escapeAttr(env.fromRuntime)}"`]
+    if (env.fromIntelligence) attrs.push(`intelligence="${escapeAttr(env.fromIntelligence)}"`)
+    if (env.sentAt) attrs.push(`ts="${escapeAttr(renderTsForAgent(env.sentAt, now))}"`)
+    if (env.topic) attrs.push(`topic="${escapeAttr(env.topic)}"`)
+    return [
+      `<iap ${attrs.join(' ')}>`,
+      IAP_INSTRUCTION,
+      ...(env.attachments.length
+        ? [`<attachments>${presentBody(env.attachments.join('\n'))}</attachments>`]
+        : []),
+      `<msg>${presentBody(env.message)}</msg>`,
+      '</iap>',
+    ].join('\n')
+  } catch {
+    return wire // fail-open: deliver the wire form rather than risk the message
   }
 }

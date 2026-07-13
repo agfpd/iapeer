@@ -34,7 +34,25 @@ The daemon finds the recipient in the registry and looks at its state:
 
 The key guarantee: `delivered` means the message actually landed in a live session (the daemon waited for confirmation), not that it was just sent into the void. If the session didn't confirm receipt in the allotted time, the daemon treats it as dead and doesn't lie about success.
 
-In every message's envelope travels the sender's nature (`intelligence`) — the recipient knows whether a human, an agent, or a service process is writing to it.
+In every message's envelope travels the sender's nature (`intelligence`) — the recipient knows whether a human, an agent, or a service process is writing to it — and the dispatch instant (`ts`): the moment the router accepted the send. The same instant is returned to the sender as the `ts` field of its `send_to_peer` result, so both sides of a conversation can literally compare timestamps — which is what makes an async desync (a reply addressing an already-outdated state) visible to the recipient instead of silent.
+
+## Envelope: wire form vs agent presentation
+
+The envelope exists in two renderings of the same content:
+
+- **Wire form** — the canonical durable shape: legacy attribute names (`from-personality` / `from-runtime` / `from-intelligence`), `ts` as a full local ISO instant with offset, the body always CDATA-wrapped, `<message>` tag. This is what travels through disk queues, what bridge runtimes (telegram / notifier / voicetalk) receive and parse, and what their pane logs show. It never slims: its bytes cost no tokens, and every deployed parser keeps working unchanged.
+- **Agent presentation** — rendered at the last hop wherever text enters an LLM context (a live delivery to a claude/codex session, a wake boot first-message, an ephemeral-queue drain):
+
+  ```
+  <iap from="boris" runtime="claude" intelligence="artificial" ts="01:23:45">
+  Reply via send_to_peer.
+  <msg>message body…</msg>
+  </iap>
+  ```
+
+  Short attribute names, `ts` compacted to local host time — time-only when the message was sent the same local calendar day it is delivered, date-prefixed (`2026-07-13 01:23:45`) otherwise, so a queue-drained or long-delayed message can never masquerade as fresh. The body is raw (no CDATA) unless it quotes envelope machinery itself — then it keeps the CDATA wrapping (a cosmetic fallback, nothing parses the presentation). The render is fail-open: any problem delivers the wire form as-is rather than risking the message.
+
+So host logs deliberately show two envelope shapes: bridge-bound pane logs carry the wire form, agent-bound pane logs and transcripts carry the compact presentation. The core decoder reads both name sets (and both `<message>`/`<msg>` tags), so any envelope ever emitted on the host — including historic transcripts — still decodes.
 
 ## Message limits
 

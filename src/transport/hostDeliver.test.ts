@@ -374,3 +374,47 @@ describe('В6 per-target delivery serialization', () => {
     expect(events.slice(0, 2).sort()).toEqual(['start:codex-par-a', 'start:codex-par-b'])
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envelope-compaction F — deliverWarm render gating: an AGENT target receives the
+// compact presentation, a BRIDGE target receives the WIRE form verbatim.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('deliverWarm — presentation render gating by target runtime', () => {
+  const wire = buildEnvelope({
+    fromPersonality: 'boris',
+    fromRuntime: 'claude',
+    fromIntelligence: 'artificial',
+    sentAt: '2026-07-14T01:23:45+03:00',
+    message: 'gating probe',
+  })
+  function captureSeam(): { seam: WarmDeliverSeam; got: () => string } {
+    let captured = ''
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async (_identity, msg) => {
+        captured = msg
+        return { ok: true }
+      },
+    }
+    return { seam, got: () => captured }
+  }
+
+  test('agent target (codex, socket-ack) → compact presentation delivered', async () => {
+    const { seam, got } = captureSeam()
+    const target: DeliveryTarget = { runtime: 'codex', personality: 'ag', address: 'codex-ag', socketPath: '/tmp/x.sock' }
+    const r = await deliverWarm(target, wire, undefined, seam)
+    expect(r.ok).toBe(true)
+    expect(got()).toContain('<iap from="boris" runtime="claude" intelligence="artificial"')
+    expect(got()).toContain('<msg>gating probe</msg>')
+    expect(got()).not.toContain('from-personality')
+    expect(got()).not.toContain('CDATA')
+  })
+
+  test('bridge target (telegram router) → WIRE delivered verbatim (sibling parsers untouched)', async () => {
+    const { seam, got } = captureSeam()
+    const target: DeliveryTarget = { runtime: 'telegram', personality: 'br', address: 'telegram-br', socketPath: '/tmp/x.sock' }
+    const r = await deliverWarm(target, wire, undefined, seam)
+    expect(r.ok).toBe(true)
+    expect(got()).toBe(wire)
+  })
+})

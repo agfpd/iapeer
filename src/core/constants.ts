@@ -197,8 +197,9 @@ export const PEERS_HOME_DIR = 'peers'
 export const LAUNCHD_LABEL_PREFIX = 'com.iapeer.'
 export const DAEMON_PLIST_LABEL = 'com.agfpd.iapeer'
 
-export const IAP_INSTRUCTION =
-  'IAP message from known peers. Reply via send_to_peer.'
+// Shortened 0.4.86 (envelope-compaction F): the long preamble duplicated doctrine
+// (origin-routing) for live sessions; the reply-routing cue is the load-bearing part.
+export const IAP_INSTRUCTION = 'Reply via send_to_peer.'
 
 export const ALWAYS_LOAD_META = {
   'anthropic/alwaysLoad': true,

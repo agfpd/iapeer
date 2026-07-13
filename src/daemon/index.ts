@@ -121,7 +121,7 @@ export function buildSendDescription(): string {
     'Peers can be agents, humans, or services. Runtime is the delivery surface, not the peer type.',
     'Current delivery supports any runtime endpoint that follows the IAP tmux socket convention. Claude/Codex are built-in local runtimes; external runtimes such as telegram can be exposed by runtime-router packages.',
     '',
-    "Use `personality`, not a runtime-prefixed identity. Set `runtime` to target a specific declared runtime for this send. If that runtime is warm-asleep, the daemon wakes it and delivers there; use this to intentionally bring up a second session of the same peer in parallel to the default runtime (for example codex alongside claude). Inbound peer messages arrive as <iap from-personality=\"...\" from-runtime=\"...\" from-intelligence=\"...\"> blocks. The topic attribute is optional.",
+    "Use `personality`, not a runtime-prefixed identity. Set `runtime` to target a specific declared runtime for this send. If that runtime is warm-asleep, the daemon wakes it and delivers there; use this to intentionally bring up a second session of the same peer in parallel to the default runtime (for example codex alongside claude). Inbound peer messages arrive as <iap from=\"...\" runtime=\"...\" intelligence=\"...\" ts=\"...\"> blocks; `ts` is the sender's dispatch time (local host time; date-prefixed when not sent today) — compare it with the current time to spot a stale/desynced message. The topic attribute is optional.",
   ].join('\n')
 }
 

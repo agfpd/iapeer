@@ -181,7 +181,7 @@ export function makeEphemeralRouteDeps(
 ): EphemeralRouteDeps {
   return {
     isEphemeral: cwd => isEphemeralPeer(cwd),
-    deliver: async ({ peer, envelope, topic, runtime }) => {
+    deliver: async ({ peer, envelope, topic, runtime, sentAt }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
       const identity = buildProcessAddress(rt.value, peer.personality)
@@ -201,7 +201,7 @@ export function makeEphemeralRouteDeps(
         queued: true,
         queuedBy: 'ephemeral',
         queueDepth: depth,
-        ts: new Date().toISOString(),
+        ts: sentAt ?? new Date().toISOString(),
       })
     },
   }

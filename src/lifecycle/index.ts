@@ -25,6 +25,7 @@ import {
   type Runtime,
 } from '../core/constants.ts'
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
+import { renderEnvelopeForAgent } from '../codec/index.ts'
 import { err, ok, type Result } from '../core/errors.ts'
 import { capPaneLogs, paneLogRotateConfig } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
@@ -917,17 +918,23 @@ function composePeerPrompt(
  * yields no seed and never blocks the wake (the seed is optional).
  */
 export function composeFirstMessage(cwd: string, task: string, fresh: boolean): string {
-  if (!fresh) return task
+  // Envelope-compaction F: the boot first-message enters an LLM context (wake
+  // targets are agent runtimes by construction — launchd-held bridges are never
+  // woken, H4), so the routed WIRE envelope is rendered into the compact
+  // agent-facing presentation here — the boot-side twin of deliverWarm's render.
+  // fail-open inside the renderer (non-envelope/empty task passes through as-is).
+  const presented = task ? renderEnvelopeForAgent(task) : task
+  if (!fresh) return presented
   let seed: string | undefined
   try {
     seed = readPeerProfile(cwd)?.initial_prompt
   } catch {
     /* invalid/absent profile → no seed */
   }
-  if (!seed) return task
+  if (!seed) return presented
   // seed + the routed message (both delivered, seed first). When there is NO incoming
   // message (an eager /new re-launch, C4b — task is empty), the seed is self-sufficient.
-  return task ? `${seed}\n\n${task}` : seed
+  return presented ? `${seed}\n\n${presented}` : seed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

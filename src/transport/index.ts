@@ -32,7 +32,7 @@ import {
   buildSocketPath,
   type ProcessAddress,
 } from '../core/socket.ts'
-import { buildEnvelope } from '../codec/index.ts'
+import { buildEnvelope, formatSentAt, renderEnvelopeForAgent } from '../codec/index.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { findPeer, readPeersIndex, type PeerRecord } from '../registry/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
@@ -238,12 +238,18 @@ export async function deliverWarm(
   seam: WarmDeliverSeam = {},
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Result<void>> {
+  // Envelope-compaction F: an AGENT target (claude/codex — an LLM reads the text)
+  // receives the compact presentation; a bridge target (telegram/notifier/…)
+  // receives the WIRE form its parser expects. Rendered BEFORE deliverViaHost so
+  // the transcript-confirm matches the text actually delivered. fail-open inside
+  // the renderer: a render problem degrades to the wire form, never to a loss.
+  const payload = isSupportedLocalRuntime(target.runtime) ? renderEnvelopeForAgent(envelope) : envelope
   const address = target.address
   const prev = deliverTails.get(address) ?? Promise.resolve()
   // run AFTER prev settles (success or failure) — a prior delivery's error must not stall the chain
   const run = prev.then(
-    () => deliverViaHost(target, envelope, cwd, seam, env),
-    () => deliverViaHost(target, envelope, cwd, seam, env),
+    () => deliverViaHost(target, payload, cwd, seam, env),
+    () => deliverViaHost(target, payload, cwd, seam, env),
   )
   deliverTails.set(
     address,
@@ -884,6 +890,9 @@ export interface EphemeralRouteDeps {
     envelope: string
     topic?: string
     runtime?: string
+    /** Router-acceptance instant (formatSentAt) — the enqueue ACK's `ts` mirrors
+     *  it so sender-side ts ≡ envelope ts holds on the queued path too. */
+    sentAt?: string
   }) => Promise<Result<RouteResult>>
 }
 
@@ -904,6 +913,8 @@ export interface ComposerQueueTryEnqueueArgs {
   target: DeliveryTarget
   envelope: string
   topic?: string
+  /** Router-acceptance instant (formatSentAt) — the queued ACK's `ts` mirrors it. */
+  sentAt?: string
 }
 
 export interface ComposerQueueRouteDeps {
@@ -1192,7 +1203,7 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         queued: true,
         queuedBy: 'composer',
         queueDepth: q.length,
-        ts: new Date().toISOString(),
+        ts: args.sentAt ?? new Date().toISOString(),
       })
     },
     failAll: async reason => {
@@ -1317,12 +1328,19 @@ export async function routeSend(
   const intendedGuard = telegramSenderGuard(caller, runtime ?? peer.runtime, personality)
   if (!intendedGuard.ok) return intendedGuard
 
+  // Stamped ONCE at router acceptance: the same instant travels as the envelope's
+  // `ts` attribute (recipient side) AND is returned as the result's `ts` (sender
+  // side) — the two correspond literally, which is what makes async-desync
+  // visible (the recipient can tell how old the message it is reading is).
+  const sentAt = formatSentAt(new Date())
   // Built once — it is both the live-delivery payload and, on a miss, the wake
-  // first-message (the woken session receives it as its boot task).
+  // first-message (the woken session receives it as its boot task). This is the
+  // WIRE form; agent-bound hops re-render it compactly at delivery.
   const envelope = buildEnvelope({
     fromPersonality: caller.personality,
     fromRuntime: caller.runtime,
     fromIntelligence: caller.intelligence,
+    sentAt,
     topic,
     attachments: attachmentsResult.value,
     message,
@@ -1336,7 +1354,7 @@ export async function routeSend(
   // would deadlock its own die-after-reply reap on a forever-non-empty queue).
   if (deps.ephemeral?.isEphemeral(peer.cwd)) {
     if (caller.personality === peer.personality) return err('cannot send to self')
-    return deps.ephemeral.deliver({ peer, envelope, topic, runtime })
+    return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt })
   }
 
   const target = resolvePeerDeliveryTarget(personality, runtime, peer, env)
@@ -1346,7 +1364,7 @@ export async function routeSend(
     // land on telegram without an override and without telegram being the default).
     const liveGuard = telegramSenderGuard(caller, target.value.runtime, personality)
     if (!liveGuard.ok) return liveGuard
-    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: target.value, envelope, topic })
+    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: target.value, envelope, topic, sentAt })
     if (queued) return queued
     // peer.cwd enables the Ф-B transcript-mtime liveness probe (busy-session case).
     // deliverWarm is HOST-AWARE (spawn-flip Ф0b-2): a supervisor-hosted target delivers over its
@@ -1359,7 +1377,7 @@ export async function routeSend(
       ok: true,
       delivered_to: { personality: target.value.personality, runtime: target.value.runtime },
       woke: false,
-      ts: new Date().toISOString(),
+      ts: sentAt,
     })
   }
 
@@ -1391,7 +1409,7 @@ export async function routeSend(
           ok: true,
           delivered_to: { personality: revived.value.personality, runtime: revived.value.runtime },
           woke: false,
-          ts: new Date().toISOString(),
+          ts: sentAt,
         })
       }
       // resolved but the deliver didn't land (session still settling) → keep polling
@@ -1427,7 +1445,7 @@ export async function routeSend(
   // a false ok:true — the class the contract forbids. A delivery failure here is
   // surfaced loudly (false-FAIL over false-OK).
   if (woke.taskDelivered === false) {
-    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: live.value, envelope, topic })
+    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: live.value, envelope, topic, sentAt })
     if (queued) return queued
     const delivered = await deliverWarm(live.value, envelope, peer.cwd, {}, env)
     if (!delivered.ok) return delivered
@@ -1436,7 +1454,7 @@ export async function routeSend(
       ok: true,
       delivered_to: { personality: live.value.personality, runtime: live.value.runtime },
       woke: false, // honest: this sender's envelope went the LIVE path, not a boot
-      ts: new Date().toISOString(),
+      ts: sentAt,
     })
   }
   // The envelope was delivered as the boot first-message during wake.
@@ -1444,6 +1462,6 @@ export async function routeSend(
     ok: true,
     delivered_to: { personality: live.value.personality, runtime: live.value.runtime },
     woke: true,
-    ts: new Date().toISOString(),
+    ts: sentAt,
   })
 }

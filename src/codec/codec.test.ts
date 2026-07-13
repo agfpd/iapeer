@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { buildEnvelope, decodeEnvelope, extractEnvelopes, type EnvelopeInput } from './index.ts'
+import {
+  buildEnvelope,
+  decodeEnvelope,
+  extractEnvelopes,
+  formatSentAt,
+  renderEnvelopeForAgent,
+  type EnvelopeInput,
+} from './index.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WITNESS: faithful copy of the OLD telegram-runtime decoder (cli.ts:867-935).
@@ -354,5 +361,141 @@ describe('decodeEnvelope errors', () => {
     const xml =
       '<iap from-personality="nova" from-runtime="telegram" from-intelligence="human">\n<message><![CDATA[hi]]></message>\n</iap>'
     expect(decodeEnvelope(xml).fromIntelligence).toBe('natural')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envelope-compaction F: wire `ts` attribute + read-both decode + agent render
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('wire ts attribute (sentAt)', () => {
+  test('sentAt round-trips as the ts attribute', () => {
+    const sentAt = '2026-07-14T01:23:45+03:00'
+    const xml = buildEnvelope({ ...base, sentAt, message: 'hi' })
+    expect(xml).toContain(`ts="${sentAt}"`)
+    expect(decodeEnvelope(xml).sentAt).toBe(sentAt)
+  })
+  test('legacy envelope without ts → sentAt undefined', () => {
+    expect(decodeEnvelope(buildEnvelope({ ...base, message: 'hi' })).sentAt).toBeUndefined()
+  })
+  test('formatSentAt: full local ISO with offset, second precision, parseable back to the same instant', () => {
+    const d = new Date(2026, 6, 14, 1, 23, 45, 678) // local components
+    const s = formatSentAt(d)
+    expect(s).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/)
+    // parses back to the same instant (milliseconds deliberately dropped)
+    expect(new Date(s).getTime()).toBe(d.getTime() - 678)
+  })
+})
+
+describe('read-both decode (compact presentation names)', () => {
+  const compact =
+    '<iap from="boris" runtime="claude" intelligence="artificial" ts="01:23:45" topic="t">\nReply via send_to_peer.\n<msg>тело</msg>\n</iap>'
+  test('compact envelope decodes: from/runtime/intelligence/ts + <msg>', () => {
+    const d = decodeEnvelope(compact)
+    expect(d.fromPersonality).toBe('boris')
+    expect(d.fromRuntime).toBe('claude')
+    expect(d.fromIntelligence).toBe('artificial')
+    expect(d.sentAt).toBe('01:23:45')
+    expect(d.topic).toBe('t')
+    expect(d.message).toBe('тело')
+  })
+  test('extractEnvelopes accepts a compact-format envelope (В38 verdict, both name pairs)', () => {
+    const { envelopes, rest } = extractEnvelopes(`noise ${compact} tail`)
+    expect(envelopes).toHaveLength(1)
+    expect(decodeEnvelope(envelopes[0]).fromPersonality).toBe('boris')
+    expect(rest.includes('<iap ')).toBe(false)
+  })
+  test('ANCHOR: short-name lookup never satisfied by a legacy long-name tail (attr order adversarial)', () => {
+    // Unanchored `runtime="` would match the TAIL of from-runtime="claude" FIRST here → wrong value.
+    const xml =
+      '<iap from-personality="x" from-runtime="claude" runtime="codex" from="y">\n<message><![CDATA[m]]></message>\n</iap>'
+    const d = decodeEnvelope(xml)
+    expect(d.fromRuntime).toBe('codex') // short name wins, read via the ANCHORED lookup
+    expect(d.fromPersonality).toBe('y')
+  })
+  test('legacy envelope still decodes through the long-name fallback', () => {
+    const xml = buildEnvelope({ ...base, message: 'legacy' })
+    const d = decodeEnvelope(xml)
+    expect(d.fromPersonality).toBe(base.fromPersonality)
+    expect(d.fromRuntime).toBe(base.fromRuntime)
+  })
+})
+
+describe('SIBLING-COMPAT witness: the deployed runtimes parser shape reads the NEW wire', () => {
+  // Faithful copy of the sibling parsers attr lookup (telegram/notifier/voicetalk):
+  // UNANCHORED named regex — unknown attributes are skipped by construction.
+  function siblingAttrValue(attrs: string, name: string): string | undefined {
+    const m = new RegExp(`${name}="([^"]*)"`).exec(attrs)
+    return m ? oldUnescapeAttr(m[1]) : undefined
+  }
+  test('new wire (ts attr + shortened instruction) parses: required fields intact, ts ignored', () => {
+    const wire = buildEnvelope({ ...base, sentAt: '2026-07-14T01:23:45+03:00', message: 'hello' })
+    const open = /^<iap\s+([^>]*)>/.exec(wire.trim())
+    expect(open).not.toBeNull()
+    expect(siblingAttrValue(open![1], 'from-personality')).toBe(base.fromPersonality)
+    expect(siblingAttrValue(open![1], 'from-runtime')).toBe(base.fromRuntime)
+    expect(oldTagContent(wire, 'message')).toBe('hello')
+    // the old streaming extractor slices the new wire cleanly too
+    const { envelopes } = oldExtractEnvelopes(wire)
+    expect(envelopes).toHaveLength(1)
+  })
+})
+
+describe('renderEnvelopeForAgent (compact presentation)', () => {
+  const NOW = new Date(2026, 6, 14, 12, 0, 0) // local 2026-07-14 12:00:00
+  const wireOf = (extra: Partial<EnvelopeInput>): string =>
+    buildEnvelope({ ...base, sentAt: formatSentAt(new Date(2026, 6, 14, 1, 23, 45)), message: 'plain body', ...extra })
+
+  test('same-day: short names, time-only ts, <msg> raw body, shortened instruction', () => {
+    const out = renderEnvelopeForAgent(wireOf({}), NOW)
+    expect(out).toContain('<iap from="nova" runtime="telegram" intelligence="natural" ts="01:23:45" topic="Ф0 фундамента">')
+    expect(out).toContain('Reply via send_to_peer.')
+    expect(out).toContain('<msg>plain body</msg>')
+    expect(out).not.toContain('CDATA')
+    expect(out).not.toContain('from-personality')
+  })
+  test('cross-day: ts gets the date prefix', () => {
+    const out = renderEnvelopeForAgent(wireOf({ sentAt: formatSentAt(new Date(2026, 6, 13, 23, 59, 1)) }), NOW)
+    expect(out).toContain('ts="2026-07-13 23:59:01"')
+  })
+  test('legacy wire without ts → no ts attribute, still compact', () => {
+    const out = renderEnvelopeForAgent(buildEnvelope({ ...base, message: 'old' }), NOW)
+    expect(out).toContain('<iap from="nova" runtime="telegram" intelligence="natural" topic="Ф0 фундамента">')
+    expect(out).not.toContain('ts=')
+  })
+  test('fail-open: non-envelope text passes through unchanged', () => {
+    expect(renderEnvelopeForAgent('just some text', NOW)).toBe('just some text')
+    expect(renderEnvelopeForAgent('', NOW)).toBe('')
+  })
+  test('hybrid: a body quoting envelope machinery keeps its CDATA wrapping', () => {
+    const body = 'quoting a full envelope: <iap from="x" runtime="claude">\n<msg>inner</msg>\n</iap> end'
+    const out = renderEnvelopeForAgent(wireOf({ message: body }), NOW)
+    expect(out).toContain('<msg><![CDATA[')
+    // and the quoted envelope survives byte-exact through decode of the render
+    expect(decodeEnvelope(out).message).toBe(body)
+  })
+  test('plain `<` (code snippet) renders RAW — not envelope machinery', () => {
+    const out = renderEnvelopeForAgent(wireOf({ message: 'if (a < b) return <div/>' }), NOW)
+    expect(out).toContain('<msg>if (a < b) return <div/></msg>')
+    expect(out).not.toContain('CDATA')
+  })
+  test('attachments render, raw when safe', () => {
+    const out = renderEnvelopeForAgent(wireOf({ attachments: ['/tmp/a.txt', '/tmp/b.png'] }), NOW)
+    expect(out).toContain('<attachments>/tmp/a.txt\n/tmp/b.png</attachments>')
+  })
+  test('empty body renders as empty <msg>', () => {
+    const out = renderEnvelopeForAgent(wireOf({ message: '' }), NOW)
+    expect(out).toContain('<msg></msg>')
+  })
+  test('render is decodable (read-both) — round-trip by field semantics', () => {
+    const out = renderEnvelopeForAgent(wireOf({}), NOW)
+    const d = decodeEnvelope(out)
+    expect(d.fromPersonality).toBe('nova')
+    expect(d.fromRuntime).toBe('telegram')
+    expect(d.message).toBe('plain body')
+  })
+  test('unparseable wire ts passes through verbatim in the render', () => {
+    const wire = '<iap from-personality="a" from-runtime="claude" ts="bogus-time">\n<message><![CDATA[x]]></message>\n</iap>'
+    expect(renderEnvelopeForAgent(wire, NOW)).toContain('ts="bogus-time"')
   })
 })

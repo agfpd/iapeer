@@ -43,6 +43,7 @@ import {
   readSessionStates,
   type LifecycleConfig,
 } from './index.ts'
+import { buildEnvelope } from '../codec/index.ts'
 import { spawnSync } from 'child_process'
 import * as lockfile from 'proper-lockfile'
 import { upsertPeer, type PeerRecord } from '../registry/index.ts'
@@ -1602,6 +1603,52 @@ describe('Б2 reap/wake hardening', () => {
       }
     } finally {
       cleanup()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Envelope-compaction F — composeFirstMessage renders the boot envelope compactly
+// (the wake/ephemeral-drain twin of deliverWarm's agent-hop render)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('composeFirstMessage — agent-facing presentation render (F)', () => {
+  const wireTask = buildEnvelope({
+    fromPersonality: 'boris',
+    fromRuntime: 'claude',
+    fromIntelligence: 'artificial',
+    sentAt: '2026-07-14T01:23:45+03:00',
+    message: 'boot task body',
+  })
+
+  test('fresh, no seed: the WIRE task is rendered to the compact presentation', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'iapeer-render-'))
+    try {
+      const out = composeFirstMessage(cwd, wireTask, true)
+      expect(out).toContain('<iap from="boris" runtime="claude" intelligence="artificial"')
+      expect(out).toContain('<msg>boot task body</msg>')
+      expect(out).not.toContain('from-personality')
+      expect(out).not.toContain('CDATA')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('resume (fresh=false): rendered too — every boot injection is agent-facing', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'iapeer-render-'))
+    try {
+      expect(composeFirstMessage(cwd, wireTask, false)).toContain('<msg>boot task body</msg>')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('fail-open: a non-envelope task (plain seed text) passes through unchanged', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'iapeer-render-'))
+    try {
+      expect(composeFirstMessage(cwd, 'plain re-launch seed', true)).toBe('plain re-launch seed')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
     }
   })
 })
