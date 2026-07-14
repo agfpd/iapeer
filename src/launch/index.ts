@@ -24,6 +24,7 @@ import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
 import { notifierAdapter } from './adapters/notifier.ts'
 import { voicetalkAdapter } from './adapters/voicetalk.ts'
+import { webAdapter } from './adapters/web.ts'
 import type {
   LaunchConfig,
   LaunchFn,
@@ -56,6 +57,7 @@ export {
   launchdPlistPath,
   renderLaunchdPlist,
   installAlwaysOnPlist,
+  installedPlistRuntime,
   isFoundationOwnedPlist,
   launchctlBootstrap,
   bootstrapJobCore,
@@ -90,6 +92,7 @@ export function getAdapter(runtime: Runtime): RuntimeAdapter {
   if (runtime === 'telegram') return telegramAdapter
   if (runtime === 'notifier') return notifierAdapter
   if (runtime === 'voicetalk') return voicetalkAdapter
+  if (runtime === 'web') return webAdapter
   throw new Error(`no launch adapter for runtime "${runtime}"`)
 }
 

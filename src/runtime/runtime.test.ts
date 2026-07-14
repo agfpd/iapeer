@@ -159,6 +159,7 @@ describe('§6 — package registry + npx install + onboardRuntime', () => {
     expect(resolveRuntimePackage('telegram')).toBe(RUNTIME_PACKAGES.telegram)
     expect(resolveRuntimePackage('notifier')).toBe('@agfpd/notifier-runtime')
     expect(resolveRuntimePackage('telegram', '@me/fork')).toBe('@me/fork') // override wins
+    expect(resolveRuntimePackage('web')).toBe('@agfpd/web-runtime')
     expect(resolveRuntimePackage('webhook')).toBeUndefined() // no mapping
   })
 

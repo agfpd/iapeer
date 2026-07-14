@@ -5,6 +5,7 @@ import { codexAdapter } from './adapters/codex.ts'
 import { telegramAdapter } from './adapters/telegram.ts'
 import { notifierAdapter } from './adapters/notifier.ts'
 import { voicetalkAdapter } from './adapters/voicetalk.ts'
+import { webAdapter } from './adapters/web.ts'
 import { defaultIntelligenceForRuntime, INFRA_RUNTIME_BIN_ENV, INFRA_RUNTIME_DEFAULT_BIN, isInfraRuntime } from '../core/constants.ts'
 import type { LaunchAdapterConfig, LaunchConfig, LaunchSpec } from './types.ts'
 
@@ -37,6 +38,7 @@ describe('getAdapter', () => {
     expect(getAdapter('telegram')).toBe(telegramAdapter)
     expect(getAdapter('notifier')).toBe(notifierAdapter)
     expect(getAdapter('voicetalk')).toBe(voicetalkAdapter)
+    expect(getAdapter('web')).toBe(webAdapter)
   })
   test('codex is tui+doctrine, telegram is router+no-doctrine', () => {
     expect(codexAdapter.kind).toBe('tui')
@@ -277,6 +279,37 @@ describe('voicetalk runtime classification (constants)', () => {
     expect(defaultIntelligenceForRuntime('voicetalk')).toBe('natural')
     expect(INFRA_RUNTIME_DEFAULT_BIN.voicetalk).toBe('voicetalk-runtime')
     expect(INFRA_RUNTIME_BIN_ENV.voicetalk).toBe('VOICETALK_RUNTIME_BIN')
+  })
+})
+
+describe('webAdapter (router — presence-runtime, owner browser fleet-console)', () => {
+  test('kind:router, no doctrine, allows natural|absent (channel: human or faceless service bot)', () => {
+    expect(webAdapter.runtime).toBe('web')
+    expect(webAdapter.kind).toBe('router')
+    expect(webAdapter.usesDoctrine).toBe(false)
+    expect(webAdapter.allowedIntelligences).toEqual(['natural', 'absent']) // human OR faceless service; never an LLM agent
+  })
+  test('buildArgv = web-runtime run [+extra], default + pinned bin', () => {
+    expect(webAdapter.buildArgv(spec({ runtime: 'web' }), cfg)).toEqual(['web-runtime', 'run'])
+    expect(
+      webAdapter.buildArgv(spec({ runtime: 'web', extraArgs: ['--foo'] }), { ...cfg, webBin: '/w/bin' }),
+    ).toEqual(['/w/bin', 'run', '--foo'])
+  })
+  test('router predicates are trivial', () => {
+    expect(webAdapter.bootDialogKeys('anything')).toBeNull()
+    expect(webAdapter.isInputReady('anything')).toBe(true)
+    expect(webAdapter.newestActivityMtime('/w')).toBeNull()
+    expect(webAdapter.resolveResume('/w').ok).toBe(true)
+    expect(webAdapter.executeControl({ kind: 'interrupt' } as never)).toBeNull()
+  })
+})
+
+describe('web runtime classification (constants)', () => {
+  test('web is infra (launchd always-on) + natural + has bin mappings', () => {
+    expect(isInfraRuntime('web')).toBe(true)
+    expect(defaultIntelligenceForRuntime('web')).toBe('natural')
+    expect(INFRA_RUNTIME_DEFAULT_BIN.web).toBe('web-runtime')
+    expect(INFRA_RUNTIME_BIN_ENV.web).toBe('WEB_RUNTIME_BIN')
   })
 })
 

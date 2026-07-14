@@ -82,6 +82,20 @@ function readPlistEnvVar(path: string, key: string): string | undefined {
 }
 
 /**
+ * The PEER_RUNTIME baked into the personality's EXISTING foundation-owned always-on
+ * plist, or undefined when there is no plist / it is foreign-owned / it carries no
+ * runtime. The plist scheme is ONE per personality (`com.iapeer.<p>.plist` — the
+ * runtime rides only in ProgramArguments/env), so this is how a caller detects that
+ * the personality's always-on slot is already OCCUPIED by another infra runtime
+ * (e.g. arthur's telegram) before asking for a second one (multi-infra collision).
+ */
+export function installedPlistRuntime(personality: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const path = launchdPlistPath(personality, env)
+  if (!existsSync(path) || !isFoundationOwnedPlist(path)) return undefined
+  return readPlistEnvVar(path, 'PEER_RUNTIME')
+}
+
+/**
  * Resolve an executable to an ABSOLUTE path against `env.PATH` (the RICH
  * provisioning PATH), so the result can be baked into a launchd plist whose own
  * PATH is minimal. A name containing '/' is treated as a path and returned iff it
@@ -612,6 +626,22 @@ export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string 
       `refusing to overwrite launchd plist ${path}: label ${launchdLabel(opts.personality)} ` +
         `is not foundation-managed (no ${IAPEER_PLIST_OWNER_KEY} sentinel) — a persistent-peer ` +
         `or other manager owns it; rename the peer to avoid the com.iapeer.<personality> collision`,
+    )
+  }
+  // MULTI-INFRA COLLISION GUARD (fail-loud, never a silent clobber): the plist scheme
+  // is ONE per personality, so installing a SECOND infra runtime for the same
+  // personality would OVERWRITE the first channel's plist (e.g. web over arthur's
+  // telegram) and kill that channel on the next bootout/reboot. Refuse loudly until
+  // per-runtime plists (multi-infra) land. A deliberate runtime SWITCH is an operator
+  // act: `iapeer stop <p>` + delete the plist, then re-provision.
+  const bakedRuntime = existsSync(path) ? readPlistEnvVar(path, 'PEER_RUNTIME') : undefined
+  if (bakedRuntime && bakedRuntime !== opts.runtime) {
+    throw new IapError(
+      `refusing to overwrite launchd plist ${path}: it already holds the always-on ` +
+        `"${bakedRuntime}" session for "${opts.personality}" (the plist scheme is one per ` +
+        `personality) — installing "${opts.runtime}" here would silently kill that channel. ` +
+        `Multi-infra per personality needs per-runtime plists (not yet supported); for a ` +
+        `deliberate runtime switch: iapeer stop ${opts.personality}, delete the plist, re-provision.`,
     )
   }
   // GLOBAL infra logs (Фаза §8): ~/.iapeer/logs/<personality>/, NOT per-peer

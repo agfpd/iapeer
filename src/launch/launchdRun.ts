@@ -97,6 +97,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
     telegramBin: env[INFRA_RUNTIME_BIN_ENV.telegram],
     notifierBin: env[INFRA_RUNTIME_BIN_ENV.notifier],
     voicetalkBin: env[INFRA_RUNTIME_BIN_ENV.voicetalk],
+    webBin: env[INFRA_RUNTIME_BIN_ENV.web],
     sockDir,
     bootDeadlineSecs: 30,
     readyGateSecs: 30,

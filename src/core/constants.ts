@@ -89,11 +89,12 @@ export function isIntelligenceAllowedForRuntime(runtime: string, intelligence: I
 // Infra runtimes are ALWAYS-ON (held live by launchd KeepAlive), as opposed to the
 // warm-on-demand agentic runtimes (claude/codex, woken by the daemon). Liveness is
 // a property of the RUNTIME, not the personality (zone Идентичность). Infra runtimes
-// are routers hosted by the pty supervisor: telegram/voicetalk carry a human channel
-// (inbound messages / voice), notifier receives send_to_peer(timer|watcher, …)
-// registration/live-reload — outbound to each is deliverHosted → the child's stdin.
+// are routers hosted by the pty supervisor: telegram/voicetalk/web carry a human
+// channel (inbound messages / voice / browser console), notifier receives
+// send_to_peer(timer|watcher, …) registration/live-reload — outbound to each is
+// deliverHosted → the child's stdin.
 // This set gates always-on launchd plist generation (src/launch/launchd.ts).
-const INFRA_RUNTIMES = new Set(['notifier', 'telegram', 'voicetalk'])
+const INFRA_RUNTIMES = new Set(['notifier', 'telegram', 'voicetalk', 'web'])
 
 export function isInfraRuntime(runtime: string): boolean {
   return INFRA_RUNTIMES.has(runtime)
@@ -111,6 +112,7 @@ export const INFRA_RUNTIME_BIN_ENV: Readonly<Record<string, string>> = {
   notifier: 'NOTIFIER_RUNTIME_BIN',
   telegram: 'TELEGRAM_RUNTIME_BIN',
   voicetalk: 'VOICETALK_RUNTIME_BIN',
+  web: 'WEB_RUNTIME_BIN',
 }
 
 /** The PATH-resolvable default launcher name per infra runtime (when no abs path
@@ -120,6 +122,7 @@ export const INFRA_RUNTIME_DEFAULT_BIN: Readonly<Record<string, string>> = {
   notifier: 'notifier-runtime',
   telegram: 'telegram-runtime',
   voicetalk: 'voicetalk-runtime',
+  web: 'web-runtime',
 }
 
 // codex MCP token-free import (contract Установка §codex MCP). codex REFUSES to import

@@ -14,6 +14,7 @@ import {
   cycleDaemonCore,
   getAdapter,
   installAlwaysOnPlist,
+  installedPlistRuntime,
   isFoundationOwnedPlist,
   launchAgentsDir,
   launchdLabel,
@@ -193,10 +194,10 @@ describe('installAlwaysOnPlist ↔ isLaunchdManaged round-trip', () => {
 // installer at a PP-managed plist. H4 invariant: the foundation must NEVER clobber
 // a plist it does not own. The guard tells "ours" from "theirs" by a sentinel the
 // foundation renderer embeds — a PP/foreign plist lacks it → refuse, do not write.
-describe('installAlwaysOnPlist collision guard (H4 — shared com.iapeer.* namespace)', () => {
-  // A persistent-peer start.sh plist for `boris` — same com.iapeer.boris Label, but
-  // NOT foundation-rendered (no sentinel). This stands in for a live PP-managed file.
-  const foreignPpPlist = `<?xml version="1.0" encoding="UTF-8"?>
+// A persistent-peer start.sh plist for `boris` — same com.iapeer.boris Label, but
+// NOT foundation-rendered (no sentinel). This stands in for a live PP-managed file.
+// Module-level: shared by the H4 foreign-guard and the multi-infra guard describes.
+const foreignPpPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -215,6 +216,7 @@ describe('installAlwaysOnPlist collision guard (H4 — shared com.iapeer.* names
 </plist>
 `
 
+describe('installAlwaysOnPlist collision guard (H4 — shared com.iapeer.* namespace)', () => {
   test('REFUSES to overwrite a foreign (PP-managed) com.iapeer.* plist — no silent clobber', () => {
     const root = mkTmp()
     const laDir = join(root, 'LaunchAgents')
@@ -268,6 +270,47 @@ describe('installAlwaysOnPlist collision guard (H4 — shared com.iapeer.* names
     // second install over our own plist must NOT throw (idempotent re-provision)
     expect(() => installAlwaysOnPlist(opts)).not.toThrow()
     expect(plutilLint(path).ok).toBe(true)
+  })
+})
+
+// The plist scheme is ONE per personality (com.iapeer.<p>.plist; the runtime rides only
+// in ProgramArguments/env). A SECOND infra runtime for the same personality (arthur:
+// telegram already installed, now web) would OVERWRITE the first channel's plist and
+// kill that channel on the next bootout/reboot — the exact silent-clobber class the
+// H4 guard exists for, but INSIDE the foundation's own sentinel. Fail-loud instead.
+describe('installAlwaysOnPlist multi-infra collision guard (one plist per personality)', () => {
+  test('REFUSES a second infra runtime over the first channel plist; file untouched; installedPlistRuntime reads the occupant', () => {
+    const root = mkTmp()
+    const laDir = join(root, 'LaunchAgents')
+    const env = { IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_ROOT: join(root, 'iapeer') } as NodeJS.ProcessEnv
+    const base = {
+      cwd: join(root, 'peer-arthur'),
+      entrypointArgv: ['/path/to/bun', '/pkg/src/launch/launchdRun.ts'],
+      path: '/usr/bin:/bin',
+      env,
+    }
+    const path = installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'telegram' })
+    const telegramXml = readFileSync(path, 'utf8')
+    expect(installedPlistRuntime('arthur', env)).toBe('telegram') // occupant visible to callers
+
+    // a SECOND infra runtime for the same personality → fail-loud, never overwrite
+    expect(() => installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'web' })).toThrow(
+      /already holds the always-on "telegram"/,
+    )
+    expect(readFileSync(path, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
+
+    // SAME runtime re-install stays idempotent (the guard keys on runtime mismatch)
+    expect(() => installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'telegram' })).not.toThrow()
+  })
+
+  test('installedPlistRuntime: absent plist / foreign plist → undefined', () => {
+    const root = mkTmp()
+    const laDir = join(root, 'LaunchAgents')
+    mkdirSync(laDir, { recursive: true })
+    const env = { IAPEER_LAUNCHAGENTS_DIR: laDir } as NodeJS.ProcessEnv
+    expect(installedPlistRuntime('nobody', env)).toBeUndefined() // no plist
+    writeFileSync(launchdPlistPath('boris', env), foreignPpPlist) // PP-owned, no sentinel
+    expect(installedPlistRuntime('boris', env)).toBeUndefined() // foreign → not ours to read
   })
 })
 

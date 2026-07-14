@@ -33,6 +33,7 @@ export const RUNTIME_PACKAGES: Readonly<Record<string, string>> = {
   telegram: '@agfpd/telegram-runtime',
   notifier: '@agfpd/notifier-runtime',
   voicetalk: '@agfpd/voicetalk-runtime',
+  web: '@agfpd/web-runtime',
 }
 
 /** Resolve the npm package for a runtime: explicit override wins, else the built-in

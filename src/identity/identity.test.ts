@@ -354,4 +354,28 @@ describe('ensurePeerProfile create-peer → always-on plist (infra only)', () =>
     expect(readFileSync(plist, 'utf8')).toBe(foreign)
     expect(existsSync(peerProfilePath(peerCwd))).toBe(false)
   })
+
+  test('MULTI-INFRA BRIDGE: declaring a SECOND infra runtime keeps the first channel plist, declares the runtime, warns', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'arthur')
+    // 1) arthur is provisioned on telegram → telegram plist installed (the live-host shape)
+    const first = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'telegram', personality: 'arthur' })
+    expect(first.runtimes).toEqual(['telegram'])
+    const plist = launchdPlistPath('arthur', env)
+    const telegramXml = readFileSync(plist, 'utf8')
+
+    // 2) declaring web for the SAME personality: runtime declared, plist untouched, warn emitted
+    const warns: string[] = []
+    const second = ensurePeerProfile({
+      cwd: peerCwd,
+      env,
+      runtime: 'web',
+      personality: 'arthur',
+      warn: m => warns.push(m),
+    })
+    expect(second.runtimes).toContain('telegram')
+    expect(second.runtimes).toContain('web') // declared → identity web-arthur resolves
+    expect(readFileSync(plist, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
+    expect(warns.join('\n')).toMatch(/run-infra arthur web/) // operator recipe surfaced
+  })
 })

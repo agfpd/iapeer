@@ -141,6 +141,8 @@ export interface LaunchAdapterConfig {
   notifierBin?: string
   /** voicetalk-runtime launch binary (router runtime, infra/always-on — the owner's voice channel). */
   voicetalkBin?: string
+  /** web-runtime launch binary (router runtime, infra/always-on — the owner's browser fleet-console). */
+  webBin?: string
 }
 
 export interface LaunchSpec {
