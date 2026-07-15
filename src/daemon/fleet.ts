@@ -636,7 +636,10 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
           /* empty/invalid body is fine — approve/deny carry only optional fields */
         }
         const by = typeof body.approver === 'string' ? body.approver : undefined
-        const via = typeof body.via === 'string' ? body.via : 'cli'
+        // The answering face self-identifies its surface in `via` (cli | tray | telegram | web | …;
+        // free-form-tolerant like `kind`). NO default — an audit line must never claim a surface the
+        // caller did not state; a face that sent nothing is logged with the field omitted.
+        const via = typeof body.via === 'string' ? body.via : undefined
         const ok =
           action === 'approve'
             ? broker.resolve(id, { decision: 'allow', reason: typeof body.reason === 'string' ? body.reason : undefined }, { by, via })

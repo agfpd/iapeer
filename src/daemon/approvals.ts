@@ -1,6 +1,6 @@
 // Approval broker — the in-daemon queue that is the SINGLE SOURCE OF TRUTH for
 // human-approval requests (docs/17). Every channel (the runtime hook that ASKS, and
-// the CLI / tray / telegram faces that ANSWER) is an interface to THIS one queue: a
+// the CLI / tray / telegram / web-console faces that ANSWER) is an interface to THIS one queue: a
 // decision from any face resolves the request everywhere (the owner's invariant).
 //
 // Flow: a gated peer's PreToolUse hook blocks and POSTs /fleet/v1/approvals → the fleet
@@ -56,7 +56,9 @@ export interface ApprovalDecision {
 export interface ResolveMeta {
   /** The approver who answered (a nature-peer personality). */
   by?: string
-  /** The channel that answered: cli | tray | telegram | timeout | disconnect. */
+  /** The surface that answered: cli | tray | telegram | web | timeout | disconnect.
+   *  Self-declared by the answering face (free-form-tolerant); absent when the face
+   *  did not self-identify — the audit line then omits `via` rather than guessing. */
   via?: string
 }
 

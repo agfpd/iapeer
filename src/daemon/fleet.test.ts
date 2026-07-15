@@ -26,6 +26,7 @@ import {
   resolveSendCaller,
   type FleetOps,
 } from './fleet.ts'
+import { approvalsLogPath } from './approvalslog.ts'
 import { daemonDiscoveryPath, startDaemon, type DaemonHandle } from './index.ts'
 
 let root: string
@@ -347,6 +348,14 @@ describe('approvals broker surface (docs/17)', () => {
     throw new Error('approval never appeared in the list')
   }
 
+  // The newest approval-resolved audit line (the sandbox approvals.log under cfg.eventLogDir).
+  function lastResolvedLine(): string {
+    const lines = readFileSync(approvalsLogPath(cfg.eventLogDir), 'utf8')
+      .split('\n')
+      .filter(l => l.includes('ev=approval-resolved'))
+    return lines[lines.length - 1] ?? ''
+  }
+
   test('hook long-poll → GET list (verbatim content) → approve resolves it allow', async () => {
     const reqP = fetch(`${base()}/fleet/v1/approvals`, {
       method: 'POST',
@@ -358,16 +367,22 @@ describe('approvals broker surface (docs/17)', () => {
     const listed = (await (await fetch(`${base()}/fleet/v1/approvals`)).json()) as { approvals: Array<{ id: string; content: string }> }
     expect(listed.approvals[0]!.content).toBe('rm -rf /tmp/danger && echo pwned')
 
+    // `via` is the face's SELF-identification of its surface — passed through VERBATIM to the
+    // audit log ('web' = the web console; docs/17 «Fleet API»). Body-field, not header.
     const ap = await fetch(`${base()}/fleet/v1/approvals/${id}/approve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ approver: 'nova', via: 'cli' }),
+      body: JSON.stringify({ approver: 'nova', via: 'web' }),
     })
     expect(ap.status).toBe(200)
     const decided = (await (await reqP).json()) as { decision: string }
     expect(decided.decision).toBe('allow')
     const after = (await (await fetch(`${base()}/fleet/v1/approvals`)).json()) as { approvals: unknown[] }
     expect(after.approvals).toHaveLength(0)
+    // the audit line carries the surface the face declared — via=web, never a guessed default
+    const line = lastResolvedLine()
+    expect(line).toContain('via=web')
+    expect(line).toContain('by=nova')
   })
 
   test('deny reaches the hook with a reason; re-resolving an id → 404', async () => {
@@ -386,6 +401,8 @@ describe('approvals broker surface (docs/17)', () => {
     const decided = (await (await reqP).json()) as { decision: string; reason: string }
     expect(decided.decision).toBe('deny')
     expect(decided.reason).toBe('obvious exfil')
+    // this face did NOT self-identify → the audit line OMITS via (never claims a surface)
+    expect(lastResolvedLine()).not.toContain(' via=')
     const again = await fetch(`${base()}/fleet/v1/approvals/${id}/approve`, { method: 'POST' })
     expect(again.status).toBe(404)
   })

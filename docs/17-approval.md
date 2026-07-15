@@ -1,6 +1,6 @@
 # 17 — Human approval
 
-A peer can run in one of two **approval modes**. In `yolo` (the default — every peer today) the agent acts autonomously: the runtime is launched with its bypass flag and nothing asks a human before a tool runs. In `gated` the peer is launched **without** bypass, and every blocking approval the runtime would raise is routed to a **human** through the daemon's approval broker — a Telegram button, a tray click, or `iapeer approve` on the CLI. The human's `allow`/`deny` (with a reason) flows back into the runtime and the tool proceeds or is refused.
+A peer can run in one of two **approval modes**. In `yolo` (the default — every peer today) the agent acts autonomously: the runtime is launched with its bypass flag and nothing asks a human before a tool runs. In `gated` the peer is launched **without** bypass, and every blocking approval the runtime would raise is routed to a **human** through the daemon's approval broker — a Telegram button, a tray click, `iapeer approve` on the CLI, or the web console's approvals panel. The human's `allow`/`deny` (with a reason) flows back into the runtime and the tool proceeds or is refused.
 
 This is a **normative contract**. The approval broker is the daemon's, the fleet endpoints and `ev` kinds below are the surface that operator faces (CLI, tray, the Telegram runtime) are written against — not the daemon source. The interception facts (which runtime event fires, in which shape) are pinned to **Claude Code 2.1.201** and **codex-cli 0.142.5**, taken from the live binaries + current runtime docs.
 
@@ -103,7 +103,7 @@ An unknown tool falls back to a pretty-printed `tool_input`, so nothing is opaqu
 
 ## The broker (single source of truth)
 
-The approval queue lives **in the daemon** (the always-on process). Every channel that asks (the runtime hook, the supervisor breaker) and every channel that answers (CLI, tray, the Telegram runtime) is an interface to this one queue: a decision from any face resolves the request everywhere. In-memory + ephemeral — pending requests do **not** survive a daemon restart (the blocking hook connection breaks → the hook fails safe to deny); the durable `approvals.log` is the audit trace, not a recovery store.
+The approval queue lives **in the daemon** (the always-on process). Every channel that asks (the runtime hook, the supervisor breaker) and every channel that answers (CLI, tray, the Telegram runtime, the web console) is an interface to this one queue: a decision from any face resolves the request everywhere. In-memory + ephemeral — pending requests do **not** survive a daemon restart (the blocking hook connection breaks → the hook fails safe to deny); the durable `approvals.log` is the audit trace, not a recovery store.
 
 Flow: the gated peer's hook (or the supervisor breaker) blocks on `POST /fleet/v1/approvals` → the broker enqueues, emits `approval-request` (to `approvals.log` → SSE), and holds the connection → a face answers via `POST /fleet/v1/approvals/<id>/(approve|deny)` → the promise resolves, the daemon writes the runtime hook JSON back, the tool proceeds or is blocked with the reason.
 
@@ -118,7 +118,7 @@ The approval surface is served on both daemon listeners under `/fleet/v1`, same 
 **Events** (compact logfmt line → SSE JSON; the full content is *not* in the event — read the queue for it):
 
 - `approval-request` — `id, personality, runtime, kind, tool, summary, created, expires, approvers`.
-- `approval-resolved` — `id, personality, runtime, decision (allow|deny), reason, by (approver), via (cli|tray|telegram|timeout|disconnect), latencyMs`.
+- `approval-resolved` — `id, personality, runtime, decision (allow|deny), reason, by (approver), via (cli|tray|telegram|web|timeout|disconnect), latencyMs`. `via` is the surface the decision came from, **self-declared by the answering face** in its `POST` body (free-form-tolerant, like `kind`; `timeout`/`disconnect` are broker-internal). A face that did not self-identify gets the field **omitted** — the audit line never guesses a surface.
 
 **Endpoints:**
 
@@ -126,11 +126,13 @@ The approval surface is served on both daemon listeners under `/fleet/v1`, same 
 |---|---|
 | `GET /fleet/v1/approvals` | list pending requests (full items) |
 | `GET /fleet/v1/approvals/<id>` | one pending request, full `content` (the multi-line diff / plan / command) |
-| `POST /fleet/v1/approvals/<id>/approve` | `{approver?}` → allow |
-| `POST /fleet/v1/approvals/<id>/deny` | `{reason?, approver?}` → deny (reason to the model) |
+| `POST /fleet/v1/approvals/<id>/approve` | `{approver?, via?}` → allow |
+| `POST /fleet/v1/approvals/<id>/deny` | `{reason?, approver?, via?}` → deny (reason to the model) |
 | `POST /fleet/v1/approvals` | the **blocking long-poll** the asking hook/breaker holds: `{personality, runtime, kind, tool, content, summary?}` → `{id, decision, reason?}` |
 
 `kind` is the taxonomy tag (`tool` | `plan` | `question` | `circuit-breaker`; free-form-tolerant). So the SSE/badge stays light while the full content is available in every channel through the two `GET`s.
+
+`via` on approve/deny is the answering face's **self-identification of its surface** for the audit trail: the CLI sends `cli`, the tray `tray`, the Telegram runtime `telegram`, the web console `web`. A face MUST send it (the log omits `via` otherwise); the broker passes it through verbatim into `approvals.log`.
 
 ## CLI
 
