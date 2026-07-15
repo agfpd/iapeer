@@ -199,3 +199,45 @@ ignored — a human's own session never notifies.
   raw fact even if the heuristic picks wrong.
 
 Forensic evidence for all of the above: `docs/internals/forensics/model-limit-2026-07-15/`.
+
+## 8. Known hole: codex generic API errors — measured, not assumed
+
+**A codex peer left mute by anything other than a rate limit is not detected.** Its
+rate-limit path — the actual incident class — IS covered by `rate_limit_reached_type`. Mute
+from overload or an expired auth is not.
+
+This is a property of codex, not an omission here. Measured on 15.07.2026:
+
+- **A real 429 leaves no trace in the rollout.** An isolated codex (`CODEX_HOME` on a temp
+  tree, a custom `model_provider` pointed at a local endpoint — the live fleet untouched) was
+  fault-injected with a genuine HTTP 429. Codex's OWN retry and error path ran and the turn
+  died: `ERROR: exceeded retry limit, last status: 429 Too Many Requests`. Its rollout
+  contains: `session_meta`, `task_started`, three `response_item/message`, `world_state`,
+  `turn_context`, `user_message`, `task_complete`. **Zero error items.**
+- **Worse: the rollout affirmatively says the turn SUCCEEDED.** It records
+  `task_complete { last_agent_message: null }` for the turn that just died on a 429. The
+  rollout is not merely silent about the failure — for this purpose it is wrong.
+- **Corroborated across real history**: 43 real rollouts, ~6147 `token_count` events, zero
+  error events of any kind; `TurnAbortedReason`'s variants (`interrupted`, `review_ended`,
+  `budget_limited`, `other`) contain no API-error member; codex's own `logs_2.sqlite` holds
+  exactly one ERROR row, unrelated (a model-refresh timeout).
+
+So codex's only structural error surface is the `rate_limits` snapshot this detector already
+reads. The claude/codex asymmetry in §2 is that fact, not a shortcut.
+
+**Rejected, deliberately:** `task_complete` with `last_agent_message: null` is the only tell
+that the turn failed — and it is an **absence, not a signal**. A detector on it would fire on
+every turn that legitimately produced no agent message. Inferring "mute" from it would be the
+exact plausible-inference defect this whole note exists to prevent; it is not built.
+
+**Not answered:** whether `stream_error` — a real serde variant of codex's `EventMsg`, next to
+`deprecation_notice` and `patch_apply_begin` — is persisted to the rollout. Codex filters
+which `event_msg` kinds land there (`patch_apply_end` does, `patch_apply_begin` does not), and
+it has never appeared in any rollout here. A mid-stream-break probe was run; codex retries a
+broken stream with a long backoff and did not terminate inside the time box. **This is left
+unanswered rather than inferred from the 429 result.**
+
+**Caveat on the measurement:** the probe drove a custom `model_provider`. The real ChatGPT
+provider path could in principle record something this one did not.
+
+Artifacts (rollout, injector, config): `docs/internals/forensics/model-limit-2026-07-15/`.
