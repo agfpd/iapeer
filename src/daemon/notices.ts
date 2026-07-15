@@ -62,9 +62,11 @@ export interface Notice extends NoticeInput {
   id: string
   summary: string
   dedupKey: string
-  /** First occurrence. */
+  /** When the notice was raised (board clock — the TTL anchor, hence not the event's own
+   *  timestamp: expiry must be measured from when the owner could first see it). */
   createdMs: number
-  /** Latest OCCURRENCE (not the latest sweep that re-read it). */
+  /** When the latest OCCURRENCE was folded in (board clock). A sweep that merely re-reads an
+   *  already-counted event does NOT move it — only a genuinely new occurrence does. */
   lastMs: number
   expiresMs: number
   /** Distinct occurrences folded into this notice (≥1) — how many times the peer actually

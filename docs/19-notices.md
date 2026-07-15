@@ -117,8 +117,8 @@ resets, the plan) — data, never our interpretation of the cause.
 | `summary` | string | one line, e.g. `boris · claude — rate_limit (Fable 5)` |
 | `content` | string | verbatim (claude) / rendered from typed fields (codex) |
 | `sessionId` | string? | correlates with the on-disk transcript |
-| `createdMs` | number | first occurrence |
-| `lastMs` | number | latest OCCURRENCE (not the latest sweep that re-read it) |
+| `createdMs` | number | when the notice was raised (board clock — the TTL anchor) |
+| `lastMs` | number | when the latest occurrence was folded in (board clock). A sweep that merely re-reads an already-counted event does not move it. |
 | `expiresMs` | number | TTL boundary |
 | `count` | number | distinct OCCURRENCES folded in (≥1) — how many times the peer actually hit the wall. Render as `×N`. The sweep window overlaps on purpose, so the same runtime event is re-read across passes; the board discriminates on the event's own timestamp, and a re-read never bumps this. |
 
