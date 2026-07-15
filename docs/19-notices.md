@@ -148,6 +148,40 @@ ignore unknown `ev` kinds as always.
 4. **Unknown `kind` / `errorType` ⇒ still render.** Both are growth seams.
 5. **Do not key on `id` across daemon restarts** — the board is in-memory; a restart
    re-detects from the on-disk evidence and issues new ids.
+6. **On startup, seed the board SILENTLY.** Whatever is already live when your face comes up
+   is history: mark it seen and deliver none of it. Deliver only notices raised *while you
+   were running* — i.e. whose `createdMs` is later than your own start.
+
+#### Why obligation 6 exists, and what it costs
+
+A notice is one-way: nobody is waiting on it, nothing unblocks. So a face restart is an event
+in the **face's** life, not news about the fleet — and re-announcing the live board because
+*you* redeployed tells the owner nothing he did not already know. It is your deploy, buzzing
+his phone.
+
+This is not hypothetical: on 15.07.2026 a telegram-runtime deploy re-delivered all five live
+cards; the web-runtime, from the same board and the same version of this document, seeded
+silently. Neither face was wrong — **the contract was silent, so each guessed, and they
+guessed differently.** That is what this obligation ends.
+
+**The cost, named:** a notice raised while your face was DOWN is never delivered by you.
+Accepted, because it is bounded and self-healing:
+
+- if the peer recovered during your downtime, the notice was moot — there was nothing to act on;
+- if the peer is **still** broken, the board re-raises a FRESH notice when the TTL expires
+  (§5). Its `createdMs` is then later than your start, so you deliver it. The worst case is a
+  delay of one TTL, not a permanent loss.
+
+**Approvals are the OPPOSITE — do not copy this rule across (docs/17).** A pending approval
+has a human on the other end and a ≤300 s default-deny deadline: a face that starts up and
+stays quiet about it lets the request time out into a denial. So approvals *are* delivered on
+startup. The discriminator is not which surface you are, it is **whether anything is blocked
+waiting on a human**. Notices block nothing; approvals block a peer's tool call.
+
+**Implementation:** record your start time at boot and compare `createdMs`. No persisted
+seen-set is needed, and it stays correct across a daemon restart — a restarted daemon
+re-detects from the on-disk evidence and stamps newer `createdMs`, so genuinely current
+conditions are delivered rather than suppressed.
 
 ## 5. Dedup and TTL — one mechanism
 
