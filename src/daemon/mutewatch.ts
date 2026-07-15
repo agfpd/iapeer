@@ -31,12 +31,18 @@
 //     binary but never observed live here), so an unknown future variant still detects.
 //     Codex DOES carry resets_at per window → its notice states the reset time.
 //
-// PATHS ARE NEVER DERIVED FROM cwd. The obvious route — slugify the peer's registry cwd into
-// ~/.claude/projects/<slug> — is a trap: the slug mirrors the cwd STRING as the process was
-// launched, not the real path. This host carries BOTH `-Users-macmini-Projects-IAPeer` and
-// `-Users-macmini-Projects-iapeer` for ONE case-insensitive directory. So we go the other way:
-// scan the session files that CHANGED, read the cwd each file states about ITSELF (claude: the
-// `cwd` field on every line; codex: session_meta.payload.cwd), and match that against the
+// PATHS ARE NOT DERIVED FROM cwd — but NOT for the reason first claimed here. The original note
+// said this host carries BOTH `-Users-macmini-Projects-IAPeer` and `-Users-macmini-Projects-iapeer`
+// as two directories. That was FALSE, and measured to be false on 15.07: readdir lists exactly one
+// (`…-IAPeer`), and both spellings stat to the SAME inode — the filesystem is case-insensitive, so
+// a slug whose case differs from the on-disk name resolves fine. (The claim came from a grep -c of
+// 2, whose second hit was `…-Projects-iapeer-memory`. The count was read instead of the entries.)
+//
+// The real reason stands on its own: the slug mirrors the cwd STRING as the process was launched,
+// which is a claude-specific naming convention we do not own, and codex has no cwd in its path at
+// all (YYYY/MM/DD/rollout-*). One attribution rule that works for both runtimes beats two derivation
+// schemes: scan the session files that CHANGED, read the cwd each file states about ITSELF (claude:
+// the `cwd` field on every line; codex: session_meta.payload.cwd), and match that against the
 // registry. A file whose cwd is no peer's is ignored — a human's own session never notifies.
 
 import { existsSync, openSync, closeSync, fstatSync, readSync, readdirSync, statSync } from 'node:fs'

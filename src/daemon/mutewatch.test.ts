@@ -216,8 +216,9 @@ describe('scanMuteEvents — attribution across a real-shaped tree', () => {
     expect(found[0]!.errorType).toBe('rate_limit')
   })
 
-  // The dir name is a red herring by construction — attribution must come from the content.
-  test('attribution ignores the slug dir name entirely (the IAPeer/iapeer case trap)', () => {
+  // The dir name is a red herring by construction — attribution must come from the content,
+  // which is what lets ONE rule serve claude (slug dirs) and codex (dateless rollout paths).
+  test('attribution ignores the slug dir name entirely', () => {
     const { paths } = tree()
     mkdirSync(join(paths.claudeProjectsDir, '-Totally-Unrelated-Dir-Name'), { recursive: true })
     writeFileSync(join(paths.claudeProjectsDir, '-Totally-Unrelated-Dir-Name', 's.jsonl'), REAL_CLAUDE_RATE_LIMIT_LINE)

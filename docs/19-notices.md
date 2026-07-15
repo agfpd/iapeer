@@ -210,13 +210,23 @@ The daemon sweeps on its own timer (`DEFAULT_MUTEWATCH_INTERVAL_MS`, 20 s — de
 is the product here, and the 60 s supervise tick would put the worst case at the budget with
 nothing to spare). A sweep only opens files whose mtime moved since the last pass.
 
-The obvious route — slugify the peer's registry `cwd` into `~/.claude/projects/<slug>` — is a
-**trap**. The slug mirrors the cwd *string as the process was launched*, not the real path.
-This host carries BOTH `-Users-macmini-Projects-IAPeer` and `-Users-macmini-Projects-iapeer`
-for one case-insensitive directory. So attribution runs the other way: read the cwd each file
-states **about itself** (claude: the `cwd` field on every line; codex: `session_meta.payload.cwd`)
-and match it against the registry, case-insensitively. A file whose cwd belongs to no peer is
-ignored — a human's own session never notifies.
+Attribution does not derive the path from `cwd`. It reads the cwd each file states **about
+itself** (claude: the `cwd` field on every line; codex: `session_meta.payload.cwd`) and matches
+it against the registry, case-insensitively. A file whose cwd belongs to no peer is ignored —
+a human's own session never notifies.
+
+The reason is that one rule must serve both runtimes: the claude slug is a naming convention we
+do not own, and a codex rollout carries no cwd in its path at all (`YYYY/MM/DD/rollout-*`), so
+there is nothing to derive from. Reading the file's own statement works for both.
+
+> **Correction (15.07.2026).** This section previously justified the choice by claiming the host
+> carries BOTH `-Users-macmini-Projects-IAPeer` and `-Users-macmini-Projects-iapeer` as two
+> directories for one case-insensitive path. **That was false.** `readdir` lists exactly one
+> (`…-IAPeer`), and both spellings `stat` to the same inode — the filesystem is case-insensitive,
+> so a slug of differing case resolves correctly, and the confirm path in `transport` derives its
+> slug this way and works. The claim came from reading a `grep -c` result of 2 whose second hit was
+> `…-Projects-iapeer-memory`: a count was trusted instead of the entries. The design choice is
+> unchanged; its stated reason is.
 
 ## 7. What is proven, and what is not
 
