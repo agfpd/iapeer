@@ -57,6 +57,10 @@ export interface RequestApprovalDeps {
   fetch?: typeof fetch
   /** Injectable client timeout (tests). */
   timeoutMs?: number
+  /** External cancel: aborting this signal aborts the long-poll fetch (the daemon sees the requester
+   *  transport close and settles the pending request cancel/default-deny, clearing it from every
+   *  face). The supervisor uses it to close a request whose modal disappeared before a decision. */
+  signal?: AbortSignal
 }
 
 /**
@@ -73,6 +77,11 @@ export async function requestApproval(base: string, body: ApprovalRequestBody, d
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   ;(timer as { unref?: () => void }).unref?.()
+  const onExternalAbort = (): void => controller.abort()
+  if (deps.signal) {
+    if (deps.signal.aborted) controller.abort()
+    else deps.signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     const bearer = env.IAPEER_BEARER_TOKEN?.trim()
@@ -88,5 +97,6 @@ export async function requestApproval(base: string, body: ApprovalRequestBody, d
     return data.decision === 'allow' ? { decision: 'allow' } : { decision: 'deny', reason: data.reason || 'denied' }
   } finally {
     clearTimeout(timer)
+    deps.signal?.removeEventListener('abort', onExternalAbort)
   }
 }

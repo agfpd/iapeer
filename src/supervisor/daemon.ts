@@ -795,6 +795,16 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
           // safe to DENY on any broker fault. For unknown-modal the broker content carries EXPLICIT button
           // semantics (Allow presses option 1 "<label>"; Deny cancels via Esc) so the human decides informed.
           brokerInFlight = true
+          // STALE-PROOF (15.07 incident): pin THIS modal's content signature at request time; the route
+          // re-proves it against the LIVE pane model before any key injection. Modal gone / replaced by a
+          // different one → signature mismatch → the request closes WITHOUT touching the pty (a late
+          // allow/deny must never land in a newer live turn). A transient model-read throw propagates —
+          // routeCircuitBreaker treats it as fail-closed false (cannot prove the modal → no bytes).
+          const requestSig = sig
+          const stillActive = (): boolean => {
+            const encNow = { appCursorKeys: xterm.modes.applicationCursorKeysMode }
+            return nagSignature(nextNagAction(nagAdapter, modelToPlainText(xterm, cols, rows), encNow)) === requestSig
+          }
           void routeCircuitBreaker(
             {
               taxonomy: action.taxonomy,
@@ -809,6 +819,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
               runtime: brokerRuntime,
               env: brokerEnv,
               write: b => child.terminal.write(b),
+              stillActive,
               log: line => {
                 try {
                   console.warn(line)

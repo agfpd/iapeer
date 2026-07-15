@@ -32,6 +32,7 @@ function deps(fetchImpl: typeof fetch, extra: Partial<BreakerRouteDeps> = {}): {
       env: { IAPEER_ROOT: isolatedRoot(), IAPEER_TEST_SANDBOX: '1' } as unknown as NodeJS.ProcessEnv,
       fetch: fetchImpl,
       write: b => written.push(b),
+      stillActive: () => true, // default: the target modal stays on screen (the pre-stale-proof behavior)
       log: l => logs.push(l),
       now: () => 0,
       ...extra,
@@ -43,7 +44,7 @@ describe('routeCircuitBreaker — gated circuit-breaker routed to the human brok
   test('broker ALLOW → inject the AFFIRMATIVE keys; decision returned; BREAKER-ALLOW logged', async () => {
     const { deps: d, written, logs } = deps((async () => ({ ok: true, status: 200, json: async () => ({ id: 'a1', decision: 'allow' }) })) as unknown as typeof fetch)
     const decision = await routeCircuitBreaker(input, d)
-    expect(decision).toEqual({ decision: 'allow' })
+    expect(decision).toEqual({ decision: 'allow', injected: true })
     expect(written).toEqual([APPROVE]) // pressed YES
     expect(logs[0]).toContain('BREAKER-ALLOW dangerous-rm')
     expect(logs[0]).toContain('cmd="rm -rf /x"')
@@ -52,7 +53,7 @@ describe('routeCircuitBreaker — gated circuit-breaker routed to the human brok
   test('broker DENY → inject the taxonomy-specific DECLINE keys; reason logged', async () => {
     const { deps: d, written, logs } = deps((async () => ({ ok: true, status: 200, json: async () => ({ id: 'a2', decision: 'deny', reason: 'too risky' }) })) as unknown as typeof fetch)
     const decision = await routeCircuitBreaker(input, d)
-    expect(decision).toEqual({ decision: 'deny', reason: 'too risky' })
+    expect(decision).toEqual({ decision: 'deny', reason: 'too risky', injected: true })
     expect(written).toEqual([DENY]) // pressed No
     expect(logs[0]).toContain('BREAKER-DENY dangerous-rm')
     expect(logs[0]).toContain('reason="too risky"')
@@ -97,6 +98,60 @@ describe('routeCircuitBreaker — gated circuit-breaker routed to the human brok
     const { deps: d, written } = deps((async () => ({ ok: true, status: 200, json: async () => ({ decision: 'deny', reason: 'no' }) })) as unknown as typeof fetch)
     await routeCircuitBreaker(cmdInput, d)
     expect(written).toEqual([Buffer.from('3\r')]) // 3.No, not 2 (which is "Yes, and…")
+  })
+})
+
+// STALE-PROOF invariant (15.07 incident, codex-zapret2-oneclick): pty bytes are written ONLY under a
+// live re-proof that the modal the request was raised for is STILL on screen. A late decision (or the
+// fail-safe deny) landing after the modal cleared must NOT inject — the keys would hit a NEWER live turn.
+describe('routeCircuitBreaker — stale-proof: no keys without a live modal', () => {
+  test('late human ALLOW for a vanished modal → NO bytes, stale result, BREAKER-STALE logged', async () => {
+    const { deps: d, written, logs } = deps(
+      (async () => ({ ok: true, status: 200, json: async () => ({ decision: 'allow' }) })) as unknown as typeof fetch,
+      { stillActive: () => false }, // checkpoint 2: the modal is gone by the time the decision lands
+    )
+    const r = await routeCircuitBreaker(input, d)
+    expect(written).toEqual([]) // THE invariant: no pty bytes without a live modal
+    expect(r.injected).toBe(false)
+    expect(r.stale).toBe(true)
+    expect(r.decision).toBe('deny')
+    expect(logs[0]).toContain('BREAKER-STALE dangerous-rm')
+    expect(logs[0]).toContain('late human allow NOT injected')
+  })
+
+  test('modal vanishes while the long-poll is OUTSTANDING → the poller ABORTS the request (no bytes)', async () => {
+    // A fetch that never resolves on its own — only the abort (requester-disconnect) settles it,
+    // exactly like the real long-poll against the daemon.
+    const hangingFetch = (async (_url: string, init: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('The operation was aborted')), { once: true })
+      })) as unknown as typeof fetch
+    const { deps: d, written, logs } = deps(hangingFetch, { stillActive: () => false, staleCheckMs: 5 })
+    const r = await routeCircuitBreaker(input, d)
+    expect(written).toEqual([])
+    expect(r).toEqual({ decision: 'deny', reason: 'stale — modal cleared before the decision; no keys injected', injected: false, stale: true })
+    expect(logs[0]).toContain('BREAKER-STALE')
+    expect(logs[0]).toContain('NO pty bytes')
+  })
+
+  test('FAIL-SAFE deny is ALSO gated: broker dead + modal gone → no decline keys either', async () => {
+    const { deps: d, written } = deps(
+      (async () => { throw new Error('ECONNREFUSED') }) as unknown as typeof fetch,
+      { stillActive: () => false },
+    )
+    const r = await routeCircuitBreaker(input, d)
+    expect(written).toEqual([]) // the fail-safe deny must not press keys into whatever is on screen NOW
+    expect(r.stale).toBe(true)
+  })
+
+  test('a THROWING stillActive is fail-closed: cannot prove the modal → no bytes', async () => {
+    const { deps: d, written } = deps(
+      (async () => ({ ok: true, status: 200, json: async () => ({ decision: 'allow' }) })) as unknown as typeof fetch,
+      { stillActive: () => { throw new Error('pane model unreadable') } },
+    )
+    const r = await routeCircuitBreaker(input, d)
+    expect(written).toEqual([])
+    expect(r.stale).toBe(true)
   })
 })
 

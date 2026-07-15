@@ -74,6 +74,19 @@ export interface BreakerRouteDeps {
   env: NodeJS.ProcessEnv
   /** Inject keys into the pty (child.terminal.write). */
   write: (bytes: Buffer) => void
+  /**
+   * STALE-PROOF (15.07 incident, codex-zapret2-oneclick): return true iff the SAME modal this request
+   * was raised for is on screen RIGHT NOW (the caller compares the live pane's nagSignature against
+   * the fingerprint captured at request time). Consulted (a) periodically while the long-poll is
+   * outstanding — a vanished modal ABORTS the request at the broker (the card clears from every face)
+   * — and (b) synchronously immediately before ANY key injection. Without this, a late allow/deny
+   * lands its keys in whatever the pty shows NOW (a NEWER live turn — a bare Escape aborted it).
+   * REQUIRED by design: keys must never be injected without proof the target modal is still up.
+   * A throw is treated as `false` (fail-closed: cannot prove the modal → do not touch the pty).
+   */
+  stillActive: () => boolean
+  /** Cadence of the stale re-check while the long-poll is outstanding. Default 2000 ms. */
+  staleCheckMs?: number
   /** Injectable fetch (tests). */
   fetch?: typeof fetch
   /** Injectable client timeout (tests). */
@@ -84,16 +97,57 @@ export interface BreakerRouteDeps {
   now?: () => number
 }
 
+/** routeCircuitBreaker outcome: the decision (human / fail-safe / stale-deny) + whether keys were
+ *  actually injected into the pty. `stale: true` = the target modal was gone, so the request was
+ *  closed WITHOUT touching the pty — the caller must not treat it as an answered modal. */
+export interface BreakerRouteResult extends ApprovalDecision {
+  /** True iff approve/deny keys were written to the pty. */
+  injected: boolean
+  /** True iff the request was closed because the target modal disappeared (no keys injected). */
+  stale?: boolean
+}
+
 /**
  * POST the circuit-breaker to the human-approval broker, await the decision, and inject the decided
- * keys into the pty. Returns the decision for the caller's cooldown/in-flight bookkeeping. NEVER
- * throws — a broker failure fails safe to deny (decline keys injected). Every path leaves one audit
- * line: BREAKER-ALLOW / BREAKER-DENY with the taxonomy, the parsed detail, and (on deny) the reason.
+ * keys into the pty — IF AND ONLY IF the modal the request was raised for is still on screen. Returns
+ * the decision + whether keys were injected. NEVER throws — a broker failure fails safe to deny
+ * (decline keys injected, modal permitting).
+ *
+ * STALE-PROOF invariant (15.07 incident): pty bytes are written ONLY under a live re-proof of the
+ * target modal (`deps.stillActive`). Two checkpoints:
+ *   1. While the long-poll is outstanding, a poller re-proves the modal every `staleCheckMs`; the
+ *      moment it is gone the request is ABORTED (the daemon's requester-disconnect cancel settles it
+ *      and clears the card from every face) — the peer moved on, nobody should keep being asked.
+ *   2. Immediately before ANY injection (human decision, fail-safe deny alike) the modal is re-proved
+ *      one final time — synchronously, with no yield between proof and write, so a pane update cannot
+ *      interleave. A vanished modal → BREAKER-STALE audit line, NO pty bytes, `stale: true`.
+ * Every path leaves one audit line: BREAKER-ALLOW / BREAKER-DENY (keys injected) or BREAKER-STALE
+ * (request closed, pty untouched), each with the taxonomy, the parsed detail, and the reason/decision.
  */
-export async function routeCircuitBreaker(input: BreakerApprovalInput, deps: BreakerRouteDeps): Promise<ApprovalDecision> {
+export async function routeCircuitBreaker(input: BreakerApprovalInput, deps: BreakerRouteDeps): Promise<BreakerRouteResult> {
   const now = deps.now ?? Date.now
   const { content, summary } = composeApprovalContent(input)
+  // Fail-closed re-proof: an unreadable pane model is NOT proof the modal is up → never inject on it.
+  const stillActive = (): boolean => {
+    try {
+      return deps.stillActive()
+    } catch {
+      return false
+    }
+  }
+  // Checkpoint 1 — poll the modal while the long-poll is outstanding; a vanished modal aborts the
+  // request at the broker (requester-disconnect → cancel → the card clears from every face).
+  let stale = false
+  const controller = new AbortController()
+  const stalePoll = setInterval(() => {
+    if (!stillActive()) {
+      stale = true
+      controller.abort()
+    }
+  }, deps.staleCheckMs ?? 2000)
+  ;(stalePoll as { unref?: () => void }).unref?.()
   let decision: ApprovalDecision
+  let lateDecision: string | undefined // a human decision that arrived for an already-gone modal
   try {
     decision = await requestApproval(
       resolveFleetBase(deps.env),
@@ -105,16 +159,30 @@ export async function routeCircuitBreaker(input: BreakerApprovalInput, deps: Bre
         content,
         summary,
       },
-      { env: deps.env, fetch: deps.fetch, timeoutMs: deps.timeoutMs },
+      { env: deps.env, fetch: deps.fetch, timeoutMs: deps.timeoutMs, signal: controller.signal },
     )
+    lateDecision = decision.decision
   } catch (e) {
-    // Broker unreachable / abort / non-200 → DENY (never auto-Yes). gated = fail-safe.
+    // Broker unreachable / abort / non-200 → DENY (never auto-Yes). gated = fail-safe. Whether the
+    // deny KEYS may be pressed is still gated on the modal being up (checkpoint 2 below).
     decision = { decision: 'deny', reason: `iapeer approval unavailable (${e instanceof Error ? e.message : String(e)}) — denied fail-safe` }
+  } finally {
+    clearInterval(stalePoll)
+  }
+  // Checkpoint 2 — final synchronous re-proof immediately before the injection. No yield between this
+  // check and the write below, so the pane model cannot change in between (single-threaded).
+  if (!stale && !stillActive()) stale = true
+  if (stale) {
+    deps.log?.(
+      `[supervisor] BREAKER-STALE ${input.taxonomy} ts=${new Date(now()).toISOString()} ${input.detail}` +
+        ` — modal gone before resolution${lateDecision ? ` (late human ${lateDecision} NOT injected)` : ''}; request closed, NO pty bytes`,
+    )
+    return { decision: 'deny', reason: 'stale — modal cleared before the decision; no keys injected', injected: false, stale: true }
   }
   deps.write(decision.decision === 'allow' ? input.approveBytes : input.denyBytes)
   deps.log?.(
     `[supervisor] BREAKER-${decision.decision.toUpperCase()} ${input.taxonomy} ts=${new Date(now()).toISOString()} ${input.detail}` +
       (decision.reason ? ` reason=${JSON.stringify(decision.reason)}` : ''),
   )
-  return decision
+  return { ...decision, injected: true }
 }
