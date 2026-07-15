@@ -182,11 +182,40 @@ const LIVENESS_POLL_MS = 100
 // `IAP_HOST_LIVENESS_GRACE_MS` overrides (operator calibration; tests set 0 for an immediate
 // deterministic fail). Prefer a false-FAIL (sender retries) over a false-OK (silent loss, forbidden).
 const CONFIRM_GRACE_MS = 4000
-function confirmGraceMs(): number {
-  const raw = process.env.IAP_HOST_LIVENESS_GRACE_MS
+
+// ATTACHMENT grace. The "sub-second" assumption above holds only WITHOUT attachments. Measured
+// 15.07.2026 on a live att=4 delivery (1.3 MB of PNGs) into an IDLE receiver: the record was
+// stamped 19:34:59.269, the confirm polled the right file until 19:35:03.4 and did not see it,
+// and the receiver's first output came at 19:35:21.7. The receiver writes the user-record when it
+// BEGINS the turn, and loading/encoding the images pushed that start ~22 s out — so a 4 s grace
+// expired on a message that had landed. Every att>0 delivery to a claude receiver false-FAILED,
+// the sender retried on the lie, and the message duplicated in the receiver's context.
+//
+// 60 s is a CONSERVATIVE BOUND FROM THAT MEASUREMENT (≤22 s observed, ×3 headroom), not a
+// calibrated number: the exact paste→disk latency is still unmeasured (see docs/10). It costs
+// nothing on the happy path — the confirm returns the moment the record lands — and costs the
+// sender up to a minute only when an attachment message genuinely fails, which is rare.
+const CONFIRM_GRACE_ATTACHMENTS_MS = 60_000
+
+function envNonNegative(raw: string | undefined): number | null {
   const n = raw === undefined ? NaN : Number(raw)
-  if (Number.isFinite(n) && n >= 0) return n
-  return CONFIRM_GRACE_MS
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
+
+/** Does this envelope carry attachments — i.e. will the receiver have to ingest files before it
+ *  records anything? Same marker `confirmNeedles` splits on, so the two cannot disagree. */
+export function envelopeHasAttachments(envelope: string): boolean {
+  return envelope.includes('<attachments>') && envelope.includes('</attachments>')
+}
+
+function confirmGraceMs(hasAttachments: boolean): number {
+  // An EXPLICIT operator/test override wins for both modes — tests set 0 for a deterministic
+  // immediate fail, and an operator calibrating one number must not be silently overridden by
+  // the attachment branch.
+  const explicit = envNonNegative(process.env.IAP_HOST_LIVENESS_GRACE_MS)
+  if (explicit !== null) return explicit
+  if (!hasAttachments) return CONFIRM_GRACE_MS
+  return envNonNegative(process.env.IAP_HOST_LIVENESS_GRACE_ATTACHMENTS_MS) ?? CONFIRM_GRACE_ATTACHMENTS_MS
 }
 
 // Launchd-revive retry — a MISS on a launchd-managed target the daemon can't wake (H4)
@@ -328,7 +357,7 @@ async function deliverViaHost(
   // false-OK (silent loss the contract forbids).
   const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload, { env }))
   const sleep = seam.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
-  const graceMs = confirmGraceMs()
+  const graceMs = confirmGraceMs(envelopeHasAttachments(envelope))
   const graceDeadline = monotonicMs() + graceMs
   while (true) {
     if (confirm(envelope)) return ok(undefined)

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { confirmNeedles, transcriptCarriesEnvelope } from './index.ts'
+import { confirmNeedles, envelopeHasAttachments, transcriptCarriesEnvelope } from './index.ts'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -115,5 +115,27 @@ describe('transcriptCarriesEnvelope — the false-FAIL this fixes', () => {
       { type: 'assistant', message: { content: [{ type: 'text', text: `Got this: ${head} — replying now` }] } },
     ])
     expect(transcriptCarriesEnvelope(baselineFor(path), SENT)).toBe(false)
+  })
+})
+
+describe('envelopeHasAttachments — which grace applies', () => {
+  test('an attachment envelope is recognised (it will make the receiver ingest files first)', () => {
+    expect(envelopeHasAttachments(SENT)).toBe(true)
+  })
+
+  test('a plain envelope is not', () => {
+    expect(envelopeHasAttachments(NO_ATT)).toBe(false)
+  })
+
+  // A body that merely QUOTES the machinery must not buy the long grace by accident.
+  test('a half-tag does not count', () => {
+    expect(envelopeHasAttachments('<iap>…<attachments>oops')).toBe(false)
+  })
+
+  // The marker must agree with the needle split — otherwise one could see attachments and the
+  // other not, and the confirm would use the wrong grace for the wrong needles.
+  test('agrees with confirmNeedles: attachments ⇔ head+tail split', () => {
+    expect(envelopeHasAttachments(SENT)).toBe(confirmNeedles(SENT).length === 2)
+    expect(envelopeHasAttachments(NO_ATT)).toBe(confirmNeedles(NO_ATT).length === 2)
   })
 })
