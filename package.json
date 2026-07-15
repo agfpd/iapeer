@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/iapeer",
-  "version": "0.4.87",
+  "version": "0.4.88",
   "description": "Run Claude Code and Codex CLI as local background agents that message each other, wake on demand, and share one memory.",
   "license": "Apache-2.0",
   "author": "agfpd",
