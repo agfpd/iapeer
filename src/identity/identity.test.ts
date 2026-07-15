@@ -380,4 +380,56 @@ describe('ensurePeerProfile create-peer → always-on plist (infra only)', () =>
     expect(isFoundationOwnedPlist(webPlist)).toBe(true)
     expect(readFileSync(tgPlist, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
   })
+
+  // ─── DISCOVERY GATE (хвост-2): agentic runtimes never attach to a non-artificial
+  // peer from folder artifacts — a stray .claude/ in a human peer's cwd is not a
+  // declaration. Robust to the artifacts' PRESENCE (the folder stays untouched) and
+  // HEALS an already-leaked profile on re-provision (the arthur claude-leak class).
+  test('DISCOVERY GATE: a NEW natural (telegram) peer with a stray .claude/.codex in cwd gets NO agentic runtimes', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'maria')
+    mkdirSync(join(peerCwd, '.claude'), { recursive: true })
+    mkdirSync(join(peerCwd, '.codex'), { recursive: true })
+    const warns: string[] = []
+    const p = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'telegram', warn: m => warns.push(m) })
+    expect(p.intelligence).toBe('natural')
+    expect(p.runtimes).toEqual(['telegram']) // claude+codex markers ignored
+    expect(warns.join('\n')).toMatch(/discovery gate.*claude.*codex/s)
+    expect(existsSync(join(peerCwd, '.claude'))).toBe(true) // the folder itself is untouched
+  })
+
+  test('DISCOVERY GATE heals a leaked profile: [telegram, claude] + web re-provision → [telegram, web] (same length — content-compared write)', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'arthur2')
+    mkdirSync(join(peerCwd, '.iapeer'), { recursive: true })
+    mkdirSync(join(peerCwd, '.claude'), { recursive: true }) // the leak source, still present
+    writeFileSync(
+      join(peerCwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({
+        personality: 'arthur2',
+        default_runtime: 'telegram',
+        runtimes: ['telegram', 'claude'], // the leaked agentic runtime
+        intelligence: 'natural',
+        description: 'human',
+      }),
+    )
+    const warns: string[] = []
+    const healed = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'web', personality: 'arthur2', warn: m => warns.push(m) })
+    expect(healed.runtimes).toEqual(['telegram', 'web']) // claude scrubbed, web declared
+    expect(warns.join('\n')).toMatch(/discovery gate.*claude/s)
+    // the heal actually reached DISK (2 → 2 lengths — a length-compared write would skip it)
+    const onDisk = JSON.parse(readFileSync(join(peerCwd, '.iapeer', 'peer-profile.json'), 'utf8')) as { runtimes: string[] }
+    expect(onDisk.runtimes).toEqual(['telegram', 'web'])
+    expect(existsSync(join(peerCwd, '.claude'))).toBe(true) // robust to the artifact's presence
+  })
+
+  test('DISCOVERY GATE does not touch ARTIFICIAL peers: .codex marker still attaches codex', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'worker2')
+    mkdirSync(join(peerCwd, '.codex'), { recursive: true })
+    const p = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'claude' })
+    expect(p.intelligence).toBe('artificial')
+    expect(p.runtimes).toContain('claude')
+    expect(p.runtimes).toContain('codex') // discovery unchanged for agentic peers
+  })
 })

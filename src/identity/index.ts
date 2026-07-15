@@ -213,6 +213,41 @@ export function discoverPeerRuntimes(cwd: string, currentRuntime: Runtime): Runt
   return uniqueRuntimes(discovered)
 }
 
+/** Agentic runtimes only an ARTIFICIAL peer can drive. A natural (human) or absent
+ *  (no mind) peer has nobody to sit in a claude/codex session under its identity. */
+const AGENTIC_GATED_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex'])
+
+/**
+ * DISCOVERY GATE (хвост-2, boris 15.07): drop agentic runtimes a NON-artificial peer
+ * would otherwise pick up from folder artifacts — a stray `.claude`/`.codex` dir or a
+ * leftover `.iapeer/<rt>` runtime scope in the cwd is NOT a declaration (live leak: a
+ * long-forgotten .claude/ in the human peer arthur's cwd made every create-прогон
+ * attach `claude` to his profile). The gate is by INTELLIGENCE, so it is robust to the
+ * artifacts' PRESENCE — the folder stays, the runtime is simply not attached. It also
+ * HEALS an already-leaked profile: applied to the merged set on re-provision, it
+ * scrubs previously-attached agentic runtimes off a natural/absent peer (with a warn).
+ * The EXPLICIT `options.runtime` always passes — an operator's deliberate command is
+ * not discovery (and explicit nature/runtime mismatches fail loud elsewhere:
+ * isIntelligenceAllowedForRuntime).
+ */
+export function gateRuntimesForIntelligence(
+  runtimes: Runtime[],
+  intelligence: Intelligence,
+  explicitRuntime: Runtime,
+  warn?: (message: string) => void,
+): Runtime[] {
+  if (intelligence === 'artificial') return runtimes
+  const isGated = (rt: Runtime): boolean => AGENTIC_GATED_RUNTIMES.has(rt) && rt !== explicitRuntime
+  const dropped = runtimes.filter(isGated)
+  if (dropped.length === 0) return runtimes
+  warn?.(
+    `discovery gate: dropped agentic runtime(s) [${dropped.join(', ')}] for "${intelligence}" peer — ` +
+      `a .claude/.codex folder or leftover runtime scope in the cwd is not a declaration; ` +
+      `agentic runtimes attach only to artificial peers`,
+  )
+  return runtimes.filter(rt => !isGated(rt))
+}
+
 export function readPeerProfile(cwd: string = process.cwd()): PeerProfile | null {
   const path = peerProfilePath(cwd)
   if (!existsSync(path)) return null
@@ -566,14 +601,17 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
         `PEER_PERSONALITY "${options.env.PEER_PERSONALITY}" does not match the peer being initialized ("${personality}")`,
       )
     }
+    // Intelligence FIRST — the discovery gate below keys on it (a natural/absent
+    // peer must not be born with agentic runtimes picked up from folder artifacts).
+    const intelligence = resolvedIntelligence(options.runtime)
     const profile: PeerProfile = {
       personality,
       runtime: options.runtime,
-      runtimes: discoveredRuntimes,
+      runtimes: gateRuntimesForIntelligence(discoveredRuntimes, intelligence, options.runtime, options.warn),
       // В36 — the description lands in the LOCAL profile at birth (source of truth);
       // the registry row is a projection of this file, not the other way around.
       description: options.description?.trim() ?? '',
-      intelligence: resolvedIntelligence(options.runtime),
+      intelligence,
     }
     ensureLocalRuntimeScopes(cwd, profile.runtimes)
     // INFRA runtime → provision the always-on launchd plist that holds it live.
@@ -609,8 +647,6 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
       `PEER_PERSONALITY must match ${IAPEER_DIR}/${PEER_PROFILE_FILE} personality "${existing.personality}", got "${options.env.PEER_PERSONALITY}"`,
     )
   }
-  const mergedRuntimes = uniqueRuntimes([...existing.runtimes, ...discoveredRuntimes])
-  ensureLocalRuntimeScopes(cwd, mergedRuntimes)
   // RE-PROVISION parity with the new-profile branch: an EXISTING infra peer (a
   // migration / re-provision — e.g. `iapeer create alice --runtime telegram` to move
   // a live telegram human onto the foundation) must ALSO get its always-on plist
@@ -641,11 +677,25 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
     // preserved). resolvedIntelligence validates the explicit against the runtime's allowed set.
     intelligence = resolvedIntelligence(options.runtime)
   }
+  // Merge AFTER the intelligence is final, and GATE the WHOLE merged set (not just the
+  // fresh discoveries): for a natural/absent peer this both blocks a new agentic pickup
+  // AND heals a previously-leaked one (the arthur claude-leak class) on the next
+  // re-provision — with the folder artifacts still in place.
+  const mergedRuntimes = gateRuntimesForIntelligence(
+    uniqueRuntimes([...existing.runtimes, ...discoveredRuntimes]),
+    intelligence,
+    options.runtime,
+    options.warn,
+  )
+  ensureLocalRuntimeScopes(cwd, mergedRuntimes)
   // В36 — an explicit description on RE-provision updates the local profile too (H1 in
   // writePeerProfileAtomic still guards: absent/empty never wipes an existing value).
   const explicitDescription = options.description?.trim()
   const descriptionChanged = Boolean(explicitDescription) && explicitDescription !== existing.description
-  if (mergedRuntimes.length !== existing.runtimes.length || intelligence !== existing.intelligence || descriptionChanged) {
+  // CONTENT comparison, not length: the gate can DROP a leaked runtime while discovery
+  // ADDS a new one in the same pass (arthur: [telegram, claude] + web → [telegram, web])
+  // — equal lengths, different sets; a length check would silently skip the heal-write.
+  if (mergedRuntimes.join(',') !== existing.runtimes.join(',') || intelligence !== existing.intelligence || descriptionChanged) {
     const updated = {
       ...existing,
       runtimes: mergedRuntimes,
