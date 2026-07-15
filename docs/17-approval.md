@@ -169,15 +169,25 @@ engine auto-allows **every** `ask` decision except reasons beginning `Dangerous 
 bypassed peer is almost certainly that one class — the "the bypass broke" hypothesis can be
 dropped before investigating it.
 
-**The yolo auto-confirm IS audited, but only off-surface.** The supervisor writes
-`[supervisor] AUTO-CONFIRM <taxonomy> identity=<id> ts=<…> <detail>` to its own stderr log
-(`~/.iapeer/state/supervisor/<identity>.log`). That line is **not** in `approvals.log`, **not**
-in the Fleet API, **not** in the SSE stream, and therefore invisible to tray / telegram / web.
-A destructive auto-approval can only be found by knowing which file to grep — and by knowing
-there is a reason to grep it. Measured frequency: 9 auto-confirms across 10 days over the whole
-real fleet (8 `dangerous-rm`, 1 `command-approval`). Surfacing them is an open proposal
-(a `notices` kind, docs/19), pending the owner's call on threshold: in `yolo` he explicitly
-chose auto-Yes, so a card per auto-confirm may be exactly the noise he opted out of.
+**The yolo auto-confirm IS audited, but only off-surface — and that is DECIDED, not pending.**
+The supervisor writes `[supervisor] AUTO-CONFIRM <taxonomy> identity=<id> ts=<…> <detail>` to
+its own stderr log (`~/.iapeer/state/supervisor/<identity>.log`). That line is **not** in
+`approvals.log`, **not** in the Fleet API, **not** in the SSE stream, and therefore invisible to
+tray / telegram / web. Measured frequency: 9 auto-confirms across 10 days over the whole real
+fleet (8 `dangerous-rm`, 1 `command-approval`).
+
+> **Decision (owner, 15.07.2026): auto-confirms are NOT surfaced as notices.** Proposed after a
+> destructive auto-approval proved invisible to every operator surface; considered, rejected.
+> Rationale: `yolo` **means** silent auto-confirmation — the owner chose it explicitly to stop
+> being asked, so a card per auto-confirm would be precisely the noise he opted out of. Even the
+> narrow variant (destructive class only, post-hoc, one-way) was declined. The audit stays in the
+> supervisor log.
+>
+> **The honest boundary of that decision, accepted knowingly:** observability of auto-confirms
+> lives ONLY in `~/.iapeer/state/supervisor/<identity>.log`. You must know that file exists and
+> that there is a reason to grep it. This is not a defect — it is the price of `yolo`, chosen
+> deliberately. Re-proposing "let's just show them" re-opens a settled question: the counter-
+> argument is above, and the frequency number is the reason it does not accumulate.
 
 **The runtime's OWN notifications are outside this contour.** Claude Code pushes a native
 "Claude needs your permission: Bash …" notification to the owner's phone when a modal appears —
