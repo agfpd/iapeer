@@ -574,11 +574,61 @@ export function compactTranscriptHasDone(
 
 /** Deep-search every string value of a parsed JSON record for `needle` (CR-stripped on the haystack
  *  side; the needle is pre-stripped by the caller). */
-function jsonStringValuesContain(value: unknown, needle: string): boolean {
-  if (typeof value === 'string') return value.replace(/\r/g, '').includes(needle)
-  if (Array.isArray(value)) return value.some(v => jsonStringValuesContain(v, needle))
-  if (value && typeof value === 'object') return Object.values(value).some(v => jsonStringValuesContain(v, needle))
+/** ALL needles must be present in ONE string value — not scattered across the record. Splitting
+ *  the confirm into head+tail (see confirmNeedles) only stays as forge-resistant as the whole
+ *  envelope if both halves are found in the SAME string the receiver actually stored. */
+function jsonStringValuesContainAll(value: unknown, needles: readonly string[]): boolean {
+  if (typeof value === 'string') {
+    const s = value.replace(/\r/g, '')
+    return needles.every(n => s.includes(n))
+  }
+  if (Array.isArray(value)) return value.some(v => jsonStringValuesContainAll(v, needles))
+  if (value && typeof value === 'object') return Object.values(value).some(v => jsonStringValuesContainAll(v, needles))
   return false
+}
+
+/**
+ * The substrings whose presence in ONE new record proves the receiver took THIS envelope.
+ *
+ * Normally that is the whole envelope: long, unique, and a receiver's own turn does not
+ * reproduce it verbatim, so it cannot forge a confirm.
+ *
+ * WITH ATTACHMENTS the whole envelope is the wrong needle, because the receiver REWRITES it.
+ * Measured 15.07.2026 (claude receiver, 4 PNGs). Sent:
+ *
+ *   <iap …>⏎Reply via send_to_peer.⏎<attachments>a.png⏎…⏎d.png</attachments>⏎<msg>…</msg>⏎</iap>
+ *
+ * Stored by the receiver:
+ *
+ *   [Image #108] [Image #109]<iap …>⏎Reply via send_to_peer.⏎d.png</attachments>⏎<msg>…</msg>⏎</iap>
+ *
+ * The runtime hoists the images into separate image blocks, prepends `[Image #N]` placeholders,
+ * and eats the OPENING `<attachments>` tag plus the paths it consumed. The envelope no longer
+ * contains itself → no match → a 4 s false-FAIL on a message that DID land. The sender then
+ * retries and duplicates it in the receiver's context (three times, live, before this fix).
+ *
+ * The mutation is structurally CONFINED to the attachments region: the `<iap …>` header and the
+ * whole `<msg>…</msg></iap>` tail were byte-intact in the stored record. So we match around the
+ * damage — head + tail, both required in the same string value.
+ *
+ * NOT a short unique token in the header, which is the tempting fix: a short, predictable needle
+ * is one the receiver can reproduce in its OWN turn (agents quote IAP headers when reporting),
+ * and that forges a confirm. A false-OK is silent loss — the one outcome this contract forbids —
+ * while a false-FAIL merely costs a retry. Head+tail keeps the original forge-resistance bar:
+ * to fake it the receiver must echo both the header and the entire body verbatim.
+ */
+export function confirmNeedles(envelope: string): string[] {
+  const n = envelope.replace(/\r/g, '')
+  const OPEN = '<attachments>'
+  const CLOSE = '</attachments>'
+  const open = n.indexOf(OPEN)
+  if (open < 0) return [n] // no attachments → nothing rewrites the envelope → strongest needle
+  const close = n.indexOf(CLOSE, open + OPEN.length)
+  if (close < 0) return [n] // malformed → fall back to the whole envelope rather than guess
+  const head = n.slice(0, open).trimEnd()
+  const tail = n.slice(close + CLOSE.length).trimStart()
+  const parts = [head, tail].filter(p => p.length > 0)
+  return parts.length ? parts : [n]
 }
 
 /**
@@ -618,8 +668,8 @@ export function transcriptCarriesEnvelope(
   envelope: string,
   opts: { env?: NodeJS.ProcessEnv } = {},
 ): boolean {
-  const needle = envelope.replace(/\r/g, '')
-  if (!needle) return false
+  const needles = confirmNeedles(envelope)
+  if (!needles.length || needles.every(n => !n)) return false
   // Baseline files at their pre-deliver offset; a file NOT in the baseline (born after it) is read from 0.
   const offsets = new Map(baseline.files.map(f => [f.path, f.size]))
   for (const path of compactCandidateFiles(baseline.runtime, baseline.cwd, opts.env)) {
@@ -639,7 +689,7 @@ export function transcriptCarriesEnvelope(
       } catch {
         continue
       }
-      if (jsonStringValuesContain(obj, needle)) return true
+      if (jsonStringValuesContainAll(obj, needles)) return true
     }
   }
   return false
