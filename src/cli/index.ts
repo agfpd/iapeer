@@ -1079,6 +1079,12 @@ export interface SendOptions extends CliEnvOptions {
   message: string
   topic?: string
   attachments?: string[]
+  /** Origin-guard bypass (docs/18) — set ONLY by `iapeer confirm-send` (the held-send
+   *  delivery). Wired into RouteDeps, never derivable from agent-supplied tool args. */
+  originGuardBypass?: boolean
+  /** Held-send id (confirm-send) — stamped into delivery.log as `og=` so a confirmed
+   *  delivery is correlatable with its earlier origin-hold refusal. */
+  og?: string
 }
 
 const cliWake: WakeFn = req =>
@@ -1112,7 +1118,12 @@ export async function sendMessage(
     // noteLiveTopic — CLI-path parity (same seam the daemon wires): a live delivery
     // through the CLI fallback must update the target's .topic marker too, or a
     // daemon-restart-window send re-opens the stale-marker false-fresh.
-    { wake: cliWake, ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}), noteLiveTopic: makeNoteLiveTopic(cfg, env) },
+    {
+      wake: cliWake,
+      ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}),
+      noteLiveTopic: makeNoteLiveTopic(cfg, env),
+      originGuardBypass: opts.originGuardBypass,
+    },
   )
   // delivery.log sink — CLI-path parity (observability gap: enqueues routed
   // through the CLI left to=<peer> at ZERO while real wakes happened; the daemon
@@ -1135,6 +1146,7 @@ export async function sendMessage(
     len: opts.message.length,
     att: opts.attachments?.length || undefined,
     topic: opts.topic,
+    og: opts.og, // held-send id (confirm-send) — correlates with the origin-hold refusal
     err: result.ok ? undefined : result.error.message,
   })
   if (!result.ok) throw new Error(result.error.message)
@@ -1276,6 +1288,10 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   {
     sig: 'send <target> (--message <text> | --message-file <f|->) [--from <id>] [--attachment <p>]… [--topic <t>]',
     desc: 'manual IAP send (fallback)',
+  },
+  {
+    sig: 'confirm-send <id> [--runtime <rt>]',
+    desc: 'deliver a held send (origin-guard, docs/18): as addressed, or --runtime redirects it to the origin channel — no re-send of the message text',
   },
   { sig: '<runtime>', desc: "launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached" },
   { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token). Alias: `iapeer enable telegram <peer>`' },
@@ -2135,6 +2151,54 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             : `delivered to ${r.delivered_to.personality} (${r.delivered_to.runtime})\n`,
         )
         return 0
+      }
+      case 'confirm-send': {
+        // Origin-guard (docs/18): deliver a HELD send — as addressed (intentional
+        // cross-channel), or redirected to the origin channel via --runtime. The held
+        // message is re-sent VERBATIM under the ORIGINAL sender identity; the bypass
+        // flag lives in RouteDeps (not tool args), so this verb is the only gate.
+        const id = positionals[0]
+        if (!id) return argErr(errOut, 'confirm-send needs an id — usage: iapeer confirm-send <id> [--runtime <rt>]')
+        const rtOverride = typeof flags.runtime === 'string' ? flags.runtime : undefined
+        const { claimHeldSend, restoreHeldSend, discardHeldSend } = await import('../transport/originGuard.ts')
+        const claimed = claimHeldSend(id, { env })
+        if (!claimed.ok) {
+          errOut(`${claimed.error.message}\n`)
+          return 1
+        }
+        const held = claimed.value
+        // The confirmer must BE the holder: a peer session carries PEER_IDENTITY, and a
+        // held send may only be confirmed by the peer that produced it. Absent identity
+        // (a bare operator shell) is trusted — same-uid operator, same trust domain.
+        const confirmer = env.PEER_IDENTITY?.trim()
+        if (confirmer && confirmer !== held.caller) {
+          restoreHeldSend(id, { env })
+          errOut(`confirm-send: held send ${id} belongs to ${held.caller}, not ${confirmer} — refused\n`)
+          return 1
+        }
+        try {
+          const r = await sendMessage({
+            target: held.personality,
+            from: held.caller,
+            message: held.message,
+            runtime: rtOverride ?? held.runtime,
+            topic: held.topic,
+            attachments: held.attachments,
+            env,
+            originGuardBypass: true,
+            og: held.id,
+          })
+          discardHeldSend(id, { env })
+          out(`delivered held send ${id} to ${r.delivered_to.personality} (${r.delivered_to.runtime})\n`)
+          return 0
+        } catch (e) {
+          restoreHeldSend(id, { env })
+          errOut(
+            `confirm-send: delivery failed — ${e instanceof Error ? e.message : String(e)}; ` +
+              `the held send remains until its TTL — retry: iapeer confirm-send ${id}\n`,
+          )
+          return 1
+        }
       }
       case 'version':
       case '--version':

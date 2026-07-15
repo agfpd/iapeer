@@ -57,6 +57,17 @@ import {
   listHostedPeers,
 } from '../launch/ptyHost.ts'
 import { sendControlToHost, type DeliverResult } from '../supervisor/deliver.ts'
+// Origin-guard (docs/18) — reply-channel mechanic for agent→human sends. Lives in
+// transport because routeSend is the ONLY choke point both directions share (human
+// inbound arrives via the CLI entry path, past the daemon — see originGuard.ts header).
+import {
+  armedOrigin,
+  buildHoldNote,
+  holdSend,
+  noteHumanAnswered,
+  noteHumanInbound,
+  originGuardEnabled,
+} from './originGuard.ts'
 import { keysToBytes } from '../supervisor/protocol.ts' // pure send-keys-vocab→pty-byte translation (boot-driver slice a), @xterm-free
 import { paneLogComposerOccupied } from '../launch/readyGateModel.ts' // spawn-flip Ф0b-3 slice 3c: hosted busy-composer detector (slice 2). @xterm dynamic-loaded inside it → warm path stays @xterm-free with the flip off
 
@@ -971,6 +982,11 @@ export interface RouteDeps {
   isLaunchdManaged?: (personality: string) => boolean
   /** Injectable async sleep for the launchd-revive retry poll (tests). Default: setTimeout. */
   sleep?: (ms: number) => Promise<void>
+  /** Origin-guard bypass — set ONLY by `iapeer confirm-send` (the held-send delivery).
+   *  DELIBERATELY a RouteDeps field, not a SendToPeerInput field: tool arguments are
+   *  agent-supplied, so an input flag would let any agent forge the bypass; deps are
+   *  wired by the entry points (daemon/CLI), out of the agent's reach. */
+  originGuardBypass?: boolean
 }
 
 /** Best-effort noteLiveTopic invocation — only on a non-empty topic, never throws. */
@@ -1296,6 +1312,36 @@ export async function routeSend(
   input: SendToPeerInput,
   deps: RouteDeps = {},
 ): Promise<Result<RouteResult>> {
+  const result = await routeSendInner(caller, input, deps)
+  // Origin-guard stamps — AFTER an ok outcome only (a failed send answered nothing and
+  // carried no inbound). Best-effort: a stamp failure must never fail a delivered
+  // message. Covers EVERY ok path (live / queued / wake / launchd-revive) in one place.
+  if (result.ok) stampOriginOnDelivered(caller, input.personality, deps.env ?? process.env)
+  return result
+}
+
+/** Post-ok origin stamps: human→agent ⇒ inbound (arms the pair with the human's origin
+ *  channel); agent→human ⇒ answered (disarms). Any other pair — no-op. */
+function stampOriginOnDelivered(caller: ResolvedCaller, targetPersonality: string, env: NodeJS.ProcessEnv): void {
+  try {
+    if (!originGuardEnabled(env)) return
+    const peer = findPeer(readPeersIndex({ env }), targetPersonality)
+    if (!peer) return
+    if (caller.intelligence === 'natural' && peer.intelligence === 'artificial') {
+      noteHumanInbound(peer.personality, caller.personality, caller.runtime, { env })
+    } else if (caller.intelligence === 'artificial' && peer.intelligence === 'natural') {
+      noteHumanAnswered(caller.personality, peer.personality, { env })
+    }
+  } catch {
+    /* stamps are observability for the guard — never fail a delivered message */
+  }
+}
+
+async function routeSendInner(
+  caller: ResolvedCaller,
+  input: SendToPeerInput,
+  deps: RouteDeps = {},
+): Promise<Result<RouteResult>> {
   const { personality, runtime, message } = input
   const topic = truncateTopic(input.topic)
   const attachmentsResult = validateAttachments(input.attachments ?? [])
@@ -1322,6 +1368,35 @@ export async function routeSend(
   const peer = findPeer(index, personality)
   if (!peer) {
     return err(`peer "${personality}" is not in the iapeer peers index; message NOT delivered`)
+  }
+
+  // Origin-guard (docs/18) — an agent's PRESUMED REPLY to a human (the human's latest
+  // inbound to this agent is unanswered) must target the channel the human wrote from.
+  // Checked FIRST, before any resolve/wake side-effect and before the telegram policy:
+  // a mismatch is HELD (persisted verbatim + instructive error), not delivered — the
+  // agent then confirms cross-channel or redirects to the origin, zero regeneration.
+  // Intended runtime = the explicit override or the human's default; exact for the
+  // natural-peer class (their channels are always-on launchd routers, so the
+  // only-live-session fallback cannot silently diverge outside a seconds-wide crash
+  // window). Initiative (answered / no inbound / ARM_TTL-stale) passes untouched.
+  if (
+    !deps.originGuardBypass &&
+    originGuardEnabled(env) &&
+    caller.intelligence === 'artificial' &&
+    peer.intelligence === 'natural'
+  ) {
+    const armed = armedOrigin(caller.personality, peer.personality, { env })
+    const intendedRt = runtime ?? peer.runtime
+    if (armed && armed.rt !== intendedRt) {
+      const held = holdSend(
+        caller.address,
+        { personality, runtime, message, topic, attachments: attachmentsResult.value },
+        armed,
+        intendedRt,
+        { env },
+      )
+      return err(buildHoldNote(held, { env }))
+    }
   }
 
   // Telegram sender policy — INTENDED channel (explicit override, or the target's

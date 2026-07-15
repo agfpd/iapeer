@@ -59,6 +59,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 | Command | What it does |
 |---|---|
 | `send <target> (--message <text> \| --message-file <f\|->) [--from <id>] [--runtime <r>] [--attachment <path>]… [--topic <t>]` | Manual IAP send over the same path as `send_to_peer`. |
+| `confirm-send <id> [--runtime <rt>]` | Deliver a held send ([origin guard](18-origin-guard.md)): as addressed, or `--runtime` redirects it to the origin channel. No re-send of the message text. |
 
 `--message-file -` reads the body from stdin. `--attachment` is repeatable. `--from` defaults to the current folder's peer identity.
 

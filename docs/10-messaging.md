@@ -85,3 +85,7 @@ A peer with the wake policy `wake_policy: "ephemeral"` in its profile works diff
 - **`iapeer self-done`** — a self-call by a worker that has nothing to send: it frees the queue for the next task without waking anyone. The doctrine is "nothing to send — `self-done` instead of an empty reply".
 
 This model keeps a stream of one-off tasks orderly: one worker per task, with no accumulation of parallel sessions and no empty wakes of the recipient.
+
+## Replying to a human: the origin guard
+
+An agent's reply to a human must land in the channel the human wrote from. The router enforces this mechanically: while the human's latest message to that agent is unanswered, a send targeting a *different* channel is held for a one-command confirmation (`iapeer confirm-send <id>`) instead of being delivered. Same-channel replies and initiative pass with no friction. The full contract — the armed-pair model, TTLs, `confirm-send` — is [18 — Origin guard](18-origin-guard.md).
