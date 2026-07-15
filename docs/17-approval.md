@@ -146,3 +146,55 @@ The approval surface is served on both daemon listeners under `/fleet/v1`, same 
 ## Compatibility
 
 Additive within `/fleet/v1` (docs/15): the `approval-*` endpoints and `ev` kinds grow the surface without a version bump. A pre-approval daemon simply omits `approval_mode` from the snapshot and serves no `/approvals` endpoints; a client feature-detects by the presence of the field / a `200` from `GET /fleet/v1/approvals`.
+
+## What an EMPTY broker does and does not mean
+
+Diagnosed live on 15.07.2026 after an owner-visible false alarm; recorded here because the
+misreading is natural and cost three people an incident.
+
+**An empty `/fleet/v1/approvals` is the NORMAL state of a yolo fleet, not a symptom.** In
+`yolo` the supervisor auto-presses Yes for the known classes (`dangerous-rm`,
+`command-approval`) and the broker is deliberately uninvolved — there is no human decision to
+route, so `approvals.log` correctly stays silent. Only `gated` peers ever reach the broker.
+
+**A circuit breaker fires even under `--dangerously-skip-permissions`** — that is what makes it
+a breaker. Seeing a modal on a bypassed peer is not evidence that the bypass failed. The live
+sample: `Dangerous rm operation on working directory or its ancestor: /tmp/codex-probe` on a
+peer launched with the bypass flag; the supervisor auto-confirmed 11 s later (nag-poll
+cadence) and the tool completed 180 ms after that. Nothing hung, nothing leaked.
+
+A useful narrowing when diagnosing one of these: under `bypassPermissions` the permission
+engine auto-allows **every** `ask` decision except reasons beginning `Dangerous rm operation` /
+`Dangerous rmdir operation` (established from the 2.1.201 engine). So a live modal on a
+bypassed peer is almost certainly that one class — the "the bypass broke" hypothesis can be
+dropped before investigating it.
+
+**The yolo auto-confirm IS audited, but only off-surface.** The supervisor writes
+`[supervisor] AUTO-CONFIRM <taxonomy> identity=<id> ts=<…> <detail>` to its own stderr log
+(`~/.iapeer/state/supervisor/<identity>.log`). That line is **not** in `approvals.log`, **not**
+in the Fleet API, **not** in the SSE stream, and therefore invisible to tray / telegram / web.
+A destructive auto-approval can only be found by knowing which file to grep — and by knowing
+there is a reason to grep it. Measured frequency: 9 auto-confirms across 10 days over the whole
+real fleet (8 `dangerous-rm`, 1 `command-approval`). Surfacing them is an open proposal
+(a `notices` kind, docs/19), pending the owner's call on threshold: in `yolo` he explicitly
+chose auto-Yes, so a card per auto-confirm may be exactly the noise he opted out of.
+
+**The runtime's OWN notifications are outside this contour.** Claude Code pushes a native
+"Claude needs your permission: Bash …" notification to the owner's phone when a modal appears —
+including modals this contour auto-resolves seconds later. It is not ours (no `Notification`
+hook exists in any settings here), we do not control it, and it is indistinguishable from a
+real approval request. An owner-visible push therefore does NOT imply the broker saw anything.
+Whether `preferredNotifChannel` (a real Claude Code setting) can silence this class is
+**unverified**.
+
+## Known unverified area: modals from a child runtime process
+
+A peer's turn can spawn its own `claude` / `codex` child process (e.g. `claude -p …` inside a
+Bash call). Such a child does **not** carry the peer's launch flags and its modal does **not**
+render in the peer's pane — so the supervisor's nag-watch, the breaker path and the broker are
+all structurally blind to it.
+
+This is **not known to be a problem and not known to be safe: it has never been tested.** It is
+recorded here so nobody later concludes the contour covers it. The scenario is real — it
+occurred on this host on 15.07 during live acceptance (`claude --model fable -p ping` fired
+from a peer's turn). Worth probing when there is a reason; not measured to date.
