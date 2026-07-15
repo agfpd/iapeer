@@ -273,13 +273,15 @@ describe('muteWatchTick', () => {
     expect(n.summary).toBe('probe · claude — rate_limit (Fable 5)')
   })
 
-  test('a second sweep over the SAME evidence folds instead of raising again', () => {
+  // The overlapping sweep window re-reads the same line by design — that must be invisible
+  // to the owner: one card, and a count that still says ONE refusal happened.
+  test('a second sweep over the SAME evidence neither raises again nor inflates count', () => {
     const paths = withTranscript()
     const board = new NoticeBoard({})
     expect(muteWatchTick({ ...paths, board, peerByCwd: () => 'probe' }, 0).raised).toBe(1)
     expect(muteWatchTick({ ...paths, board, peerByCwd: () => 'probe' }, 0).raised).toBe(0)
     expect(board.list()).toHaveLength(1)
-    expect(board.list()[0]!.count).toBe(2)
+    expect(board.list()[0]!.count).toBe(1)
   })
 
   test('a throwing dependency is REPORTED, never propagated out of the tick', () => {

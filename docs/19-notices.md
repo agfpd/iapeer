@@ -117,10 +117,10 @@ resets, the plan) — data, never our interpretation of the cause.
 | `summary` | string | one line, e.g. `boris · claude — rate_limit (Fable 5)` |
 | `content` | string | verbatim (claude) / rendered from typed fields (codex) |
 | `sessionId` | string? | correlates with the on-disk transcript |
-| `createdMs` | number | first detection |
-| `lastMs` | number | most recent detection folded in |
+| `createdMs` | number | first occurrence |
+| `lastMs` | number | latest OCCURRENCE (not the latest sweep that re-read it) |
 | `expiresMs` | number | TTL boundary |
-| `count` | number | detections folded into this notice (≥1) — render as `×N` |
+| `count` | number | distinct OCCURRENCES folded in (≥1) — how many times the peer actually hit the wall. Render as `×N`. The sweep window overlaps on purpose, so the same runtime event is re-read across passes; the board discriminates on the event's own timestamp, and a re-read never bumps this. |
 
 ### Snapshot
 
@@ -155,6 +155,12 @@ A mute peer re-emits its error on **every** attempted turn. So a notice carries 
 `personality | runtime | kind | errorType | model` — and while a notice with that key is live,
 a repeat detection only bumps `count` and `lastMs`: **no new id, no new log line, no new SSE
 event**. The owner sees one card saying `×7`, not seven cards.
+
+`count` means **occurrences, not sweeps**. The sweep window deliberately overlaps (so an event
+landing between two passes is never missed), which means the same transcript line is re-read on
+the next pass. The board therefore discriminates on the runtime event's OWN timestamp: a re-read
+of an already-counted event folds silently and bumps nothing. Without that, two real refusals
+would render as `×3` — a number the owner cannot check and that we would have made up.
 
 When the TTL passes (`IAPEER_NOTICE_TTL_MS`, default 1 h) the notice expires silently. If the
 peer is still broken, the next detection raises a **fresh** notice — a deliberate periodic

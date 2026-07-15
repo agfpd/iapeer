@@ -367,6 +367,9 @@ export function muteWatchTick(deps: MuteWatchDeps, sinceMs: number): { raised: n
         resetsAtMs: d.resetsAtMs,
         content: d.content,
         sessionId: d.sessionId,
+        // The runtime event's OWN timestamp — lets the board tell a new occurrence from the
+        // same line re-read by the deliberately-overlapping sweep window.
+        eventAtMs: d.atMs,
         summary: `${d.personality} · ${d.runtime} — ${d.errorType}${d.model ? ` (${d.model})` : ''}`,
       })
       if (!deduped) raised += 1

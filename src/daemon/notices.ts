@@ -51,18 +51,27 @@ export interface NoticeInput {
   content: string
   /** The session that hit it (correlation with the transcript on disk). */
   sessionId?: string
+  /** When the underlying runtime event happened (the transcript line's own timestamp) —
+   *  NOT when we swept. This is what makes `count` mean OCCURRENCES rather than sweeps:
+   *  the sweep window deliberately overlaps, so the same line is re-read across passes.
+   *  Absent → every raise counts (the caller has no event clock to dedup against). */
+  eventAtMs?: number
 }
 
 export interface Notice extends NoticeInput {
   id: string
   summary: string
   dedupKey: string
+  /** First occurrence. */
   createdMs: number
-  /** Last time this same condition was re-detected (dedup bump). */
+  /** Latest OCCURRENCE (not the latest sweep that re-read it). */
   lastMs: number
   expiresMs: number
-  /** How many times the condition was detected while this notice stayed live (≥1). */
+  /** Distinct occurrences folded into this notice (≥1) — how many times the peer actually
+   *  hit the wall, which is what "×N" claims to the owner. */
   count: number
+  /** The newest event timestamp already counted — the overlap discriminator. */
+  lastEventMs?: number
 }
 
 export interface NoticeBoardOptions {
@@ -122,8 +131,16 @@ export class NoticeBoard {
     const dedupKey = noticeDedupKey(input)
     const existing = this.live.get(dedupKey)
     if (existing) {
-      existing.count += 1
-      existing.lastMs = nowMs
+      // Same condition. Is this a NEW occurrence, or the same runtime event re-read by an
+      // overlapping sweep? Counting the latter would inflate "×N" into a claim the owner
+      // cannot check — 2 real refusals rendering as ×3. Only a strictly newer event counts.
+      const at = input.eventAtMs
+      const isNewOccurrence = at === undefined || existing.lastEventMs === undefined || at > existing.lastEventMs
+      if (isNewOccurrence) {
+        existing.count += 1
+        existing.lastMs = nowMs
+        if (at !== undefined) existing.lastEventMs = at
+      }
       return { notice: existing, deduped: true }
     }
     const id = `n${++this.counter}`
@@ -137,6 +154,7 @@ export class NoticeBoard {
       lastMs: nowMs,
       expiresMs: nowMs + this.ttlMs,
       count: 1,
+      lastEventMs: input.eventAtMs,
     }
     this.live.set(dedupKey, notice)
     appendNoticeEvent(

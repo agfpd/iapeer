@@ -65,6 +65,39 @@ describe('NoticeBoard', () => {
     expect(lines[0]).toContain('ev=notice-raised')
   })
 
+  // Found live on 15.07: the sweep window overlaps on purpose, so the SAME transcript line is
+  // re-read across passes. Counting those would render 2 real refusals as "×3" — a claim the
+  // owner cannot check. count must mean OCCURRENCES.
+  test('the same runtime event re-read by an overlapping sweep does NOT inflate count', () => {
+    let t = 1_000
+    const board = new NoticeBoard({ now: () => t })
+    board.raise({ ...base, eventAtMs: 500 })
+    t = 2_000
+    board.raise({ ...base, eventAtMs: 500 }) // same line, next sweep
+    t = 3_000
+    board.raise({ ...base, eventAtMs: 500 }) // and again
+    expect(board.list()[0]!.count).toBe(1)
+    expect(board.list()[0]!.lastMs).toBe(1_000) // no phantom "latest occurrence" either
+  })
+
+  test('a genuinely NEW occurrence does bump count', () => {
+    let t = 1_000
+    const board = new NoticeBoard({ now: () => t })
+    board.raise({ ...base, eventAtMs: 500 })
+    t = 2_000
+    board.raise({ ...base, eventAtMs: 500 }) // re-read — ignored
+    board.raise({ ...base, eventAtMs: 1_900 }) // a real second refusal
+    expect(board.list()[0]!.count).toBe(2)
+    expect(board.list()[0]!.lastMs).toBe(2_000)
+  })
+
+  test('an older event than the one already counted is never counted (out-of-order sweep)', () => {
+    const board = new NoticeBoard({})
+    board.raise({ ...base, eventAtMs: 5_000 })
+    board.raise({ ...base, eventAtMs: 4_000 })
+    expect(board.list()[0]!.count).toBe(1)
+  })
+
   test('a DIFFERENT wall on the same peer is a different notice (model is part of the key)', () => {
     const board = new NoticeBoard({})
     board.raise(base)
