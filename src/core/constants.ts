@@ -96,6 +96,12 @@ export function isIntelligenceAllowedForRuntime(runtime: string, intelligence: I
 // This set gates always-on launchd plist generation (src/launch/launchd.ts).
 const INFRA_RUNTIMES = new Set(['notifier', 'telegram', 'voicetalk', 'web'])
 
+/** The infra runtimes as a list — for callers that must ENUMERATE the always-on
+ *  plist candidates of a personality (H4 detector, remove teardown, update
+ *  re-cycle walk the per-runtime plist scheme `com.iapeer.<p>.<rt>.plist`).
+ *  Same membership as isInfraRuntime — single source, they cannot drift. */
+export const INFRA_RUNTIME_LIST: readonly string[] = [...INFRA_RUNTIMES]
+
 export function isInfraRuntime(runtime: string): boolean {
   return INFRA_RUNTIMES.has(runtime)
 }

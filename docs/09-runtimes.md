@@ -43,6 +43,8 @@ These are long-lived router processes, not AI. They run continuously under launc
 
 Infrastructure peers' plists, unlike the daemon's plist, are **loaded automatically** on `iapeer create --runtime telegram|notifier` and on `iapeer onboard` (unless `--no-bootstrap` is passed). So no separate `launchctl bootstrap` is needed for them.
 
+**Plist scheme (multi-infra).** One personality can carry several always-on channels (e.g. a human peer with both a Telegram bridge and a web console). Each (personality, runtime) pair resolves to its own launchd label: a **legacy base plist** `com.iapeer.<personality>` stays the channel of the runtime it already holds (no forced migration — existing single-channel hosts keep their plists untouched), while every new install gets the **per-runtime plist** `com.iapeer.<personality>.<runtime>`. Both channels are held by launchd KeepAlive simultaneously and independently; `stop`/`start <peer> <runtime>` bootout/bootstrap exactly that runtime's label, `remove` tears down **all** the personality's plists. The suffixed label can't collide with anything: peer names can't contain dots.
+
 ## Several runtimes on a peer
 
 A peer profile has two runtime fields: `runtimes` (all the peer can be present on) and `default_runtime` (the primary — where messages route and which comes up first). Extending the options and switching the primary runtime are different commands.

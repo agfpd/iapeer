@@ -46,7 +46,9 @@ describe('launchctlBootstrap guards', () => {
     const plist = installAlwaysOnPlist({ personality: 'timer', runtime: 'notifier', cwd, runtimeBin: bin, env })
     const r = launchctlBootstrap('timer', plist, env)
     expect(r.state).toBe('skipped-sandbox')
-    expect(r.label).toBe('com.iapeer.timer')
+    // multi-infra: a fresh personality installs the per-runtime plist, and the
+    // bootstrap label is derived from the plist basename (label = file stem)
+    expect(r.label).toBe('com.iapeer.timer.notifier')
   })
 
   test('absent/unreadable plist → refused-foreign (not provably ours)', () => {

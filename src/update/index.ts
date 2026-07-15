@@ -42,8 +42,7 @@ import {
   cycleDaemon,
   cycleLaunchdJob,
   isFoundationOwnedPlist,
-  launchdLabel,
-  launchdPlistPath,
+  resolveAlwaysOnTarget,
   type DaemonRestartResult,
   type LaunchdJobCycleResult,
 } from '../launch/launchd.ts'
@@ -261,13 +260,18 @@ export function recycleFoundationOwnedInfraJobs(env: NodeJS.ProcessEnv = process
   const out: InfraJobRecycleResult[] = []
   const index = readPeersIndex({ env })
   for (const peer of index.peers) {
-    const runtime = (isInfraRuntime(peer.runtime) ? peer.runtime : peer.runtimes.find(isInfraRuntime)) ?? ''
-    if (!runtime) continue
-    const plist = launchdPlistPath(peer.personality, env)
-    if (!isFoundationOwnedPlist(plist)) continue
-    const label = launchdLabel(peer.personality)
-    const r = cycleLaunchdJob(label, plist, env)
-    out.push({ personality: peer.personality, runtime, label, state: r.state, detail: r.detail })
+    // Multi-infra (0.4.88): a personality can hold SEVERAL always-on channels
+    // (e.g. arthur: telegram on the legacy base plist + web on the per-runtime
+    // one) — re-cycle EVERY declared infra runtime's job, not just the first.
+    // resolveAlwaysOnTarget is the same scheme authority install/stop/start use;
+    // an absent plist reads as not-foundation-owned → skipped.
+    const infraRuntimes = [...new Set([peer.runtime, ...peer.runtimes])].filter(isInfraRuntime)
+    for (const runtime of infraRuntimes) {
+      const target = resolveAlwaysOnTarget(peer.personality, runtime, env)
+      if (!isFoundationOwnedPlist(target.path)) continue
+      const r = cycleLaunchdJob(target.label, target.path, env)
+      out.push({ personality: peer.personality, runtime, label: target.label, state: r.state, detail: r.detail })
+    }
   }
   return out
 }

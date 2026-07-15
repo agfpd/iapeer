@@ -30,7 +30,7 @@ import {
 } from '../storage/index.ts'
 import { provisionPeer, type ProvisionResult } from '../provision/index.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
-import { launchctlBootstrap, launchdPlistPath, type BootstrapResult } from '../launch/launchd.ts'
+import { launchctlBootstrap, resolveAlwaysOnTarget, type BootstrapResult } from '../launch/launchd.ts'
 import { runtimeSelfConfig, type SelfConfigResult } from '../runtime/index.ts'
 import type { Intelligence } from '../core/constants.ts'
 
@@ -568,7 +568,14 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
     } else if (opts.bootstrap !== false) {
       // (2) AUTO-bootstrap (contract Фаза §5): load the plist NOW instead of
       //     write-and-wait. Fleet-safe / idempotent / sandbox-skipped inside.
-      bootstrapped = launchctlBootstrap(provisioned.personality, launchdPlistPath(provisioned.personality, env), env)
+      // Multi-infra: load the plist provision actually installed for THIS runtime
+      // (legacy base or per-runtime suffixed — resolveAlwaysOnTarget is stable
+      // post-install, so this is the same file installAlwaysOnPlist wrote).
+      bootstrapped = launchctlBootstrap(
+        provisioned.personality,
+        resolveAlwaysOnTarget(provisioned.personality, provisioned.runtime, env).path,
+        env,
+      )
       if (bootstrapped.state === 'failed' || bootstrapped.state === 'refused-foreign') {
         opts.warn?.(`bootstrap ${bootstrapped.state}: ${bootstrapped.detail ?? ''}`)
       }

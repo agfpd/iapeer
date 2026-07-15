@@ -26,7 +26,7 @@ import {
 // KeepAlive, so creating one installs its always-on plist. Imported from the
 // launchd module directly (not the launch barrel) to keep the dependency surface
 // minimal — launchd.ts pulls only core/*, so identity → launch introduces no cycle.
-import { installAlwaysOnPlist, installedPlistRuntime } from '../launch/launchd.ts'
+import { installAlwaysOnPlist } from '../launch/launchd.ts'
 import { buildProcessAddress } from '../core/socket.ts'
 import { IapError } from '../core/errors.ts'
 import {
@@ -623,30 +623,19 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
   // and leaves no half-updated profile. Idempotent for our own (sentinel) plist.
   let intelligence = existing.intelligence
   if (isInfraRuntime(options.runtime)) {
-    // MULTI-INFRA BRIDGE: the always-on plist scheme is ONE per personality, so when the
-    // personality's plist is already OCCUPIED by ANOTHER infra runtime (arthur: telegram,
-    // now declaring web), installing here would clobber the live channel — and the
-    // installAlwaysOnPlist collision guard would fail the whole declaration. Instead:
-    // DECLARE the runtime (runtimes += <rt> below — identity `<rt>-<p>` resolves, delivery
-    // to a LIVE hosted session works) but leave the first channel's plist untouched. The
-    // new runtime's session is NOT launchd-owned until per-runtime plists (multi-infra)
-    // land — bring it up manually via `iapeer run-infra <p> <rt>` meanwhile.
-    const occupied = installedPlistRuntime(existing.personality, options.env)
-    if (occupied && occupied !== options.runtime) {
-      options.warn?.(
-        `always-on plist for "${existing.personality}" already holds runtime "${occupied}" — ` +
-          `"${options.runtime}" is DECLARED but gets no launchd plist (one plist per personality); ` +
-          `until per-runtime plists land, bring the session up manually: iapeer run-infra ${existing.personality} ${options.runtime}`,
-      )
-    } else {
-      installAlwaysOnPlist({
-        personality: existing.personality,
-        runtime: options.runtime,
-        cwd,
-        runtimeBin: options.runtimeBin,
-        env: options.env,
-      })
-    }
+    // MULTI-INFRA (0.4.88): installAlwaysOnPlist resolves the per-(personality,
+    // runtime) target itself — the legacy base plist when it already carries this
+    // runtime, else the suffixed `com.iapeer.<p>.<rt>`. A second infra channel
+    // (arthur: telegram, now declaring web) therefore gets its OWN plist and the
+    // first channel's plist is untouched — the 0.4.87 declare-without-plist bridge
+    // (manual `run-infra` bring-up) is retired.
+    installAlwaysOnPlist({
+      personality: existing.personality,
+      runtime: options.runtime,
+      cwd,
+      runtimeBin: options.runtimeBin,
+      env: options.env,
+    })
     // Re-provision honors an EXPLICIT nature (a manifest-declared absent service bot survives
     // update-runtime re-provision), else the runtime default (the legacy vocab-flip this fix
     // preserved). resolvedIntelligence validates the explicit against the runtime's allowed set.

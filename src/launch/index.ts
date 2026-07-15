@@ -55,6 +55,8 @@ export {
   launchdLabel,
   launchAgentsDir,
   launchdPlistPath,
+  resolveAlwaysOnTarget,
+  existingAlwaysOnPlists,
   renderLaunchdPlist,
   installAlwaysOnPlist,
   installedPlistRuntime,
@@ -69,6 +71,8 @@ export {
   IAPEER_PLIST_OWNER_KEY,
 } from './launchd.ts'
 export type {
+  AlwaysOnTarget,
+  PeerPlistEntry,
   LaunchdPlistSpec,
   InstallAlwaysOnPlistOptions,
   BootstrapResult,

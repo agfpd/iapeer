@@ -16,7 +16,7 @@ import {
   RUNTIME_PACKAGES,
 } from './deploy.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
-import { launchdPlistPath } from '../launch/index.ts'
+import { resolveAlwaysOnTarget } from '../launch/index.ts'
 
 const roots: string[] = []
 function mkTmp(): string {
@@ -140,7 +140,8 @@ describe('deployRuntime (declared-set, mode a)', () => {
       expect(p.selfConfig).toBe('configured')
       expect(p.bootstrap).toBe('skipped-sandbox') // sandbox: not loaded
       expect(findPeer(readPeersIndex({ env }), p.personality)).not.toBeNull()
-      expect(existsSync(launchdPlistPath(p.personality, env))).toBe(true)
+      // multi-infra scheme: a fresh personality gets the per-runtime plist
+      expect(existsSync(resolveAlwaysOnTarget(p.personality, 'notifier', env).path)).toBe(true)
     }
   })
 

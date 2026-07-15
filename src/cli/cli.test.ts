@@ -353,6 +353,39 @@ describe('remove (registry record via the locked writer)', () => {
     expect(existsSync(plist)).toBe(true) // foreign plist left intact even under --force (H4)
     expect(findPeer(readPeersIndex({ env: e }), 'ppfleet2')).toBeNull()
   })
+
+  // MULTI-INFRA (0.4.88): a personality can hold SEVERAL always-on plists — the legacy
+  // base (first channel) + per-runtime suffixed ones. remove must tear down ALL of them
+  // (a forgotten one crash-loops run-infra against the deleted record), and a
+  // suffixed-only layout must NOT read as foreign (it is structurally ours).
+  const writeSuffixedPlist = (personality: string, runtime: string, e: NodeJS.ProcessEnv): string => {
+    const p = join(e.IAPEER_LAUNCHAGENTS_DIR!, `com.iapeer.${personality}.${runtime}.plist`)
+    writeFileSync(p, '<?xml version="1.0"?><plist><dict><key>com.iapeer.managed</key><true/></dict></plist>')
+    return p
+  }
+
+  test('MULTI-INFRA remove: base + suffixed plists are BOTH torn down (per-label outcome)', async () => {
+    await register('duo', 'telegram', 'natural')
+    const e = env()
+    const basePlist = writePlist('duo', e, true) // legacy base channel (telegram)
+    const webPlist = writeSuffixedPlist('duo', 'web', e) // second channel (web)
+    const o = await removePeerCli('duo', { env: e })
+    expect(o.action).toBe('removed')
+    expect(o.plistTeardown).toContain('com.iapeer.duo:') // per-label notes
+    expect(o.plistTeardown).toContain('com.iapeer.duo.web:')
+    expect(existsSync(basePlist)).toBe(false)
+    expect(existsSync(webPlist)).toBe(false) // no orphan → no KeepAlive crash-loop
+  })
+
+  test('MULTI-INFRA: a suffixed-only layout is OURS, not foreign — remove proceeds', async () => {
+    await register('webonly', 'web', 'natural')
+    const e = env()
+    const webPlist = writeSuffixedPlist('webonly', 'web', e) // no base plist at all
+    const o = await removePeerCli('webonly', { env: e })
+    expect(o.action).toBe('removed') // NOT refused-foreign-launchd (the pre-0.4.88 base-keyed check would refuse)
+    expect(o.plistTeardown).toContain('com.iapeer.webonly.web:')
+    expect(existsSync(webPlist)).toBe(false)
+  })
 })
 
 describe('send validation', () => {

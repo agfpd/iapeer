@@ -12,6 +12,7 @@ import { join } from 'path'
 import {
   bootstrapJobCore,
   cycleDaemonCore,
+  existingAlwaysOnPlists,
   getAdapter,
   installAlwaysOnPlist,
   installedPlistRuntime,
@@ -20,6 +21,7 @@ import {
   launchdLabel,
   launchdPlistPath,
   renderLaunchdPlist,
+  resolveAlwaysOnTarget,
   resolveExecutable,
   type LaunchdPlistSpec,
 } from './index.ts'
@@ -147,9 +149,12 @@ describe('installAlwaysOnPlist ↔ isLaunchdManaged round-trip', () => {
       env,
     })
 
-    expect(path).toBe(launchdPlistPath('timer', env))
+    // Multi-infra scheme: a FRESH personality (no legacy base plist) gets the
+    // per-runtime suffixed plist `com.iapeer.<p>.<rt>.plist`.
+    expect(path).toBe(join(laDir, 'com.iapeer.timer.notifier.plist'))
     expect(existsSync(path)).toBe(true)
-    // generator and H4 detector agree (shared launchdLabel/launchAgentsDir)
+    // generator and H4 detector agree (shared scheme) — a suffixed-only layout
+    // (no base plist) STILL reads launchd-managed.
     expect(isLaunchdManaged('timer', env)).toBe(true)
     expect(isLaunchdManaged('nobody', env)).toBe(false)
     // the installed file is a valid plist
@@ -273,13 +278,14 @@ describe('installAlwaysOnPlist collision guard (H4 — shared com.iapeer.* names
   })
 })
 
-// The plist scheme is ONE per personality (com.iapeer.<p>.plist; the runtime rides only
-// in ProgramArguments/env). A SECOND infra runtime for the same personality (arthur:
-// telegram already installed, now web) would OVERWRITE the first channel's plist and
-// kill that channel on the next bootout/reboot — the exact silent-clobber class the
-// H4 guard exists for, but INSIDE the foundation's own sentinel. Fail-loud instead.
-describe('installAlwaysOnPlist multi-infra collision guard (one plist per personality)', () => {
-  test('REFUSES a second infra runtime over the first channel plist; file untouched; installedPlistRuntime reads the occupant', () => {
+// MULTI-INFRA per-runtime plists (0.4.88): a personality can hold SEVERAL always-on
+// channels. Resolution per (personality, runtime): the LEGACY base plist
+// (com.iapeer.<p>) is the target iff it exists, is ours and already carries THIS
+// runtime (default channel, no forced migration); every other case — base absent,
+// base occupied by another runtime — resolves to the suffixed com.iapeer.<p>.<rt>.
+// The pre-0.4.88 fail-loud "one plist per personality" refusal is retired.
+describe('installAlwaysOnPlist multi-infra (per-runtime plists)', () => {
+  test('second infra runtime gets its OWN suffixed plist; the legacy base channel survives byte-for-byte', () => {
     const root = mkTmp()
     const laDir = join(root, 'LaunchAgents')
     const env = { IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_ROOT: join(root, 'iapeer') } as NodeJS.ProcessEnv
@@ -289,18 +295,61 @@ describe('installAlwaysOnPlist multi-infra collision guard (one plist per person
       path: '/usr/bin:/bin',
       env,
     }
-    const path = installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'telegram' })
-    const telegramXml = readFileSync(path, 'utf8')
-    expect(installedPlistRuntime('arthur', env)).toBe('telegram') // occupant visible to callers
-
-    // a SECOND infra runtime for the same personality → fail-loud, never overwrite
-    expect(() => installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'web' })).toThrow(
-      /already holds the always-on "telegram"/,
+    // LEGACY layout: a pre-0.4.88 BASE plist already holds arthur's telegram channel.
+    mkdirSync(laDir, { recursive: true })
+    writeFileSync(
+      launchdPlistPath('arthur', env),
+      renderLaunchdPlist({
+        ...baseSpec,
+        label: 'com.iapeer.arthur',
+        environment: { ...baseSpec.environment, PEER_PERSONALITY: 'arthur', PEER_RUNTIME: 'telegram', PEER_IDENTITY: 'telegram-arthur' },
+      }),
     )
-    expect(readFileSync(path, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
+    expect(installedPlistRuntime('arthur', env)).toBe('telegram') // base occupant visible
 
-    // SAME runtime re-install stays idempotent (the guard keys on runtime mismatch)
-    expect(() => installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'telegram' })).not.toThrow()
+    // (1) SAME runtime → resolves to the legacy base (no forced migration), idempotent
+    const tgTarget = resolveAlwaysOnTarget('arthur', 'telegram', env)
+    expect(tgTarget).toEqual({ label: 'com.iapeer.arthur', path: launchdPlistPath('arthur', env), scheme: 'legacy-base' })
+    const tgPath = installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'telegram' })
+    expect(tgPath).toBe(launchdPlistPath('arthur', env)) // rewrote the base in place (still the telegram channel)
+    // baseline for the byte-identity check below: the base AFTER its own re-install
+    const telegramXml = readFileSync(launchdPlistPath('arthur', env), 'utf8')
+    expect(telegramXml).toContain('<string>com.iapeer.arthur</string>') // Label stays the base one
+
+    // (2) SECOND infra runtime → its OWN suffixed plist, base untouched
+    const webPath = installAlwaysOnPlist({ ...base, personality: 'arthur', runtime: 'web' })
+    expect(webPath).toBe(join(laDir, 'com.iapeer.arthur.web.plist'))
+    expect(plutilLint(webPath).ok).toBe(true)
+    expect(readFileSync(webPath, 'utf8')).toContain('<string>com.iapeer.arthur.web</string>') // Label = suffixed
+    expect(readFileSync(launchdPlistPath('arthur', env), 'utf8')).toBe(telegramXml) // first channel byte-identical
+
+    // (3) both channels enumerate; resolution is STABLE post-install
+    expect(existingAlwaysOnPlists('arthur', env).map(p => p.label).sort()).toEqual([
+      'com.iapeer.arthur',
+      'com.iapeer.arthur.web',
+    ])
+    expect(resolveAlwaysOnTarget('arthur', 'web', env).path).toBe(webPath)
+    expect(resolveAlwaysOnTarget('arthur', 'telegram', env).scheme).toBe('legacy-base')
+  })
+
+  test('FRESH personality (no base) installs per-runtime plists for BOTH channels; H4 detects each layout', () => {
+    const root = mkTmp()
+    const laDir = join(root, 'LaunchAgents')
+    const env = { IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_ROOT: join(root, 'iapeer') } as NodeJS.ProcessEnv
+    const base = {
+      cwd: join(root, 'peer-nova'),
+      entrypointArgv: ['/path/to/bun', '/pkg/src/launch/launchdRun.ts'],
+      path: '/usr/bin:/bin',
+      env,
+    }
+    const tg = installAlwaysOnPlist({ ...base, personality: 'nova', runtime: 'telegram' })
+    const web = installAlwaysOnPlist({ ...base, personality: 'nova', runtime: 'web' })
+    expect(tg).toBe(join(laDir, 'com.iapeer.nova.telegram.plist'))
+    expect(web).toBe(join(laDir, 'com.iapeer.nova.web.plist'))
+    expect(existsSync(launchdPlistPath('nova', env))).toBe(false) // no base plist is ever created anew
+    expect(isLaunchdManaged('nova', env)).toBe(true) // suffixed-only layout is launchd-managed (H4)
+    // idempotent re-install of a suffixed plist
+    expect(() => installAlwaysOnPlist({ ...base, personality: 'nova', runtime: 'web' })).not.toThrow()
   })
 
   test('installedPlistRuntime: absent plist / foreign plist → undefined', () => {
@@ -311,6 +360,27 @@ describe('installAlwaysOnPlist multi-infra collision guard (one plist per person
     expect(installedPlistRuntime('nobody', env)).toBeUndefined() // no plist
     writeFileSync(launchdPlistPath('boris', env), foreignPpPlist) // PP-owned, no sentinel
     expect(installedPlistRuntime('boris', env)).toBeUndefined() // foreign → not ours to read
+  })
+
+  test('FOREIGN base plist (persistent-peer) → install of ANY runtime refuses; foreign file at the suffixed path refuses too', () => {
+    const root = mkTmp()
+    const laDir = join(root, 'LaunchAgents')
+    mkdirSync(laDir, { recursive: true })
+    const env = { IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_ROOT: join(root, 'iapeer') } as NodeJS.ProcessEnv
+    const base = {
+      cwd: join(root, 'peer-boris'),
+      entrypointArgv: ['/path/to/bun', '/pkg/src/launch/launchdRun.ts'],
+      path: '/usr/bin:/bin',
+      env,
+    }
+    // foreign BASE → the whole personality is off-limits (never a second manager)
+    writeFileSync(launchdPlistPath('boris', env), foreignPpPlist)
+    expect(() => installAlwaysOnPlist({ ...base, personality: 'boris', runtime: 'web' })).toThrow(/not foundation-managed/)
+    // foreign file squatting the SUFFIXED path → refused as well
+    writeFileSync(join(laDir, 'com.iapeer.mira.web.plist'), foreignPpPlist)
+    expect(() =>
+      installAlwaysOnPlist({ ...base, cwd: join(root, 'peer-mira'), personality: 'mira', runtime: 'web' }),
+    ).toThrow(/not foundation-managed/)
   })
 })
 

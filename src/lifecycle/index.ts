@@ -18,6 +18,7 @@ import { join } from 'path'
 import { spawnSync } from 'child_process'
 import * as lockfile from 'proper-lockfile'
 import {
+  INFRA_RUNTIME_LIST,
   STATE_DIR,
   LOGS_DIR,
   isRuntime,
@@ -131,18 +132,26 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * True iff the peer is launchd-managed: `~/Library/LaunchAgents/
- * com.iapeer.<personality>.plist` exists. A launchd peer is in the launchd
- * domain — KeepAlive owns its lifecycle — and the daemon must be READ-ONLY for
- * it (deliver to it if live, but never wake / reap / respawn / sweep it). This
- * is the hard guard against fighting launchd on the live fleet.
+ * True iff the peer is launchd-managed: ANY foundation-template always-on plist
+ * of the personality exists under ~/Library/LaunchAgents — the legacy base
+ * `com.iapeer.<personality>.plist` (also the shape a foreign persistent-peer
+ * plist takes) OR a per-runtime `com.iapeer.<personality>.<runtime>.plist`
+ * (multi-infra, 0.4.88). A launchd peer is in the launchd domain — KeepAlive
+ * owns its lifecycle — and the daemon must be READ-ONLY for it (deliver to it
+ * if live, but never wake / reap / respawn / sweep it). This is the hard guard
+ * against fighting launchd on the live fleet. H4 stays PERSONALITY-scoped: one
+ * launchd-held channel marks the whole peer launchd-owned, same as before.
  */
 export function isLaunchdManaged(personality: string, env: NodeJS.ProcessEnv = process.env): boolean {
   // Label + LaunchAgents dir come from the SAME helpers the plist generator uses
   // (launch/launchd.ts), so this H4 detector and installAlwaysOnPlist can never
-  // disagree on `com.iapeer.<personality>.plist`. IAPEER_LAUNCHAGENTS_DIR overrides
-  // the dir for tests (so an H4-guard test never touches ~/Library/LaunchAgents).
-  return existsSync(join(launchAgentsDir(env), `${launchdLabel(personality)}.plist`))
+  // disagree on the scheme. The per-runtime candidates are enumerated from
+  // INFRA_RUNTIME_LIST (the same set that gates plist generation) — cheap
+  // existsSync probes, no file reads, since this runs on every route/sweep.
+  // IAPEER_LAUNCHAGENTS_DIR overrides the dir for tests.
+  const dir = launchAgentsDir(env)
+  if (existsSync(join(dir, `${launchdLabel(personality)}.plist`))) return true
+  return INFRA_RUNTIME_LIST.some(rt => existsSync(join(dir, `${launchdLabel(personality)}.${rt}.plist`)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

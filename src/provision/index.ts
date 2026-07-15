@@ -24,7 +24,7 @@ import { IapError } from '../core/errors.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import { ensurePeerProfile } from '../identity/index.ts'
 import { readPeersIndex, upsertPeer } from '../registry/index.ts'
-import { launchdPlistPath, resolveExecutable } from '../launch/launchd.ts'
+import { resolveAlwaysOnTarget, resolveExecutable } from '../launch/launchd.ts'
 
 export interface ProvisionPeerOptions {
   /** The peer's working directory. personality defaults to normalized basename. */
@@ -222,7 +222,10 @@ export async function provisionPeer(opts: ProvisionPeerOptions): Promise<Provisi
     cwd,
     profilePath: peerProfilePath(cwd),
     intelligence: opts.intelligence ?? profile.intelligence,
-    plistPath: isInfraRuntime(opts.runtime) ? launchdPlistPath(profile.personality, env) : undefined,
+    // Multi-infra: the plist ensurePeerProfile actually installed for THIS runtime
+    // (legacy base or per-runtime suffixed) — resolveAlwaysOnTarget re-resolves to
+    // the same target the install used (resolution is stable once the file exists).
+    plistPath: isInfraRuntime(opts.runtime) ? resolveAlwaysOnTarget(profile.personality, opts.runtime, env).path : undefined,
     runtimeBin,
   }
 }

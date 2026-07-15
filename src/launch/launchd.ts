@@ -23,6 +23,7 @@ import {
   IAPEER_DIR,
   INFRA_RUNTIME_BIN_ENV,
   INFRA_RUNTIME_DEFAULT_BIN,
+  INFRA_RUNTIME_LIST,
   LAUNCHD_LABEL_PREFIX,
   isInfraRuntime,
   type Runtime,
@@ -82,12 +83,12 @@ function readPlistEnvVar(path: string, key: string): string | undefined {
 }
 
 /**
- * The PEER_RUNTIME baked into the personality's EXISTING foundation-owned always-on
- * plist, or undefined when there is no plist / it is foreign-owned / it carries no
- * runtime. The plist scheme is ONE per personality (`com.iapeer.<p>.plist` — the
- * runtime rides only in ProgramArguments/env), so this is how a caller detects that
- * the personality's always-on slot is already OCCUPIED by another infra runtime
- * (e.g. arthur's telegram) before asking for a second one (multi-infra collision).
+ * The PEER_RUNTIME baked into the personality's EXISTING foundation-owned BASE
+ * always-on plist (`com.iapeer.<p>.plist` — the legacy default channel), or
+ * undefined when there is no base plist / it is foreign-owned / it carries no
+ * runtime. This is the "who occupies the base label" probe resolveAlwaysOnTarget
+ * builds on: the base stays that runtime's channel (no forced migration), every
+ * other runtime resolves to its per-runtime suffixed plist.
  */
 export function installedPlistRuntime(personality: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const path = launchdPlistPath(personality, env)
@@ -134,6 +135,93 @@ export function launchAgentsDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export function launchdPlistPath(personality: string, env: NodeJS.ProcessEnv = process.env): string {
   return join(launchAgentsDir(env), `${launchdLabel(personality)}.plist`)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTI-INFRA plist scheme — per-(personality, runtime) resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AlwaysOnTarget {
+  /** The launchd Label — also the plist basename stem. */
+  label: string
+  /** The plist path under launchAgentsDir. */
+  path: string
+  /** Which scheme resolved: the legacy one-per-personality base plist
+   *  (`com.iapeer.<p>`) or the per-runtime suffixed one (`com.iapeer.<p>.<rt>`). */
+  scheme: 'legacy-base' | 'per-runtime'
+}
+
+/**
+ * Resolve the always-on plist TARGET for one (personality, runtime) pair — the
+ * single scheme authority every side shares (install / stop / start / remove /
+ * update re-cycle), so the writer and the operators can never disagree on which
+ * label holds which channel.
+ *
+ * Resolution: the LEGACY base plist (`com.iapeer.<p>`) is the personality's
+ * default channel — it is the target iff it EXISTS, is foundation-owned and
+ * carries THIS runtime (its baked PEER_RUNTIME matches). Every other case —
+ * base absent, base occupied by another infra runtime, base foreign — resolves
+ * to the per-runtime label `com.iapeer.<p>.<rt>`. So a legacy single-infra host
+ * keeps its base plists untouched (no forced migration), while every NEW install
+ * (and every second channel of a personality) gets its own plist and the two
+ * channels can be KeepAlive simultaneously.
+ *
+ * The suffixed label is structurally collision-free: NAME_RE forbids '.' in
+ * personalities and RUNTIME_RE forbids it in runtimes, so `com.iapeer.<p>.<rt>`
+ * can never spell another personality's base label (and the persistent-peer
+ * fleet only ever uses base-shaped labels).
+ *
+ * Resolution is STABLE across install→bootstrap→stop/start: installing a
+ * suffixed plist never flips a later resolve (the base check looks at the base
+ * file only), and re-resolving after an install sees the same target.
+ */
+export function resolveAlwaysOnTarget(
+  personality: string,
+  runtime: string,
+  env: NodeJS.ProcessEnv = process.env,
+): AlwaysOnTarget {
+  if (installedPlistRuntime(personality, env) === runtime) {
+    return { label: launchdLabel(personality), path: launchdPlistPath(personality, env), scheme: 'legacy-base' }
+  }
+  const label = `${launchdLabel(personality)}.${runtime}`
+  return { label, path: join(launchAgentsDir(env), `${label}.plist`), scheme: 'per-runtime' }
+}
+
+export interface PeerPlistEntry {
+  label: string
+  path: string
+  /** The runtime the plist holds: the base plist's baked PEER_RUNTIME (undefined
+   *  when unreadable/foreign), or the suffix of a per-runtime plist. */
+  runtime?: string
+  foundationOwned: boolean
+}
+
+/**
+ * Every EXISTING always-on plist of a personality under the foundation TEMPLATE
+ * scheme: the base `com.iapeer.<p>.plist` (legacy default channel — also the shape
+ * a foreign persistent-peer plist takes) plus the suffixed `com.iapeer.<p>.<rt>.plist`
+ * for each known infra runtime. The enumerator for personality-wide operations:
+ * the H4 detector mirror, remove's full teardown, and the update re-cycle.
+ */
+export function existingAlwaysOnPlists(personality: string, env: NodeJS.ProcessEnv = process.env): PeerPlistEntry[] {
+  const out: PeerPlistEntry[] = []
+  const basePath = launchdPlistPath(personality, env)
+  if (existsSync(basePath)) {
+    out.push({
+      label: launchdLabel(personality),
+      path: basePath,
+      runtime: readPlistEnvVar(basePath, 'PEER_RUNTIME'),
+      foundationOwned: isFoundationOwnedPlist(basePath),
+    })
+  }
+  for (const rt of INFRA_RUNTIME_LIST) {
+    const label = `${launchdLabel(personality)}.${rt}`
+    const path = join(launchAgentsDir(env), `${label}.plist`)
+    if (existsSync(path)) {
+      out.push({ label, path, runtime: rt, foundationOwned: isFoundationOwnedPlist(path) })
+    }
+  }
+  return out
 }
 
 // XML-escape a plist <string> text node. cwd / personality / PATH can carry '&',
@@ -538,12 +626,17 @@ export function launchctlBootstrap(
   plistPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): BootstrapResult {
-  const label = launchdLabel(personality)
+  // The label is the plist BASENAME stem — true for BOTH schemes (legacy base
+  // `com.iapeer.<p>.plist` and per-runtime `com.iapeer.<p>.<rt>.plist`), and the
+  // single derivation that cannot drift from the file actually being loaded.
+  // (Deriving from `personality` alone would mis-label a per-runtime plist.)
+  const base = plistPath.slice(plistPath.lastIndexOf('/') + 1)
+  const label = base.endsWith('.plist') ? base.slice(0, -'.plist'.length) : launchdLabel(personality)
   if (!isFoundationOwnedPlist(plistPath)) {
     return {
       state: 'refused-foreign',
       label,
-      detail: `${plistPath} is not foundation-owned (no ${IAPEER_PLIST_OWNER_KEY} sentinel) — refusing to launchctl bootstrap a foreign plist`,
+      detail: `${plistPath} (peer "${personality}") is not foundation-owned (no ${IAPEER_PLIST_OWNER_KEY} sentinel) — refusing to launchctl bootstrap a foreign plist`,
     }
   }
   // SANDBOX FAIL-CLOSED: `launchctl bootstrap gui/<uid>` is HOST-GLOBAL — it loads a
@@ -599,18 +692,24 @@ export interface InstallAlwaysOnPlistOptions {
  * entrypoint with PEER_* env + WorkingDirectory=cwd; logs land under
  * <cwd>/.iapeer/logs/<runtime>/.
  *
- * COLLISION GUARD (H4 — shared label namespace): the launchd Label is
- * com.iapeer.<personality> — keyed on PERSONALITY, not identity, and SHARED with the
+ * LABEL SCHEME (multi-infra, 0.4.88): the target label/path come from
+ * resolveAlwaysOnTarget — the legacy base `com.iapeer.<personality>` when that plist
+ * already carries this runtime (default channel, no forced migration), else the
+ * per-runtime `com.iapeer.<personality>.<runtime>`. Two infra channels of one
+ * personality (e.g. arthur: telegram + web) therefore hold two separate KeepAlive
+ * plists and never clobber each other.
+ *
+ * COLLISION GUARD (H4 — shared label namespace): the BASE label is SHARED with the
  * already-deployed persistent-peer fleet (~/Library/LaunchAgents/
  * com.iapeer.<persistent-peer>.plist run by start.sh). A personality collision (a
- * notifier peer named like a live PP peer) must NOT silently overwrite that foreign
- * plist — doing so would tear a live PP peer off launchd. So before writing we
- * REFUSE when a plist already sits at the target and is not foundation-owned
- * (isFoundationOwnedPlist: it lacks the sentinel renderLaunchdPlist embeds). The
- * label prefix alone cannot tell ours from theirs (PP is com.iapeer.* too); the
- * sentinel can. Re-installing our OWN plist (sentinel present) is allowed
- * (idempotent re-provision). The guard is checked FIRST, before any mkdir/write, so
- * a refusal leaves the filesystem untouched.
+ * notifier peer named like a live PP peer) must NOT put a second manager on that
+ * name — so we REFUSE when the base plist exists and is not foundation-owned
+ * (isFoundationOwnedPlist: it lacks the sentinel renderLaunchdPlist embeds), and
+ * equally refuse a foreign file squatting the resolved per-runtime path. The label
+ * prefix alone cannot tell ours from theirs (PP is com.iapeer.* too); the sentinel
+ * can. Re-installing our OWN plist (sentinel present) is allowed (idempotent
+ * re-provision). The guards run FIRST, before any mkdir/write, so a refusal leaves
+ * the filesystem untouched.
  */
 export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string {
   if (!isInfraRuntime(opts.runtime)) {
@@ -619,29 +718,33 @@ export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string 
     )
   }
   const env = opts.env ?? process.env
-  // Collision guard FIRST — never clobber a plist the foundation does not own.
-  const path = launchdPlistPath(opts.personality, env)
-  if (existsSync(path) && !isFoundationOwnedPlist(path)) {
+  // PERSONALITY COLLISION GUARD FIRST — never touch a personality whose BASE label is
+  // owned by a foreign manager (the live persistent-peer fleet writes base-shaped
+  // com.iapeer.<p> plists). Even though a second channel would land on the suffixed
+  // label, installing ANY foundation plist for a foreign-managed personality would
+  // put two managers on one peer name — refuse before any write.
+  const basePath = launchdPlistPath(opts.personality, env)
+  if (existsSync(basePath) && !isFoundationOwnedPlist(basePath)) {
     throw new IapError(
-      `refusing to overwrite launchd plist ${path}: label ${launchdLabel(opts.personality)} ` +
-        `is not foundation-managed (no ${IAPEER_PLIST_OWNER_KEY} sentinel) — a persistent-peer ` +
-        `or other manager owns it; rename the peer to avoid the com.iapeer.<personality> collision`,
+      `refusing to install an always-on plist for "${opts.personality}": label ` +
+        `${launchdLabel(opts.personality)} is not foundation-managed (no ${IAPEER_PLIST_OWNER_KEY} ` +
+        `sentinel) — a persistent-peer or other manager owns it; rename the peer to avoid ` +
+        `the com.iapeer.<personality> collision`,
     )
   }
-  // MULTI-INFRA COLLISION GUARD (fail-loud, never a silent clobber): the plist scheme
-  // is ONE per personality, so installing a SECOND infra runtime for the same
-  // personality would OVERWRITE the first channel's plist (e.g. web over arthur's
-  // telegram) and kill that channel on the next bootout/reboot. Refuse loudly until
-  // per-runtime plists (multi-infra) land. A deliberate runtime SWITCH is an operator
-  // act: `iapeer stop <p>` + delete the plist, then re-provision.
-  const bakedRuntime = existsSync(path) ? readPlistEnvVar(path, 'PEER_RUNTIME') : undefined
-  if (bakedRuntime && bakedRuntime !== opts.runtime) {
+  // MULTI-INFRA (per-runtime plists): resolve the (personality, runtime) target —
+  // the legacy base plist iff it already carries THIS runtime (default channel, no
+  // forced migration), else the suffixed com.iapeer.<p>.<rt>. A second infra runtime
+  // therefore gets its OWN plist and can be KeepAlive alongside the first channel —
+  // the pre-0.4.88 fail-loud "one plist per personality" refusal is retired.
+  const target = resolveAlwaysOnTarget(opts.personality, opts.runtime, env)
+  const path = target.path
+  // Belt for the suffixed path too: a hand-planted foreign file at our per-runtime
+  // label is never clobbered (same sentinel rule as the base guard above).
+  if (existsSync(path) && !isFoundationOwnedPlist(path)) {
     throw new IapError(
-      `refusing to overwrite launchd plist ${path}: it already holds the always-on ` +
-        `"${bakedRuntime}" session for "${opts.personality}" (the plist scheme is one per ` +
-        `personality) — installing "${opts.runtime}" here would silently kill that channel. ` +
-        `Multi-infra per personality needs per-runtime plists (not yet supported); for a ` +
-        `deliberate runtime switch: iapeer stop ${opts.personality}, delete the plist, re-provision.`,
+      `refusing to overwrite launchd plist ${path}: it exists but is not foundation-managed ` +
+        `(no ${IAPEER_PLIST_OWNER_KEY} sentinel) — remove or rename the foreign file first`,
     )
   }
   // GLOBAL infra logs (Фаза §8): ~/.iapeer/logs/<personality>/, NOT per-peer
@@ -692,7 +795,7 @@ export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string 
     if (fallback) environment.NOTIFIER_FALLBACK_TARGET = fallback
   }
   const spec: LaunchdPlistSpec = {
-    label: launchdLabel(opts.personality),
+    label: target.label,
     programArguments: [...(opts.entrypointArgv ?? defaultEntrypointArgv(env)), opts.personality, opts.runtime],
     workingDirectory: opts.cwd,
     environment,

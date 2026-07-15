@@ -12,7 +12,7 @@ import { createPeer } from './index.ts'
 import { defaultPeerCwd, peerProfilePath } from '../storage/index.ts'
 import { readPeerProfile, writePeerProfileAtomic } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
-import { isFoundationOwnedPlist, launchdPlistPath } from '../launch/index.ts'
+import { isFoundationOwnedPlist, resolveAlwaysOnTarget } from '../launch/index.ts'
 
 const roots: string[] = []
 function mkTmp(): string {
@@ -81,7 +81,10 @@ describe('createPeer — infra (telegram human / notifier function): plist + aut
 
     expect(r.runtime).toBe('telegram')
     expect(r.intelligence).toBe('natural') // telegram zone default (human)
-    const plist = launchdPlistPath('maria', env)
+    // multi-infra scheme: a fresh personality gets the per-runtime plist
+    const plist = resolveAlwaysOnTarget('maria', 'telegram', env).path
+    expect(plist.endsWith('com.iapeer.maria.telegram.plist')).toBe(true)
+    expect(r.plistPath).toBe(plist) // provision reports the plist it actually installed
     expect(existsSync(plist)).toBe(true)
     expect(isFoundationOwnedPlist(plist)).toBe(true)
     expect(readFileSync(plist, 'utf8')).toContain(`<string>${bin}</string>`)
@@ -100,8 +103,8 @@ describe('createPeer — infra (telegram human / notifier function): plist + aut
     await createPeer({ personality: 'maria', runtime: 'telegram', env })
     await createPeer({ personality: 'pavel', runtime: 'telegram', env })
 
-    expect(existsSync(launchdPlistPath('maria', env))).toBe(true)
-    expect(existsSync(launchdPlistPath('pavel', env))).toBe(true)
+    expect(existsSync(resolveAlwaysOnTarget('maria', 'telegram', env).path)).toBe(true)
+    expect(existsSync(resolveAlwaysOnTarget('pavel', 'telegram', env).path)).toBe(true)
     expect(findPeer(readPeersIndex({ env }), 'maria')).not.toBeNull()
     expect(findPeer(readPeersIndex({ env }), 'pavel')).not.toBeNull()
   })

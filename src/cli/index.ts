@@ -52,7 +52,12 @@ import {
 import { getAdapter } from '../launch/index.ts'
 import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
-import { cycleDaemon, isFoundationOwnedPlist, launchctlBootstrap, launchdLabel, launchdPlistPath } from '../launch/launchd.ts'
+import {
+  cycleDaemon,
+  existingAlwaysOnPlists,
+  launchctlBootstrap,
+  resolveAlwaysOnTarget,
+} from '../launch/launchd.ts'
 import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
 import { claudeProjectsRoot, transcriptSlug } from '../launch/adapters/claude.ts'
 import { peerProfilePath } from '../storage/index.ts'
@@ -206,9 +211,13 @@ function uid(): string {
 }
 
 /** FLEET GUARD: a peer launchd-managed by a NON-foundation plist (persistent-peer)
- *  is off-limits to stop/start — the foundation is read-only for it (H4). */
+ *  is off-limits to stop/start — the foundation is read-only for it (H4). Multi-infra
+ *  (0.4.88): the peer is foreign iff ANY of its existing template plists (legacy base
+ *  OR per-runtime suffixed) lacks the ownership sentinel. A personality whose only
+ *  plists are our suffixed ones must NOT read as foreign (the pre-multi-infra check
+ *  keyed on the base path alone, which is absent in that layout). */
 function isForeignLaunchd(personality: string, env: NodeJS.ProcessEnv): boolean {
-  return isLaunchdManaged(personality, env) && !isFoundationOwnedPlist(launchdPlistPath(personality, env))
+  return existingAlwaysOnPlists(personality, env).some(p => !p.foundationOwned)
 }
 
 function targetRuntimes(peer: PeerRecord, runtime: string | undefined): Runtime[] {
@@ -249,7 +258,13 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // stop: the desired state ("not running") already holds, so it carries NO reason
       // and must not fail the verb. Any other non-zero is a REAL error and sets reason
       // (the CLI maps a reasoned bootout to exit 1).
-      const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
+      // Multi-infra: bootout the label that ACTUALLY holds this (personality, runtime)
+      // channel — the legacy base or the per-runtime suffixed one (resolveAlwaysOnTarget,
+      // the same authority install uses). A runtime with no plist at all (manually-run
+      // session) resolves to its suffixed label → bootout exit 3 (benign) → killSession
+      // below still tears the session down.
+      const target = resolveAlwaysOnTarget(personality, rt, env)
+      const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${target.label}`], { encoding: 'utf8' })
       killSession(sock, identity, env)
       const stderrText = (r.stderr ?? '').trim()
       const benign = r.status === 0 || r.status === 3 || /No such process/i.test(stderrText)
@@ -295,7 +310,9 @@ export function startPeer(personality: string, runtime: string | undefined, opts
   for (const rt of targetRuntimes(peer, runtime)) {
     const identity = buildProcessAddress(rt, personality)
     if (isInfraRuntime(rt)) {
-      const plist = launchdPlistPath(personality, env)
+      // Multi-infra: load the plist that holds THIS (personality, runtime) channel
+      // (legacy base or per-runtime suffixed — the same resolution install/stop use).
+      const plist = resolveAlwaysOnTarget(personality, rt, env).path
       // UNDEAD-JOB-SAFE start: a bootstrap right after a bootout used to hit the
       // still-dismantling job (exit 5 I/O
       // error) and leave the router DOWN. launchctlBootstrap now waits for the
@@ -552,7 +569,7 @@ export async function newPeer(
       personality,
       runtime: rt,
       action: 'refused-infra',
-      reason: `infra runtime "${rt}" is launchd-held — restart it with: launchctl kickstart -k gui/$(id -u)/${launchdLabel(personality)}`,
+      reason: `infra runtime "${rt}" is launchd-held — restart it with: launchctl kickstart -k gui/$(id -u)/${resolveAlwaysOnTarget(personality, rt, env).label}`,
     }
   }
   const identity = buildProcessAddress(rt, personality)
@@ -785,25 +802,33 @@ export async function removePeerCli(
       }
       plistTeardown = 'skipped-foreign (H4 — foreign plist left intact; --force dropped only the registry record)'
     } else {
-      const plistPath = launchdPlistPath(personality, env)
-      // Sandbox/test: never invoke real launchctl (a test peer's label isn't a real job);
-      // still remove the (temp-dir) plist file so the teardown is observable.
-      let bootoutNote: string
-      if (env.IAPEER_TEST_SANDBOX === '1') {
-        bootoutNote = 'skipped-sandbox'
-      } else {
-        const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${launchdLabel(personality)}`], { encoding: 'utf8' })
-        // bootout exits non-zero when the job was already unloaded — benign for a teardown.
-        bootoutNote = r.status === 0 ? 'bootout' : `bootout (exit ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''})`
+      // Multi-infra (0.4.88): tear down EVERY foundation plist of the personality —
+      // the legacy base AND each per-runtime suffixed one (a two-channel peer like
+      // arthur telegram+web holds two). A forgotten plist would leave launchd
+      // KeepAlive crash-looping run-infra against the deleted record (the exact
+      // "remove must dismantle ALL artifacts" class).
+      const notes: string[] = []
+      for (const entry of existingAlwaysOnPlists(personality, env)) {
+        // Sandbox/test: never invoke real launchctl (a test peer's label isn't a real
+        // job); still remove the (temp-dir) plist file so the teardown is observable.
+        let bootoutNote: string
+        if (env.IAPEER_TEST_SANDBOX === '1') {
+          bootoutNote = 'skipped-sandbox'
+        } else {
+          const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${entry.label}`], { encoding: 'utf8' })
+          // bootout exits non-zero when the job was already unloaded — benign for a teardown.
+          bootoutNote = r.status === 0 ? 'bootout' : `bootout (exit ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''})`
+        }
+        let rmNote: string
+        try {
+          rmSync(entry.path, { force: true })
+          rmNote = ' + plist removed'
+        } catch (e) {
+          rmNote = ` (plist rm FAILED: ${e instanceof Error ? e.message : String(e)} — remove ${entry.path} manually)`
+        }
+        notes.push(`${entry.label}: ${bootoutNote}${rmNote}`)
       }
-      let rmNote: string
-      try {
-        rmSync(plistPath, { force: true })
-        rmNote = ' + plist removed'
-      } catch (e) {
-        rmNote = ` (plist rm FAILED: ${e instanceof Error ? e.message : String(e)} — remove ${plistPath} manually)`
-      }
-      plistTeardown = `${bootoutNote}${rmNote}`
+      plistTeardown = notes.join('; ')
     }
   }
   await removePeer(personality, { env })

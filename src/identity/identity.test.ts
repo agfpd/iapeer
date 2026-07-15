@@ -11,7 +11,7 @@ import {
   type PeerProfileWrite,
 } from './index.ts'
 import { peerProfilePath } from '../storage/index.ts'
-import { isFoundationOwnedPlist, launchdPlistPath } from '../launch/index.ts'
+import { isFoundationOwnedPlist, launchdPlistPath, resolveAlwaysOnTarget } from '../launch/index.ts'
 import { defaultIntelligenceForRuntime } from '../core/constants.ts'
 import type { PeersIndex } from '../registry/index.ts'
 
@@ -322,7 +322,9 @@ describe('ensurePeerProfile create-peer → always-on plist (infra only)', () =>
     expect(profile.personality).toBe('timer')
     expect(profile.intelligence).toBe('absent') // notifier zone default
 
-    const plist = launchdPlistPath('timer', env)
+    // multi-infra scheme: a fresh personality gets the per-runtime plist
+    const plist = resolveAlwaysOnTarget('timer', 'notifier', env).path
+    expect(plist.endsWith('com.iapeer.timer.notifier.plist')).toBe(true)
     expect(existsSync(plist)).toBe(true)
     expect(isFoundationOwnedPlist(plist)).toBe(true)
     // and the profile was written (full provision)
@@ -355,27 +357,27 @@ describe('ensurePeerProfile create-peer → always-on plist (infra only)', () =>
     expect(existsSync(peerProfilePath(peerCwd))).toBe(false)
   })
 
-  test('MULTI-INFRA BRIDGE: declaring a SECOND infra runtime keeps the first channel plist, declares the runtime, warns', () => {
+  test('MULTI-INFRA: declaring a SECOND infra runtime installs its OWN per-runtime plist; the first channel plist survives', () => {
     const env = laEnv()
     const peerCwd = join(root, 'arthur')
-    // 1) arthur is provisioned on telegram → telegram plist installed (the live-host shape)
+    // 1) arthur is provisioned on telegram → telegram plist installed (per-runtime
+    //    for a fresh personality; a legacy base plist behaves the same — covered in
+    //    launchd.test.ts multi-infra suite)
     const first = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'telegram', personality: 'arthur' })
     expect(first.runtimes).toEqual(['telegram'])
-    const plist = launchdPlistPath('arthur', env)
-    const telegramXml = readFileSync(plist, 'utf8')
+    const tgPlist = resolveAlwaysOnTarget('arthur', 'telegram', env).path
+    expect(existsSync(tgPlist)).toBe(true)
+    const telegramXml = readFileSync(tgPlist, 'utf8')
 
-    // 2) declaring web for the SAME personality: runtime declared, plist untouched, warn emitted
-    const warns: string[] = []
-    const second = ensurePeerProfile({
-      cwd: peerCwd,
-      env,
-      runtime: 'web',
-      personality: 'arthur',
-      warn: m => warns.push(m),
-    })
+    // 2) declaring web for the SAME personality: runtime declared AND its own plist
+    //    installed (the 0.4.87 declare-without-plist bridge is retired)
+    const second = ensurePeerProfile({ cwd: peerCwd, env, runtime: 'web', personality: 'arthur' })
     expect(second.runtimes).toContain('telegram')
     expect(second.runtimes).toContain('web') // declared → identity web-arthur resolves
-    expect(readFileSync(plist, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
-    expect(warns.join('\n')).toMatch(/run-infra arthur web/) // operator recipe surfaced
+    const webPlist = resolveAlwaysOnTarget('arthur', 'web', env).path
+    expect(webPlist.endsWith('com.iapeer.arthur.web.plist')).toBe(true)
+    expect(existsSync(webPlist)).toBe(true) // second channel got its OWN plist
+    expect(isFoundationOwnedPlist(webPlist)).toBe(true)
+    expect(readFileSync(tgPlist, 'utf8')).toBe(telegramXml) // first channel survives byte-for-byte
   })
 })

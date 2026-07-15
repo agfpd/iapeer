@@ -10,7 +10,7 @@ import { provisionPeer } from './index.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
-import { isFoundationOwnedPlist, launchdPlistPath } from '../launch/index.ts'
+import { existingAlwaysOnPlists, isFoundationOwnedPlist, resolveAlwaysOnTarget } from '../launch/index.ts'
 
 const roots: string[] = []
 function mkTmp(): string {
@@ -54,8 +54,11 @@ describe('provisionPeer', () => {
     expect(readPeerProfile(cwd)!.runtime).toBe('notifier')
     // registry entry (daemon reads this for tool-list / findPeer / wake)
     expect(findPeer(readPeersIndex({ env }), 'timer')?.cwd).toBe(cwd)
-    // plist pins the launcher to an abs path (launchd minimal PATH safe)
-    const plist = launchdPlistPath('timer', env)
+    // plist pins the launcher to an abs path (launchd minimal PATH safe);
+    // multi-infra scheme: a fresh personality gets the per-runtime plist
+    const plist = resolveAlwaysOnTarget('timer', 'notifier', env).path
+    expect(plist.endsWith('com.iapeer.timer.notifier.plist')).toBe(true)
+    expect(r.plistPath).toBe(plist)
     expect(existsSync(plist)).toBe(true)
     expect(isFoundationOwnedPlist(plist)).toBe(true)
     const xml = readFileSync(plist, 'utf8')
@@ -72,7 +75,7 @@ describe('provisionPeer', () => {
 
     expect(existsSync(peerProfilePath(cwd))).toBe(false)
     expect(findPeer(readPeersIndex({ env }), 'timer')).toBeNull()
-    expect(existsSync(launchdPlistPath('timer', env))).toBe(false)
+    expect(existingAlwaysOnPlists('timer', env)).toEqual([]) // no plist of either scheme
   })
 
   test('warm-on-demand (claude): profile + registry, NO plist (no launcher needed)', async () => {
@@ -86,7 +89,7 @@ describe('provisionPeer', () => {
     expect(r.runtimeBin).toBeUndefined()
     expect(existsSync(peerProfilePath(cwd))).toBe(true)
     expect(findPeer(readPeersIndex({ env }), 'worker')?.runtime).toBe('claude')
-    expect(existsSync(launchdPlistPath('worker', env))).toBe(false)
+    expect(existingAlwaysOnPlists('worker', env)).toEqual([]) // agentic → no plist of either scheme
   })
 
   test('В36 — description persists in the LOCAL profile and SURVIVES reindexFromLocals', async () => {
@@ -120,7 +123,7 @@ describe('provisionPeer', () => {
     const cwd = join(root, 'timer')
     const r = await provisionPeer({ cwd, runtime: 'notifier', personality: 'timer', env })
     expect(r.personality).toBe('timer')
-    expect(existsSync(launchdPlistPath('timer', env))).toBe(true)
+    expect(existsSync(resolveAlwaysOnTarget('timer', 'notifier', env).path)).toBe(true)
     expect(findPeer(readPeersIndex({ env }), 'timer')?.cwd).toBe(cwd)
     // personality ≠ normalize(basename(cwd)) → rejected (no silent drift)
     await expect(
