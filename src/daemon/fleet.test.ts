@@ -27,11 +27,14 @@ import {
   type FleetOps,
 } from './fleet.ts'
 import { approvalsLogPath } from './approvalslog.ts'
+import { noticesLogPath } from './noticeslog.ts'
+import { NoticeBoard } from './notices.ts'
 import { daemonDiscoveryPath, startDaemon, type DaemonHandle } from './index.ts'
 
 let root: string
 let daemon: DaemonHandle
 let cfg: LifecycleConfig
+let board: NoticeBoard
 const prevRoot = process.env.IAPEER_ROOT
 const prevLa = process.env.IAPEER_LAUNCHAGENTS_DIR
 
@@ -85,10 +88,13 @@ beforeAll(async () => {
   process.env.IAPEER_ROOT = root
   process.env.IAPEER_LAUNCHAGENTS_DIR = join(root, 'launchagents') // isLaunchdManaged must read the sandbox, not the live host
   cfg = loadLifecycleConfig(process.env)
+  // The notice board the mute-watch would raise into — injected so a test can raise
+  // without running the detector (docs/19).
+  board = new NoticeBoard({ logDir: cfg.eventLogDir, env: process.env })
   daemon = await startDaemon({
     port: 0,
     host: '127.0.0.1',
-    fleet: buildFleetHandler({ env: process.env, ops: FAKE_OPS, pollMs: 50 }),
+    fleet: buildFleetHandler({ env: process.env, ops: FAKE_OPS, pollMs: 50, board }),
     discovery: true,
   })
 })
@@ -416,6 +422,91 @@ describe('approvals broker surface (docs/17)', () => {
     expect(bad.status).toBe(400)
     const gone = await fetch(`${base()}/fleet/v1/approvals/nope`)
     expect(gone.status).toBe(404)
+  })
+})
+
+describe('notice board surface (docs/19)', () => {
+  const muteNotice = {
+    personality: 'boris',
+    runtime: 'claude',
+    kind: 'peer-mute',
+    errorType: 'rate_limit',
+    model: 'Fable 5',
+    content: "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
+    sessionId: 'sess-1',
+  }
+
+  test('GET /fleet/v1/notices lists live notices', async () => {
+    board.raise(muteNotice)
+    const r = await fetch(`${base()}/fleet/v1/notices`)
+    expect(r.status).toBe(200)
+    const body = (await r.json()) as { api: number; notices: Array<Record<string, unknown>> }
+    expect(body.api).toBe(FLEET_API_VERSION)
+    const n = body.notices.find(x => x.personality === 'boris')!
+    expect(n).toBeDefined()
+    expect(n.kind).toBe('peer-mute')
+    expect(n.errorType).toBe('rate_limit')
+    expect(n.model).toBe('Fable 5')
+    expect(n.count).toBe(1)
+  })
+
+  test('the snapshot carries the SAME notices (a client needs no extra call)', async () => {
+    const r = await fetch(`${base()}/fleet/v1/snapshot`)
+    const body = (await r.json()) as { notices?: Array<Record<string, unknown>> }
+    expect(body.notices?.some(n => n.personality === 'boris')).toBe(true)
+  })
+
+  test('GET /fleet/v1/notices/<id> serves the verbatim runtime content', async () => {
+    const { notice } = board.raise({ ...muteNotice, personality: 'nova' })
+    const r = await fetch(`${base()}/fleet/v1/notices/${notice.id}`)
+    expect(r.status).toBe(200)
+    const body = (await r.json()) as { notice: { content: string; personality: string } }
+    expect(body.notice.personality).toBe('nova')
+    expect(body.notice.content).toBe(muteNotice.content)
+  })
+
+  test('an unknown/expired id is a clean 404', async () => {
+    const r = await fetch(`${base()}/fleet/v1/notices/n999`)
+    expect(r.status).toBe(404)
+  })
+
+  // One-way by design: there is no decision to make, so there is nothing to POST back.
+  test('notices are READ-ONLY — no resolve sibling exists', async () => {
+    const r = await fetch(`${base()}/fleet/v1/notices`, { method: 'POST' })
+    expect(r.status).toBe(405)
+    const r2 = await fetch(`${base()}/fleet/v1/notices/n1/approve`, { method: 'POST' })
+    expect(r2.status).toBe(404) // not a route at all
+  })
+
+  test('an absent reset is OMITTED from the wire, never guessed (claude asymmetry)', async () => {
+    const r = await fetch(`${base()}/fleet/v1/notices`)
+    const body = (await r.json()) as { notices: Array<Record<string, unknown>> }
+    const n = body.notices.find(x => x.personality === 'boris')!
+    expect('resetsAtMs' in n).toBe(false)
+  })
+
+  test('a stated reset rides the wire as epoch-ms (codex)', async () => {
+    board.raise({ ...muteNotice, personality: 'zed', runtime: 'codex', model: undefined, resetsAtMs: 1_783_412_915_000 })
+    const r = await fetch(`${base()}/fleet/v1/notices`)
+    const body = (await r.json()) as { notices: Array<Record<string, unknown>> }
+    const n = body.notices.find(x => x.personality === 'zed')!
+    expect(n.resetsAtMs).toBe(1_783_412_915_000)
+    expect('model' in n).toBe(false)
+  })
+
+  // The whole push path: a face subscribed to /events receives notices with no extra wiring.
+  test('notices.log is among the tailed event files (SSE push comes free)', () => {
+    const files = fleetEventFiles(cfg)
+    const notices = files.find(f => f.src === 'notices')
+    expect(notices).toBeDefined()
+    expect(notices!.path).toBe(noticesLogPath(cfg.eventLogDir))
+  })
+
+  test('the 404 endpoint list advertises the notice routes', async () => {
+    const r = await fetch(`${base()}/fleet/v1/nope`)
+    const body = (await r.json()) as { endpoints: string[] }
+    expect(body.endpoints).toContain('GET /fleet/v1/notices')
+    expect(body.endpoints).toContain('GET /fleet/v1/notices/<id>')
   })
 })
 

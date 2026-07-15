@@ -62,6 +62,8 @@ import { heartbeatAgeSecs, probeFullDiskAccess, readMemoryProvider, readVoicePro
 import { deliveryLogPath } from './deliverylog.ts'
 import { approvalsLogPath } from './approvalslog.ts'
 import { ApprovalBroker } from './approvals.ts'
+import { noticesLogPath } from './noticeslog.ts'
+import { NoticeBoard } from './notices.ts'
 import { callTool, type CallToolDeps } from './index.ts'
 
 /** The API generation baked into every snapshot (additive evolution within v1 —
@@ -128,6 +130,35 @@ export interface FleetApproval {
   expiresMs: number
 }
 
+/** A live owner-facing notice as the snapshot exposes it (docs/19). The SAME items
+ *  `GET /fleet/v1/notices` returns (board.list()) — carried in the snapshot so a client that
+ *  already fetches `/snapshot` on every event renders the board with no extra call.
+ *
+ *  ONE-WAY: there is nothing to answer. A face RENDERS a notice; it never resolves one (no
+ *  approve/deny sibling exists on purpose — see docs/19 §1).
+ *
+ *  `resetsAtMs` is present ONLY when the runtime itself stated when the wall lifts (codex
+ *  does; claude does not for a per-model bucket). Its ABSENCE means "the runtime did not
+ *  say" — a client MUST render that as unknown and MUST NOT substitute the 5h/7d reset,
+ *  which belongs to a different limit. */
+export interface FleetNotice {
+  id: string
+  personality: string
+  runtime: string
+  kind: string
+  errorType: string
+  model?: string
+  resetsAtMs?: number
+  summary: string
+  content: string
+  sessionId?: string
+  createdMs: number
+  lastMs: number
+  expiresMs: number
+  /** Detections folded into this notice while it stayed live (≥1) — render as "×N". */
+  count: number
+}
+
 export interface FleetSnapshot {
   api: typeof FLEET_API_VERSION
   version: string
@@ -137,6 +168,9 @@ export interface FleetSnapshot {
   /** Pending human-approval requests (docs/17). ADDITIVE + omitted when the queue is empty —
    *  a client MUST treat its absence as an empty queue (same rule as `approval_mode`). */
   approvals?: FleetApproval[]
+  /** Live owner-facing notices (docs/19). ADDITIVE + omitted when the board is empty — a
+   *  client MUST treat its absence as an empty board (same rule as `approvals`). */
+  notices?: FleetNotice[]
 }
 
 // The CLI op functions, injectable for tests. Defaults LAZY-load cli/index.ts at
@@ -173,6 +207,7 @@ export function buildFleetSnapshot(
   startedAtMs: number,
   nowMs: number = Date.now(),
   approvals: FleetApproval[] = [],
+  notices: FleetNotice[] = [],
 ): FleetSnapshot {
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {
@@ -233,6 +268,8 @@ export function buildFleetSnapshot(
     // superset of FleetApproval — the named fields are the contract; extras ride along and
     // clients ignore them (obligation 2).
     ...(approvals.length ? { approvals } : {}),
+    // Same rule for the notice board (docs/19).
+    ...(notices.length ? { notices } : {}),
   }
 }
 
@@ -255,6 +292,10 @@ export function fleetEventFiles(cfg: LifecycleConfig): Array<{ path: string; src
     // Human-approval broker events (docs/17): approval-request / approval-resolved.
     // A pre-approval daemon simply never writes this file (readLogTail tolerates absence).
     { path: approvalsLogPath(cfg.eventLogDir), src: 'approvals' },
+    // Notice-board events (docs/19): notice-raised. Tailing it here is the WHOLE push
+    // path — a face subscribed to /fleet/v1/events receives owner notices with no
+    // further wiring, exactly as it already receives approvals.
+    { path: noticesLogPath(cfg.eventLogDir), src: 'notices' },
   ]
 }
 
@@ -472,6 +513,10 @@ export interface FleetHandlerOptions {
   pollMs?: number
   /** Injectable approval broker (tests — e.g. a short timeout). Default: a fresh one. */
   broker?: ApprovalBroker
+  /** The notice board (docs/19). The composition point passes the SAME instance the
+   *  mute-watch raises into — that shared instance IS the wiring: the watch writes, this
+   *  handler reads. Default: a fresh one (a handler with no watch simply stays empty). */
+  board?: NoticeBoard
 }
 
 export type FleetHandler = (
@@ -494,6 +539,9 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
   // The approval broker — one per daemon; the ASK side (POST /approvals long-poll) and
   // the ANSWER side (GET/POST /approvals/*) are all interfaces to this one queue.
   const broker = opts.broker ?? new ApprovalBroker({ logDir: cfg.eventLogDir, env })
+  // The notice board — one per daemon; the mute-watch RAISES into it and the /notices reads
+  // below serve it. Same shape as the broker above: one in-memory store, many interfaces.
+  const board = opts.board ?? new NoticeBoard({ logDir: cfg.eventLogDir, env })
   let opsPromise: Promise<FleetOps> | undefined
   const getOps = (): Promise<FleetOps> => {
     if (opts.ops) return Promise.resolve(opts.ops)
@@ -511,7 +559,13 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/snapshot' })
         // broker.list() is PendingApproval[] — structurally a superset of FleetApproval, so it
         // satisfies the snapshot contract (extra fields serialize + are ignored by clients).
-        return sendJson(res, 200, buildFleetSnapshot(env, cfg, await getOps(), startedAtMs, undefined, broker.list()))
+        // broker.list()/board.list() are supersets of FleetApproval/FleetNotice — the named
+        // fields are the contract; extras serialize and clients ignore them (obligation 2).
+        return sendJson(
+          res,
+          200,
+          buildFleetSnapshot(env, cfg, await getOps(), startedAtMs, undefined, broker.list(), board.list()),
+        )
       }
       if (path === '/fleet/v1/events') {
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/events' })
@@ -647,6 +701,26 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
         if (!ok) return sendJson(res, 404, { error: `no pending approval "${id}" (already resolved, expired, or unknown)` })
         return sendJson(res, 200, { id, action, ok: true })
       }
+
+      // ── notices (docs/19) — READ-ONLY BY DESIGN ───────────────────────────
+      // No approve/deny sibling: a notice is one-way. Nothing is blocked on it and there
+      // is no decision to make, so there is nothing for a face to POST back.
+      if (path === '/fleet/v1/notices') {
+        if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/notices' })
+        return sendJson(res, 200, {
+          api: FLEET_API_VERSION,
+          version: IAPEER_VERSION,
+          ts: new Date().toISOString(),
+          notices: board.list(),
+        })
+      }
+      const noticeMatch = /^\/fleet\/v1\/notices\/([^/]+)$/.exec(path)
+      if (noticeMatch) {
+        if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/notices/<id>' })
+        const item = board.get(noticeMatch[1]!)
+        if (!item) return sendJson(res, 404, { error: `no live notice "${noticeMatch[1]}" (expired or unknown)` })
+        return sendJson(res, 200, { api: FLEET_API_VERSION, version: IAPEER_VERSION, ts: new Date().toISOString(), notice: item })
+      }
       return sendJson(res, 404, {
         error: `unknown fleet endpoint ${method} ${path}`,
         endpoints: [
@@ -659,6 +733,8 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
           'POST /fleet/v1/approvals (hook long-poll)',
           'GET /fleet/v1/approvals/<id>',
           'POST /fleet/v1/approvals/<id>/(approve|deny)',
+          'GET /fleet/v1/notices',
+          'GET /fleet/v1/notices/<id>',
         ],
       })
     } catch (e) {

@@ -80,6 +80,7 @@ The sections are layered: from "install and use" to "understand the architecture
 - [16 — Tray](16-tray.md) — the macOS menu-bar fleet dashboard (SwiftBar plugin), the first external Fleet API client
 - [17 — Human approval](17-approval.md) — per-peer gated/yolo mode: routing a runtime's blocking approvals to a human through the daemon broker (hook interception, the broker, Fleet API + CLI)
 - [18 — Origin guard](18-origin-guard.md) — an agent's reply to a human must target the channel the human wrote from: the armed-pair model, the hold, `confirm-send`
+- [19 — Notices](19-notices.md) — telling the owner a peer went mute: detecting the structural API error that leaves a session alive, green and speechless, and routing it to the owner's surfaces one-way (not an approval)
 
 ## Status
 

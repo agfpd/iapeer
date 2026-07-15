@@ -63,6 +63,13 @@ The full fleet state. The peer rows are produced by the **same in-process functi
     { "id": "a1", "personality": "boris", "runtime": "claude", "kind": "circuit-breaker",
       "tool": "dangerous-rm", "summary": "rm -rf /tmp/x",
       "content": "cmd=\"rm -rf /tmp/x\" target=\"/tmp/x\"", "createdMs": 1751731100000, "expiresMs": 1751731400000 }
+  ],
+  "notices": [
+    { "id": "n1", "personality": "boris", "runtime": "claude", "kind": "peer-mute",
+      "errorType": "rate_limit", "model": "Fable 5", "summary": "boris · claude — rate_limit (Fable 5)",
+      "content": "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
+      "sessionId": "85ea79c9-…", "createdMs": 1751731100000, "lastMs": 1751731160000,
+      "expiresMs": 1751734700000, "count": 3 }
   ]
 }
 ```
@@ -81,6 +88,7 @@ Field notes:
 - The daemon answering **is** the health signal: there is no `healthy` boolean. A dashboard that cannot reach any advertised address should render the daemon as down (this is also why a purely API-fed dashboard is insufficient when the daemon itself is broken — the built-in TUI keeps its direct in-process read path for exactly that case).
 - The peer's **LLM model is deliberately absent**: the effective model of a live session is not an observable registry fact (static launch pins exist, but reporting a pin as «the model» would lie under runtime auto-switching). If it ever becomes observable, it will appear as an additive field.
 - `approvals` (top-level, docs/17-approval) — the pending human-approval queue, the SAME items `GET /fleet/v1/approvals` returns, carried in the snapshot so a client that already re-fetches `/snapshot` on every event renders the queue with no extra call. **ADDITIVE + OMITTED when the queue is empty** — a client MUST treat its absence as an empty queue (the same rule as `approval_mode`). Each item: `id` (broker id, the target of `POST /fleet/v1/approvals/<id>/(approve|deny)`), `personality` + `runtime` (whose action), `kind` (`tool`|`plan`|`question`|`circuit-breaker`), `tool` (the tool / breaker name), `summary` (a one-line badge string), `content` (the FULL verbatim action — command / diff / plan; criterion #7), `createdMs` / `expiresMs`. The broker's item is a superset — unknown extra fields (`title`, `approvers`) MUST be ignored (obligation 2).
+- `notices` (top-level, docs/19-notices) — live OWNER-facing notices: things the daemon noticed that the peer itself could not report, the v1 case being a structural API error that left it MUTE (`kind: peer-mute`). The SAME items `GET /fleet/v1/notices` returns. **ADDITIVE + OMITTED when the board is empty** — absence ⇒ empty board (the same rule as `approvals`). **READ-ONLY**: a notice is one-way, there is nothing to approve or deny. Each item: `id`, `personality` + `runtime` (who went mute), `kind` (`peer-mute`; treat unknown kinds as renderable), `errorType` (the RUNTIME's own value — `rate_limit`, `overloaded`, `rate_limit_reached`, … — free-form, do not switch exhaustively), `model?`, `resetsAtMs?`, `summary`, `content` (verbatim for claude), `sessionId?`, `createdMs` / `lastMs` / `expiresMs`, `count` (detections folded in — render as `×N`). **`model` and `resetsAtMs` are ABSENT when the runtime did not state them** — absence means *the runtime did not say*, NOT *there is no limit*; a client MUST render unknown and MUST NOT substitute the 5h/7d reset, which belongs to a different limit (docs/19 §3).
 
 ## GET /fleet/v1/peers/&lt;personality&gt;
 
@@ -95,7 +103,7 @@ One peer's card: the same object as the snapshot row, plus its recent history.
 
 ## GET /fleet/v1/events — SSE stream
 
-`text/event-stream` of fleet events, sourced by tail-following the daemon's **durable logs** (`lifecycle.log`, `delivery.log`, `exits.log`). Those files are written by *every* participating process — the daemon, CLI verbs (attach/stop/wake), the pty supervisors — so the stream covers events an in-daemon bus would miss.
+`text/event-stream` of fleet events, sourced by tail-following the daemon's **durable logs** (`lifecycle.log`, `delivery.log`, `exits.log`, `approvals.log`, `notices.log`). Those files are written by *every* participating process — the daemon, CLI verbs (attach/stop/wake), the pty supervisors — so the stream covers events an in-daemon bus would miss.
 
 ```
 GET /fleet/v1/events?replay=50
@@ -110,11 +118,11 @@ GET /fleet/v1/events?replay=50
   data: {"src":"lifecycle","ev":"wake","ts":"2026-07-05T18:00:00.123Z","personality":"boris","mode":"resume"}
   ```
 
-  `data` is the full parsed log line: `src` (`lifecycle` | `delivery` | `exits`) + `ev` + every logfmt field with quoted values decoded. `id` = epoch-ms of the event.
+  `data` is the full parsed log line: `src` (`lifecycle` | `delivery` | `exits` | `approvals` | `notices`) + `ev` + every logfmt field with quoted values decoded. `id` = epoch-ms of the event.
 - A comment `: connected` marks the transition from replay to live; `: hb` comments every ~15 s keep the connection alive.
 - Latency: live events surface within ~0.5 s (log-tail poll).
 
-Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (the stop/start verbs — an operator changed a peer's ✕/○ state; `action` is `stopped`/`started` for warm runtimes, `bootout`/`bootstrap` for always-on, with `reason` on failure), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`: `cause=child-exit` with `dead_status`/`dead_signal` when the session's process died on its own, `cause=shutdown-sigterm`/`shutdown-sigint` when the supervisor was torn down — reap/stop/new), `supervisor-uncaught` (a survivable supervisor fault left as forensics; the session keeps serving).
+Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (the stop/start verbs — an operator changed a peer's ✕/○ state; `action` is `stopped`/`started` for warm runtimes, `bootout`/`bootstrap` for always-on, with `reason` on failure), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`: `cause=child-exit` with `dead_status`/`dead_signal` when the session's process died on its own, `cause=shutdown-sigterm`/`shutdown-sigint` when the supervisor was torn down — reap/stop/new), `supervisor-uncaught` (a survivable supervisor fault left as forensics; the session keeps serving), `notice-raised` (docs/19 — the daemon told the OWNER something a peer could not tell him itself: a structural API error left it mute. One line per condition, not per occurrence — repeats fold into the live notice silently).
 
 What the headline states look like on the stream: a peer **waking** is `ev=wake`; a peer **parked to sleep** is `ev=supervise action=reaped-idle`; an operator **stop/start** is `ev=stopped` / `ev=started`; a **death** is `ev=session-exit` (immediately, from the supervisor) followed by the daemon's classification on its next pass.
 
@@ -140,7 +148,7 @@ What the headline states look like on the stream: a peer **waking** is `ev=wake`
 
 `from` is optional: a full `<runtime>-<personality>`, or a bare personality (its default runtime). Default: the **single natural-intelligence peer** of the registry — a GUI-originated message is the human's. With zero or several natural peers the request is refused (`400`) with an instruction to pass `from`.
 
-Not part of the *command* API, deliberately: **attach** (a terminal handoff — a client opens the system terminal with `iapeer attach <peer>`), registry/host **admin verbs** (`create`/`remove`/`update`/`uninstall` — will be added when a client actually needs them). The **human-approval broker** now lives under `/fleet/v1/approvals*` (`GET` the queue / one item, `POST /<id>/(approve|deny)`) with the `approval-request` / `approval-resolved` SSE `ev` kinds and the `approvals` snapshot field above — the full contract is **docs/17-approval**.
+Not part of the *command* API, deliberately: **attach** (a terminal handoff — a client opens the system terminal with `iapeer attach <peer>`), registry/host **admin verbs** (`create`/`remove`/`update`/`uninstall` — will be added when a client actually needs them). The **human-approval broker** now lives under `/fleet/v1/approvals*` (`GET` the queue / one item, `POST /<id>/(approve|deny)`) with the `approval-request` / `approval-resolved` SSE `ev` kinds and the `approvals` snapshot field above — the full contract is **docs/17-approval**. The **notice board** lives under `/fleet/v1/notices*` (`GET` the board / one item — **read-only**: a notice is one-way and has nothing to resolve) with the `notice-raised` SSE `ev` kind and the `notices` snapshot field above — the full contract is **docs/19-notices**.
 
 Errors are always `{"error": "…"}` with an honest status: `400` malformed request, `401` bearer required, `404` unknown peer/endpoint, `405` wrong method, `502` the verb itself failed, `500` internal.
 

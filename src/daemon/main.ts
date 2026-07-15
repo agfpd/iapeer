@@ -67,6 +67,8 @@ import {
 import { iapeerBinPath } from '../install/index.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
 import { buildFleetHandler } from './fleet.ts'
+import { NoticeBoard } from './notices.ts'
+import { startMuteWatch } from './mutewatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -90,6 +92,13 @@ export function parseDaemonPort(raw: string | undefined, dflt: number = DEFAULT_
 /** Default supervise-tick cadence (idle-reap / zombie-sweep). idleSecs (1h default)
  *  is the reap threshold; this is just how often the timer checks. */
 export const DEFAULT_SUPERVISE_INTERVAL_MS = 60_000
+
+/** Mute-watch cadence (docs/19) — how often the daemon sweeps the runtimes' session files
+ *  for a structural API error that left a peer unable to answer. Its OWN timer rather than a
+ *  ride on the 60 s supervise tick: detection latency IS the product here (the owner must
+ *  learn within a minute), and a 60 s sweep puts the worst case AT the budget with nothing
+ *  to spare. The sweep is cheap — it stats only files that CHANGED since the last pass. */
+export const DEFAULT_MUTEWATCH_INTERVAL_MS = 20_000
 
 // This module's own path — the launchd plist runs `bun <this>` as the daemon.
 const DAEMON_MAIN_PATH = fileURLToPath(import.meta.url)
@@ -319,6 +328,8 @@ export interface ConfiguredDaemonOptions {
   /** H8 bearer token; falls back to env.IAPEER_BEARER_TOKEN. Off when neither set. */
   bearerToken?: string
   superviseIntervalMs?: number
+  /** Mute-watch sweep cadence (default DEFAULT_MUTEWATCH_INTERVAL_MS). */
+  muteWatchIntervalMs?: number
   /** Write the router.json discovery file (default true for production). */
   discovery?: boolean
   rootDir?: string
@@ -341,7 +352,24 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   const armEphemeralOnDelivered = makeArmEphemeralOnDelivered(cfg)
   const ephemeral = makeEphemeralRouteDeps(cfg, env)
   const composerQueue = makeComposerQueueRouteDeps(cfg, env)
-  return startDaemon({
+  // Notice board (docs/19) — ONE instance shared by the mute-watch (raises) and the
+  // fleet handler (serves /notices + the snapshot field). Constructed HERE, at the
+  // composition point, because that sharing is the whole wiring.
+  const board = new NoticeBoard({ logDir: cfg.eventLogDir, env })
+  const stopMuteWatch = startMuteWatch(cfg, board, {
+    env,
+    intervalMs: opts.muteWatchIntervalMs ?? DEFAULT_MUTEWATCH_INTERVAL_MS,
+    // Same stance as the supervise tick's onError: a detector throw must be VISIBLE, not
+    // swallowed into a silently-dead watch — the exact failure mode this feature exists to
+    // end. Best-effort; a reporter must never fail the daemon.
+    onError: (err: unknown) => {
+      try {
+        const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'mutewatch-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
+      } catch { /* best-effort */ }
+    },
+  })
+  const handle = await startDaemon({
     wake: makeWakeFn(cfg, env),
     // M2 arm-on-outbound (see makeArmEphemeralOnDelivered): ephemeral caller's ok
     // send ⇒ armed for the supervise quiet-reap. No-op for every other caller.
@@ -367,7 +395,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // (the same listPeers truth as `iapeer list`), SSE events (tail of the durable
     // logs), commands over the existing verb functions. Same listeners, same bearer
     // gate; advertised in router.json as fleet:1. Contract: docs/15-fleet-api.md.
-    fleet: buildFleetHandler({ env }),
+    fleet: buildFleetHandler({ env, board }),
     supervise: {
       intervalMs: opts.superviseIntervalMs ?? DEFAULT_SUPERVISE_INTERVAL_MS,
       // idle-reap / zombie-sweep, THEN the eager fresh re-launch for any peer whose
@@ -412,6 +440,10 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     env,
     rootDir: opts.rootDir,
   })
+  // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
+  // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
+  // every test that starts a daemon would hang on exit).
+  return { ...handle, close: async () => { stopMuteWatch(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
