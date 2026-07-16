@@ -29,7 +29,8 @@ renders approvals renders notices with the same plumbing.
 
 ## 2. The signal: `peer-mute`
 
-The v1 notice kind. It means: *a structural API error left this peer unable to answer.*
+The first notice kind (§2a adds `peer-goal-stalled`). It means: *a structural API error left
+this peer unable to answer.*
 
 The daemon does not infer this from silence — silence is unfalsifiable. It reads the fact
 **structurally** out of the runtime's own session file. Neither runtime is scraped from the
@@ -65,6 +66,63 @@ enum, so no prose is matched.
 detector keys on **non-null**, never on the variant strings (`rate_limit_reached`,
 `workspace_owner_usage_limit_reached`, `workspace_member_credits_depleted`, … — read out of
 the 0.144.1 binary), so a variant we have never seen still detects and reports itself.
+
+## 2a. The signal: `peer-goal-stalled` (codex only)
+
+The second notice kind. It means: *this peer's pinned objective stopped being worked, and
+will not resume on its own.* Same class as `peer-mute` — peer alive, every health signal
+green, nobody told — different evidence and a different cause.
+
+**What the harness is.** Codex 0.144.x pins an objective to a thread (`create_goal`) and then
+continues it AUTOMATICALLY: when the thread goes idle it injects a synthetic
+`<codex_internal_context source="goal">` user message and runs another turn. iapeer owns no
+part of this and writes nothing into it.
+
+**Why it stalls.** `ext/goal/src/extension.rs::on_turn_error` maps every terminal turn error
+that is not a usage limit to `ActiveGoalStopReason::TurnError`, which `ext/goal/src/runtime.rs`
+writes as status `blocked`. That is the **only** path that reaches `blocked` without the model
+calling `update_goal`. Once the status leaves `active`, `clear_active_goal()` runs and
+automatic continuation stops **permanently**: the objective is abandoned while the peer stays
+healthy and keeps taking unrelated turns.
+
+**Where the truth is — the state DB, not the rollout.** Unlike `peer-mute`, this fact is *not*
+in the session file. A live capture (16.07.2026, `zapret2-oneclick`, thread `019f6709…`) holds
+exactly one `thread_goal_updated` event in 1971 rollout lines — the `active` one at resume —
+and **none** for the transition to `blocked`. The transition exists only in codex's goal store:
+
+```
+~/.codex/goals_<n>.sqlite   thread_goals(thread_id, goal_id, objective, status,
+                                         token_budget, tokens_used, time_used_seconds,
+                                         created_at_ms, updated_at_ms)
+~/.codex/state_<n>.sqlite   threads(id, cwd, …)     ← the only place a thread's cwd lives
+```
+
+Both are read **read-only**, and the filename generation is globbed (highest `_<n>` wins) —
+`state_5` says codex has rolled it before, so a pinned literal name would silently read a
+stale DB the day it rolls again. Attribution is the §6 rule unchanged: `thread_id` → `cwd`
+(state DB) → personality (registry). A thread whose cwd is no peer's is a human's own codex
+and is never notified.
+
+**The reported statuses** are codex's own values, verbatim on `errorType`:
+
+| status | meaning | notified |
+|---|---|---|
+| `blocked` | a turn error stopped continuation | **yes** |
+| `usage_limited` | a usage wall stopped continuation | **yes** |
+| `budget_limited` | the token budget stopped continuation | **yes** |
+| `active` | being worked | no — healthy |
+| `complete` | the model proved it done | no — success is not news |
+| `paused` | the human's own choice | no — his own click is not news |
+
+`blocked` and `usage_limited` stay distinct rather than flattening into one "stalled": they
+are different facts with different remedies, and they carry different dedup identities.
+
+**One-shot without a state file.** A stalled goal's row is never touched again — its
+accounting is `ActiveOnly`, measured live: through 17 further minutes of turns the blocked
+row's `tokens_used`/`updated_at_ms` stayed frozen at the block instant. So `updated_at_ms` is
+a stable *transition* clock, and the `updated_at_ms > since` boundary fires exactly once and
+then falls behind forever. A goal blocked while the daemon was down is missed — the same
+honest boundary `peer-mute` already has (§7).
 
 ## 3. What the owner is told — and what is deliberately withheld
 
@@ -108,15 +166,15 @@ resets, the plan) — data, never our interpretation of the cause.
 | field | type | notes |
 |---|---|---|
 | `id` | string | `n1`, `n2`, … Unique while live; **not** stable across a daemon restart. |
-| `personality` | string | the mute peer |
+| `personality` | string | the affected peer |
 | `runtime` | string | `claude` \| `codex` |
-| `kind` | string | `peer-mute` in v1. **Treat unknown kinds as renderable** — new kinds ride this surface. |
-| `errorType` | string | the runtime's OWN value (`rate_limit`, `overloaded`, `rate_limit_reached`, …). Free-form: do not switch exhaustively. |
-| `model` | string? | **absent** when the runtime did not name it |
+| `kind` | string | `peer-mute` \| `peer-goal-stalled` (codex only). **Treat unknown kinds as renderable** — new kinds ride this surface. |
+| `errorType` | string | the runtime's OWN value (`rate_limit`, `overloaded`, `rate_limit_reached`, …; for `peer-goal-stalled` the goal status: `blocked` \| `usage_limited` \| `budget_limited`). Free-form: do not switch exhaustively. |
+| `model` | string? | **absent** when the runtime did not name it (always absent on `peer-goal-stalled` — the goal store names no model) |
 | `resetsAtMs` | number? | epoch-ms; **absent** when the runtime did not state it → render "unknown", never substitute |
-| `summary` | string | one line, e.g. `boris · claude — rate_limit (Fable 5)` |
-| `content` | string | verbatim (claude) / rendered from typed fields (codex) |
-| `sessionId` | string? | correlates with the on-disk transcript |
+| `summary` | string | one line, e.g. `boris · claude — rate_limit (Fable 5)`, `zapret2-oneclick · codex — goal blocked: <objective>` |
+| `content` | string | verbatim (claude) / rendered from typed fields (codex, both kinds) |
+| `sessionId` | string? | correlates with the on-disk transcript. On `peer-goal-stalled` this is the codex **thread id** — the rollout's `session_meta.session_id`. |
 | `createdMs` | number | when the notice was raised (board clock — the TTL anchor) |
 | `lastMs` | number | when the latest occurrence was folded in (board clock). A sweep that merely re-reads an already-counted event does not move it. |
 | `expiresMs` | number | TTL boundary |
@@ -241,6 +299,18 @@ there is nothing to derive from. Reading the file's own statement works for both
 - **The blocking-window heuristic is unverified.** Codex does not say WHICH window blocked;
   the notice reports the **fullest** one. Both windows ride in `content`, so a human sees the
   raw fact even if the heuristic picks wrong.
+- **`peer-goal-stalled` — the state read is proven on real data; the CAUSE of one instance is
+  not.** The detector was run against the live goal store on 16.07.2026 and returned exactly
+  the real stall (`zapret2-oneclick`, `blocked`, goal `c25d2378…`, 09:54:32, attributed via the
+  real registry), and returned nothing with the boundary at `now` — both directions on real
+  bytes, not fixtures. What is **not** proven is which turn error blocked that particular goal:
+  codex logged nothing in the 28 s spanning the transition and the rollout carries no error
+  event. That gap does not weaken the detector, which watches the **state** and is deliberately
+  cause-agnostic — it is why the notice reports codex's status verbatim and never names a cause.
+- **The `blocked` mechanism itself is proven by source + live state**, not inferred from
+  silence: `on_turn_error` → `TurnError` → `Blocked` is the only non-`update_goal` writer in
+  the upstream tree, the model called `update_goal` zero times in the captured rollout, and the
+  blocked row's counters stayed frozen through 17 further minutes of turns.
 
 Forensic evidence for all of the above: `docs/internals/forensics/model-limit-2026-07-15/`.
 
