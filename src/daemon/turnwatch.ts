@@ -56,15 +56,14 @@
 // IDLE codex pane-log freezes (39s→46s). The signal means opposite things per runtime; one
 // clock that lies differently on each runtime is worse than no clock.
 
-import { existsSync, openSync, closeSync, fstatSync, readSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import { appendTurnEvent } from './turnslog.ts'
+import { readSessionSlices } from './sessionfiles.ts'
 
 /** Tail parsed per session file. The turn marker is always at the very end. */
 const TAIL_BYTES = 128 * 1024
-/** Head slice for codex's `session_meta` (line 1 — a long rollout pushes it out of the tail). */
-const HEAD_BYTES = 64 * 1024
 /** Walk depth for the codex YYYY/MM/DD tree. */
 const CODEX_WALK_DEPTH = 3
 /** How far back the FIRST sweep looks, to seed state for sessions already running when the
@@ -238,30 +237,6 @@ export class ActivityBoard {
 // The sweep
 // ─────────────────────────────────────────────────────────────────────────────
 
-function readTail(path: string): { tail: string; head: string } | null {
-  try {
-    const fd = openSync(path, 'r')
-    try {
-      const size = fstatSync(fd).size
-      if (size <= 0) return null
-      const off = Math.max(0, size - TAIL_BYTES)
-      const buf = Buffer.alloc(size - off)
-      readSync(fd, buf, 0, buf.length, off)
-      let head = ''
-      if (off > 0) {
-        const hb = Buffer.alloc(Math.min(HEAD_BYTES, off))
-        readSync(fd, hb, 0, hb.length, 0)
-        head = hb.toString('utf8')
-      }
-      return { tail: buf.toString('utf8'), head }
-    } finally {
-      closeSync(fd)
-    }
-  } catch {
-    return null
-  }
-}
-
 function safeReaddir(dir: string): string[] {
   try {
     return readdirSync(dir)
@@ -335,11 +310,11 @@ export function scanTurnStates(deps: TurnScanDeps, sinceMs: number): TurnObserva
     out.push({ ...st, personality, runtime })
   }
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
-    const t = readTail(file)
+    const t = readSessionSlices(file, TAIL_BYTES)
     if (t) push(parseClaudeTurn(t.tail), 'claude')
   }
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {
-    const t = readTail(file)
+    const t = readSessionSlices(file, TAIL_BYTES)
     if (t) push(parseCodexTurn(t.tail, t.head), 'codex')
   }
   return out

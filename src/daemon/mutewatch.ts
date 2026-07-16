@@ -45,10 +45,11 @@
 // the `cwd` field on every line; codex: session_meta.payload.cwd), and match that against the
 // registry. A file whose cwd is no peer's is ignored — a human's own session never notifies.
 
-import { existsSync, openSync, closeSync, fstatSync, readSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import type { NoticeBoard } from './notices.ts'
+import { readSessionSlices } from './sessionfiles.ts'
 
 /** How much of a session file's tail is parsed. The evidence is always at the end. */
 const TAIL_BYTES = 256 * 1024
@@ -229,32 +230,6 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
 // The sweep — find changed session files, attribute them, raise notices
 // ─────────────────────────────────────────────────────────────────────────────
 
-function readTail(path: string, maxBytes = TAIL_BYTES): { tail: string; head: string } | null {
-  try {
-    const fd = openSync(path, 'r')
-    try {
-      const size = fstatSync(fd).size
-      if (size <= 0) return null
-      const off = Math.max(0, size - maxBytes)
-      const buf = Buffer.alloc(size - off)
-      readSync(fd, buf, 0, buf.length, off)
-      let head = ''
-      if (off > 0) {
-        // The tail cut away the file's start — read a HEAD slice too (codex session_meta
-        // is line 1, and a long session pushes it far out of the tail).
-        const hb = Buffer.alloc(Math.min(64 * 1024, off))
-        readSync(fd, hb, 0, hb.length, 0)
-        head = hb.toString('utf8')
-      }
-      return { tail: buf.toString('utf8'), head }
-    } finally {
-      closeSync(fd)
-    }
-  } catch {
-    return null
-  }
-}
-
 function safeReaddir(dir: string): string[] {
   try {
     return readdirSync(dir)
@@ -336,12 +311,12 @@ export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[]
   }
   // claude: ~/.claude/projects/<slug>/<sessionId>.jsonl — one level of slug dirs.
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
-    const t = readTail(file)
+    const t = readSessionSlices(file, TAIL_BYTES)
     if (t) push(parseClaudeTranscript(t.tail, floor), 'claude')
   }
   // codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {
-    const t = readTail(file)
+    const t = readSessionSlices(file, TAIL_BYTES)
     if (t) push(parseCodexRollout(t.tail, floor, t.head), 'codex')
   }
   return out
