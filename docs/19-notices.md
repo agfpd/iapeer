@@ -124,6 +124,46 @@ a stable *transition* clock, and the `updated_at_ms > since` boundary fires exac
 then falls behind forever. A goal blocked while the daemon was down is missed — the same
 honest boundary `peer-mute` already has (§7).
 
+**Only the peer's CURRENT thread counts.** `thread_goals` is keyed by thread_id, so a thread the
+peer has abandoned keeps its last goal row forever. Measured live 16.07.2026: a peer escaped a
+blocked goal the only way its tools allowed — a fresh session — and ended up with two rows,
+`blocked` on the dead thread and `active` on the live one. Reporting the fossil would tell the
+owner an objective is stalled while the peer is working it. So a goal is attributed only on the
+cwd's newest thread (`recency_at_ms`); a fossil is silent.
+
+### Recovery — `iapeer goal <peer> <resume|clear|pause>`
+
+A notice states a fact the peer cannot state. For `peer-goal-stalled` the owner then hits a second
+wall: **the peer cannot fix it either.** Codex splits goal control, and the model's half has no
+exit — `update_goal` may only mark complete|blocked ("pause, resume, budget-limited, and
+usage-limited status changes are controlled by the user or system"), and `create_goal` is refused
+while a goal is unfinished. An agent peer whose goal blocks can only lie (mark an unachieved
+objective `complete`, which its own prompt forbids) or restart its session and lose the thread.
+
+The transition out exists — it is human-only. The TUI's `/goal [<objective>|clear|edit|pause|
+resume]` calls `thread/goal/set`, an unconditional upsert that sets Active from any status, and
+`thread_goal_actions.rs` treats `Paused | Blocked | UsageLimited` as resumable. The daemon is the
+peer's keyboard, so the verb presses it:
+
+| sub | effect |
+|---|---|
+| `resume` | the SAME goal, `blocked` → `active`; codex resumes injecting its own continuation turns |
+| `clear` | the goal is removed ⇒ the peer's OWN `create_goal` stops being refused — the supported route to a *new* objective, authored by the agent rather than by us |
+| `pause` | operator park |
+
+`/goal <objective>` is deliberately NOT offered: replacing an unfinished goal opens a "Replace
+goal?" modal, and blind-typing past a modal is how the wrong option gets picked. Subcommands are a
+closed whitelist — caller text is never interpolated into a keystroke stream. A claude peer returns
+`unsupported` (it has no thread goals; `/goal` would land as literal text in its composer).
+
+**Success is gated on codex's goal store, never on keystrokes being accepted** — a pty write proves
+the bytes left us, not that the TUI acted (§the delivery contour learned this the hard way). The
+verb reads the goal row before and after and reports the transition it can see; a session that took
+the text but never acted returns `unchanged`, not success. iapeer only ever READS codex's sqlite.
+
+Verified live 16.07.2026 on a real codex peer: `blocked → active` in ~1 s, same `goal_id`, same
+thread, no self-fresh, and auto-continuation genuinely resumed.
+
 ## 3. What the owner is told — and what is deliberately withheld
 
 A notice states who, which runtime, which error type, which model, and when the wall lifts.
