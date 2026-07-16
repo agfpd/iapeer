@@ -64,6 +64,8 @@ import { approvalsLogPath } from './approvalslog.ts'
 import { ApprovalBroker } from './approvals.ts'
 import { noticesLogPath } from './noticeslog.ts'
 import { NoticeBoard } from './notices.ts'
+import { turnsLogPath } from './turnslog.ts'
+import { ActivityBoard, type TurnActivity } from './turnwatch.ts'
 import { callTool, type CallToolDeps } from './index.ts'
 
 /** The API generation baked into every snapshot (additive evolution within v1 —
@@ -79,6 +81,18 @@ export interface FleetRuntimeStatus {
   status: 'live' | 'asleep' | 'stopped'
   /** Present (true) iff a HUMAN operator is attached to this live hosted session. */
   attached?: boolean
+  /** Whether this runtime is IN A TURN right now — a SEPARATE concept from `status`, which
+   *  stays pure liveness (docs/15 §Activity). Read from the runtime's own turn marker
+   *  (codex `task_started`/`task_complete`; claude assistant `stop_reason`), never from CPU or
+   *  an mtime proxy.
+   *
+   *  ABSENT unless `status === 'live'`: an asleep/stopped session has no turn to be in, and a
+   *  fabricated `idle` would read as a claim we have not earned. Also absent for a live session
+   *  the daemon has no evidence for yet.
+   *
+   *  `unknown` = live, saw the turn start, never saw it finish, and the evidence has gone
+   *  stale (TURN_STALE_MS) — an honest "no claim", never a phantom `working`. */
+  activity?: TurnActivity
 }
 
 export interface FleetPeer {
@@ -208,12 +222,25 @@ export function buildFleetSnapshot(
   nowMs: number = Date.now(),
   approvals: FleetApproval[] = [],
   notices: FleetNotice[] = [],
+  /** Per-runtime turn activity (docs/15 §Activity). Injected — the snapshot never scans
+   *  session files itself; the turn-watch owns that and keeps an in-memory board, so building
+   *  a snapshot stays O(peers). Absent lookup (library/test daemons) → the field is simply
+   *  never emitted, which is exactly its "no claim" semantics. */
+  activityOf?: (personality: string, runtime: string) => TurnActivity | undefined,
 ): FleetSnapshot {
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {
       const attached =
         s.status === 'live' && hasAttachedSupervisorClient(buildProcessAddress(s.runtime, r.personality), env)
-      return { runtime: s.runtime, status: s.status, ...(attached ? { attached: true } : {}) }
+      // Live-only, by design: see FleetRuntimeStatus.activity on why a dead session gets no
+      // claim rather than a fabricated `idle`.
+      const activity = s.status === 'live' ? activityOf?.(r.personality, s.runtime) : undefined
+      return {
+        runtime: s.runtime,
+        status: s.status,
+        ...(attached ? { attached: true } : {}),
+        ...(activity ? { activity } : {}),
+      }
     })
     let ephemeral = false
     try {
@@ -296,6 +323,10 @@ export function fleetEventFiles(cfg: LifecycleConfig): Array<{ path: string; src
     // path — a face subscribed to /fleet/v1/events receives owner notices with no
     // further wiring, exactly as it already receives approvals.
     { path: noticesLogPath(cfg.eventLogDir), src: 'notices' },
+    // Turn-activity events (docs/15 §Activity): turn-started / turn-ended. Same trick — the
+    // log IS the push path. Written on a real state CHANGE only, so this is two lines per turn
+    // per runtime, not one per sweep.
+    { path: turnsLogPath(cfg.eventLogDir), src: 'turns' },
   ]
 }
 
@@ -517,6 +548,11 @@ export interface FleetHandlerOptions {
    *  mute-watch raises into — that shared instance IS the wiring: the watch writes, this
    *  handler reads. Default: a fresh one (a handler with no watch simply stays empty). */
   board?: NoticeBoard
+  /** The turn-activity board (docs/15 §Activity). Same sharing contract as `board`: the
+   *  composition point passes the SAME instance the turn-watch folds observations into.
+   *  Default: a fresh one — a handler with no watch reports no activity at all, which is the
+   *  correct "no claim" rather than a fabricated idle. */
+  activity?: ActivityBoard
 }
 
 export type FleetHandler = (
@@ -542,6 +578,11 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
   // The notice board — one per daemon; the mute-watch RAISES into it and the /notices reads
   // below serve it. Same shape as the broker above: one in-memory store, many interfaces.
   const board = opts.board ?? new NoticeBoard({ logDir: cfg.eventLogDir, env })
+  // The turn-activity board — same one-store-many-interfaces shape. The turn-watch folds
+  // observations in; the snapshot below reads it. Reading is O(1): no file touched per request.
+  const activity = opts.activity ?? new ActivityBoard()
+  const activityOf = (personality: string, runtime: string): TurnActivity | undefined =>
+    activity.get(personality, runtime, Date.now())
   let opsPromise: Promise<FleetOps> | undefined
   const getOps = (): Promise<FleetOps> => {
     if (opts.ops) return Promise.resolve(opts.ops)
@@ -564,7 +605,7 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
         return sendJson(
           res,
           200,
-          buildFleetSnapshot(env, cfg, await getOps(), startedAtMs, undefined, broker.list(), board.list()),
+          buildFleetSnapshot(env, cfg, await getOps(), startedAtMs, undefined, broker.list(), board.list(), activityOf),
         )
       }
       if (path === '/fleet/v1/events') {
@@ -576,7 +617,17 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
       if (peerMatch) {
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/peers/<peer>' })
         const personality = decodeURIComponent(peerMatch[1]!)
-        const snapshot = buildFleetSnapshot(env, cfg, await getOps(), startedAtMs)
+        // activityOf passed here too: peer-detail must not disagree with the list it came from.
+        const snapshot = buildFleetSnapshot(
+          env,
+          cfg,
+          await getOps(),
+          startedAtMs,
+          undefined,
+          undefined,
+          undefined,
+          activityOf,
+        )
         const peer = snapshot.peers.find(p => p.personality === personality)
         if (!peer) return sendJson(res, 404, { error: `unknown peer "${personality}"` })
         const events = readRecentEvents(files, 50, personality)

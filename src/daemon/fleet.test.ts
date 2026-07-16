@@ -136,6 +136,42 @@ describe('GET /fleet/v1/snapshot', () => {
     expect(snap.peers.map(p => p.runtimes.map(s => s.status))).toEqual(rows.map(r => r.runtimes.map(s => s.status)))
   })
 
+  // ── activity (docs/15 §Activity) — additive, live-only, separate from liveness ──────────
+  test('activity: absent entirely when no lookup is injected (existing clients unaffected)', () => {
+    const s = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
+    for (const p of s.peers) for (const r of p.runtimes) expect(r.activity).toBeUndefined()
+  })
+
+  test('activity: reported for a LIVE runtime, never for asleep/stopped', () => {
+    // The lookup claims "working" for EVERY runtime — so anything absent below is the
+    // live-only gate doing its job, not the lookup declining.
+    const s = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now(), undefined, [], [], () => 'working')
+    const boris = s.peers.find(p => p.personality === 'boris')!
+    // asleep + stopped → no turn to be in → NO claim (not a fabricated idle)
+    expect(boris.runtimes.find(r => r.runtime === 'claude')!.status).toBe('asleep')
+    expect(boris.runtimes.find(r => r.runtime === 'claude')!.activity).toBeUndefined()
+    expect(boris.runtimes.find(r => r.runtime === 'codex')!.activity).toBeUndefined()
+    // live → the claim rides alongside status, which keeps its own meaning
+    const nova = s.peers.find(p => p.personality === 'nova')!
+    expect(nova.runtimes[0]!.status).toBe('live')
+    expect(nova.runtimes[0]!.activity).toBe('working')
+  })
+
+  test('activity: a live runtime with no evidence emits no field', () => {
+    const s = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now(), undefined, [], [], () => undefined)
+    const nova = s.peers.find(p => p.personality === 'nova')!
+    expect(nova.runtimes[0]!.status).toBe('live') // still live…
+    expect(nova.runtimes[0]!.activity).toBeUndefined() // …but no claim about its turn
+  })
+
+  test('activity: liveness is untouched — the two concepts stay separate', () => {
+    const withActivity = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now(), undefined, [], [], () => 'idle')
+    const without = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
+    expect(withActivity.peers.map(p => p.runtimes.map(r => r.status))).toEqual(
+      without.peers.map(p => p.runtimes.map(r => r.status)),
+    )
+  })
+
   test('approvals: omitted when empty (absence ⇒ empty queue), included additively when pending', () => {
     const empty = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
     expect(empty.approvals).toBeUndefined() // client MUST read absence as an empty queue

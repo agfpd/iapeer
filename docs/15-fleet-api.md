@@ -48,7 +48,7 @@ The full fleet state. The peer rows are produced by the **same in-process functi
       "default_runtime": "claude",
       "cwd": "/Users/me/.iapeer/peers/boris",
       "runtimes": [
-        { "runtime": "claude", "status": "live", "attached": true },
+        { "runtime": "claude", "status": "live", "attached": true, "activity": "working" },
         { "runtime": "codex",  "status": "asleep" }
       ],
       "last_active_runtime": "claude",
@@ -78,6 +78,7 @@ Field notes:
 
 - `runtimes[].status` — `live` (session up) · `asleep` (wakeable on demand) · `stopped` (operator stop flag; the daemon won't wake it). Same glyph semantics as the CLI: `●` / `○` / `✕`.
 - `runtimes[].attached` — present (`true`) only when a **human operator** is attached to that live hosted session.
+- `runtimes[].activity` — **turn activity**: is this runtime *in a turn* right now. See «Activity» below. Additive; absent on a pre-activity daemon, on every non-`live` runtime, and whenever the daemon has no evidence — clients MUST treat absence as **no claim**, never as `idle`.
 - `attached` — any runtime attached (peer-level convenience).
 - `launchd_managed` — launchd owns this peer's lifecycle (H4): the daemon never wakes/reaps it, and wake/stop/start commands are guarded accordingly.
 - `wake_policy` — `warm` (default: wake-on-message, idle-reap, resume) or `ephemeral` (stateless worker: serial task queue, die-after-reply).
@@ -89,6 +90,65 @@ Field notes:
 - The peer's **LLM model is deliberately absent**: the effective model of a live session is not an observable registry fact (static launch pins exist, but reporting a pin as «the model» would lie under runtime auto-switching). If it ever becomes observable, it will appear as an additive field.
 - `approvals` (top-level, docs/17-approval) — the pending human-approval queue, the SAME items `GET /fleet/v1/approvals` returns, carried in the snapshot so a client that already re-fetches `/snapshot` on every event renders the queue with no extra call. **ADDITIVE + OMITTED when the queue is empty** — a client MUST treat its absence as an empty queue (the same rule as `approval_mode`). Each item: `id` (broker id, the target of `POST /fleet/v1/approvals/<id>/(approve|deny)`), `personality` + `runtime` (whose action), `kind` (`tool`|`plan`|`question`|`circuit-breaker`), `tool` (the tool / breaker name), `summary` (a one-line badge string), `content` (the FULL verbatim action — command / diff / plan; criterion #7), `createdMs` / `expiresMs`. The broker's item is a superset — unknown extra fields (`title`, `approvers`) MUST be ignored (obligation 2).
 - `notices` (top-level, docs/19-notices) — live OWNER-facing notices: things the daemon noticed that the peer itself could not report, the v1 case being a structural API error that left it MUTE (`kind: peer-mute`). The SAME items `GET /fleet/v1/notices` returns. **ADDITIVE + OMITTED when the board is empty** — absence ⇒ empty board (the same rule as `approvals`). **READ-ONLY**: a notice is one-way, there is nothing to approve or deny. Each item: `id`, `personality` + `runtime` (who went mute), `kind` (`peer-mute`; treat unknown kinds as renderable), `errorType` (the RUNTIME's own value — `rate_limit`, `overloaded`, `rate_limit_reached`, … — free-form, do not switch exhaustively), `model?`, `resetsAtMs?`, `summary`, `content` (verbatim for claude), `sessionId?`, `createdMs` / `lastMs` / `expiresMs`, `count` (detections folded in — render as `×N`). **`model` and `resetsAtMs` are ABSENT when the runtime did not state them** — absence means *the runtime did not say*, NOT *there is no limit*; a client MUST render unknown and MUST NOT substitute the 5h/7d reset, which belongs to a different limit (docs/19 §3).
+
+## Activity — is this runtime in a turn?
+
+`runtimes[].activity` answers the operator's actual question, which `status` never did: a peer
+idling with an unfinished job and a peer grinding through a turn are BOTH `live`.
+
+**Activity is not liveness, and the two never merge.** `status` keeps its exact prior meaning.
+`activity` is an additive sibling on the same per-runtime object.
+
+| value | meaning |
+|---|---|
+| `working` | a turn is in flight on this runtime |
+| `idle` | live, but not in a turn |
+| `unknown` | live; the turn was seen to start, never seen to finish, and the evidence has gone stale |
+| *absent* | **no claim** — see below |
+
+`activity` is **ABSENT** (never `idle`) when any of these hold, and a client MUST NOT infer
+idleness from absence:
+
+- the daemon predates this field (obligation 1);
+- `status !== 'live'` — an asleep/stopped session has no turn to be in;
+- the daemon has no evidence for that live runtime yet.
+
+### Where the value comes from
+
+The **runtime's own turn marker**, read from its session file. Never CPU, never a pane-log
+mtime, never a reconstruction:
+
+- **codex** — the rollout's `event_msg` payloads `task_started` → `working`, `task_complete` →
+  `idle`; last one wins. Codex emits `task_complete` for a turn that ends on an error too, so
+  the terminal-error path needs no separate marker.
+- **claude** — the transcript's assistant `stop_reason`. **Only `tool_use` means the turn
+  continues**; every other terminal reason (`end_turn`, `stop_sequence`, `max_tokens`, a future
+  value, `null`) means it ended. The polarity is deliberately asymmetric: an unrecognised reason
+  must never invent work. A genuine `user` line also reads `working` (a prompt to answer or a
+  tool_result to consume), but compaction summaries (`isCompactSummary`), sub-agent sidechains
+  (`isSidechain`) and injected meta lines (`isMeta`) are excluded — each is a measured
+  false-`working` vector, the worst being a `/compact` run while idle leaving a phantom
+  `working` forever.
+
+### Bounds a client can rely on
+
+- **Lag** — the daemon re-reads changed session files every **~3 s**, so an `idle`↔`working`
+  flip appears within roughly one interval plus fs latency. A turn shorter than the interval may
+  never be observed at all; activity is a *state* to render, not an event ledger to count.
+- **Stale bound** — a `working` claim whose evidence is older than **10 min** decays to
+  `unknown`. `idle` NEVER decays: a session that ended its turn stays idle until something pokes
+  it, and age proves nothing against that.
+- **Restart** — the board is in-memory and re-seeds from the session files (a 48 h look-back) on
+  daemon start, so a restart cannot preserve a phantom `working`; a stale one decays by the rule
+  above, and a dead session drops out via `status` first.
+
+### Events
+
+`turns.log` → the SSE stream, `src: "turns"`, `ev`: **`turn-started`** / **`turn-ended`**, with
+`personality`, `runtime`, `from` (the previous state, absent on first observation), `at` +
+`at_iso` (the MARKER's own timestamp, not the sweep's). Emitted only on a real state **change** —
+two lines per turn per runtime, not one per sweep. Treat the snapshot as the source of truth and
+these as a push hint (obligation: the stream is at-least-once).
 
 ## GET /fleet/v1/peers/&lt;personality&gt;
 
@@ -122,7 +182,7 @@ GET /fleet/v1/events?replay=50
 - A comment `: connected` marks the transition from replay to live; `: hb` comments every ~15 s keep the connection alive.
 - Latency: live events surface within ~0.5 s (log-tail poll).
 
-Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (the stop/start verbs — an operator changed a peer's ✕/○ state; `action` is `stopped`/`started` for warm runtimes, `bootout`/`bootstrap` for always-on, with `reason` on failure), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`: `cause=child-exit` with `dead_status`/`dead_signal` when the session's process died on its own, `cause=shutdown-sigterm`/`shutdown-sigint` when the supervisor was torn down — reap/stop/new), `supervisor-uncaught` (a survivable supervisor fault left as forensics; the session keeps serving), `notice-raised` (docs/19 — the daemon told the OWNER something a peer could not tell him itself: a structural API error left it mute. One line per condition, not per occurrence — repeats fold into the live notice silently).
+Current `ev` vocabulary (grows over time — see obligation 1): `wake`, `supervise` (with `action`: `reaped-idle` = parked, `reaped-ephemeral`, `dead`→fresh/resume classification, `eager-orphan-fresh`, `skipped-error`…), `stopped` / `started` (the stop/start verbs — an operator changed a peer's ✕/○ state; `action` is `stopped`/`started` for warm runtimes, `bootout`/`bootstrap` for always-on, with `reason` on failure), `delivery`, `topic-note`, `ephemeral-drain`, `attach` / `attach-end`, `hosted-deliver`, `pty-host-failed`, `supervise-error`, `composer-queue-failed-notify`, `memory-provision`, `session-exit` (from `exits.log`: `cause=child-exit` with `dead_status`/`dead_signal` when the session's process died on its own, `cause=shutdown-sigterm`/`shutdown-sigint` when the supervisor was torn down — reap/stop/new), `supervisor-uncaught` (a survivable supervisor fault left as forensics; the session keeps serving), `notice-raised` (docs/19 — the daemon told the OWNER something a peer could not tell him itself: a structural API error left it mute. One line per condition, not per occurrence — repeats fold into the live notice silently), `turn-started` / `turn-ended` (from `turns.log`, `src: turns` — a runtime entered/left a turn; see «Activity». One line per real state CHANGE, never one per sweep).
 
 What the headline states look like on the stream: a peer **waking** is `ev=wake`; a peer **parked to sleep** is `ev=supervise action=reaped-idle`; an operator **stop/start** is `ev=stopped` / `ev=started`; a **death** is `ev=session-exit` (immediately, from the supervisor) followed by the daemon's classification on its next pass.
 

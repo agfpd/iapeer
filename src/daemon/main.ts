@@ -70,6 +70,7 @@ import { buildFleetHandler } from './fleet.ts'
 import { NoticeBoard } from './notices.ts'
 import { startMuteWatch } from './mutewatch.ts'
 import { startGoalWatch } from './goalwatch.ts'
+import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -106,6 +107,12 @@ export const DEFAULT_MUTEWATCH_INTERVAL_MS = 20_000
  *  owner must learn within a minute. Cheaper than that sweep — two indexed reads of a small
  *  DB, and the threads join runs ONLY when a stalled row is actually present. */
 export const DEFAULT_GOALWATCH_INTERVAL_MS = 20_000
+
+/** Turn-watch cadence (docs/15 §Activity) — how often the daemon re-reads the turn markers of
+ *  session files that CHANGED. Much faster than the notice watches because the fact is
+ *  short-lived: a turn can be shorter than 20 s, so a 20 s sweep would report `idle` straight
+ *  through one. This bounds the snapshot's idle↔working lag to roughly one interval. */
+export const DEFAULT_TURNWATCH_INTERVAL_MS = 3_000
 
 // This module's own path — the launchd plist runs `bun <this>` as the daemon.
 const DAEMON_MAIN_PATH = fileURLToPath(import.meta.url)
@@ -339,6 +346,8 @@ export interface ConfiguredDaemonOptions {
   muteWatchIntervalMs?: number
   /** Goal-watch sweep cadence (default DEFAULT_GOALWATCH_INTERVAL_MS). */
   goalWatchIntervalMs?: number
+  /** Turn-watch sweep cadence (default DEFAULT_TURNWATCH_INTERVAL_MS). */
+  turnWatchIntervalMs?: number
   /** Write the router.json discovery file (default true for production). */
   discovery?: boolean
   rootDir?: string
@@ -392,6 +401,22 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       } catch { /* best-effort */ }
     },
   })
+  // Turn-activity board + watch (docs/15 §Activity). Constructed HERE for the same reason as
+  // the notice board: the watch WRITES it and the fleet handler READS it, and that sharing is
+  // the whole wiring. Faster cadence than the notice watches (3 s vs 20 s) because a turn is a
+  // short-lived fact — a 20 s sweep would miss whole turns. Affordable: the sweep stats only
+  // files CHANGED since the last pass (measured on this host: ~2 ms across both runtime trees).
+  const activity = new ActivityBoard()
+  const stopTurnWatch = startTurnWatch(cfg, activity, {
+    env,
+    intervalMs: opts.turnWatchIntervalMs ?? DEFAULT_TURNWATCH_INTERVAL_MS,
+    onError: (err: unknown) => {
+      try {
+        const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'turnwatch-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
+      } catch { /* best-effort */ }
+    },
+  })
   const handle = await startDaemon({
     wake: makeWakeFn(cfg, env),
     // M2 arm-on-outbound (see makeArmEphemeralOnDelivered): ephemeral caller's ok
@@ -418,7 +443,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // (the same listPeers truth as `iapeer list`), SSE events (tail of the durable
     // logs), commands over the existing verb functions. Same listeners, same bearer
     // gate; advertised in router.json as fleet:1. Contract: docs/15-fleet-api.md.
-    fleet: buildFleetHandler({ env, board }),
+    fleet: buildFleetHandler({ env, board, activity }),
     supervise: {
       intervalMs: opts.superviseIntervalMs ?? DEFAULT_SUPERVISE_INTERVAL_MS,
       // idle-reap / zombie-sweep, THEN the eager fresh re-launch for any peer whose
@@ -466,7 +491,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
   // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
   // every test that starts a daemon would hang on exit).
-  return { ...handle, close: async () => { stopMuteWatch(); stopGoalWatch(); await handle.close() } }
+  return { ...handle, close: async () => { stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
