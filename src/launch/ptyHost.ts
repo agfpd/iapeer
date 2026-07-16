@@ -183,15 +183,25 @@ export function deliverHosted(identity: string, message: string, env: NodeJS.Pro
  * (transport/index.ts). NOT a delivery: it pastes nothing and carries no payload, it only presses
  * Enter on whatever the composer already holds.
  *
- * WHY THIS EXISTS. deliverToHost is paste → 300 ms settle → CR. When the paste carries attachments
- * the receiving TUI hoists them (reads + encodes the files, rewrites the composer), and the CR fired
- * on the fixed settle lands MID-HOIST and is swallowed — the composer keeps the envelope and NO turn
- * is ever submitted. Proven live 16.07.2026 on an idle claude receiver: att=4 (2.7 MB) sat unsubmitted
- * with a frozen transcript for 3m33s and moved only when an unrelated later delivery's CR arrived; the
- * SAME envelope with an 8 s settle submitted itself in 4 s (single-factor isolation).
+ * WHY THIS EXISTS. deliverToHost is paste → fixed 300 ms settle → CR. Sometimes that CR is EATEN: the
+ * composer keeps the envelope and NO turn is ever submitted, so the message is never processed and the
+ * landed-confirm has nothing to find. Measured live 16.07.2026 (claude receivers):
  *
- * Sent through the CONTROL channel (bare bytes, no bracketed paste) precisely because it must be a
- * keystroke, not a pasted literal.
+ *   • FIRST attachment-bearing delivery into a session → CR eaten. Two independent sessions hung this
+ *     way; one sat with a byte-frozen transcript for 180 s with NOTHING else sent, and moved only when
+ *     an unrelated later delivery's CR arrived. The payload was never lost — it sat in the composer,
+ *     still carrying its own original ts.
+ *   • EVERY LATER attachment delivery into that same session → the first CR works (~0.7–1 s, even for
+ *     9.3 MB of fresh incompressible PNGs).
+ *
+ * WHY the first one is different is NOT known, and this code deliberately does not guess. An earlier
+ * reading — "hoisting is slow, so the CR lands mid-hoist" — was RETRACTED: it rested on a settle=8000
+ * run that looked decisive but was confounded (that session had already taken its first attachment, so
+ * any settle would have worked). Do not re-derive a hoist-duration constant from it.
+ *
+ * That unknown is exactly why the retry is cause-agnostic: it does not model WHY a CR was eaten, it
+ * just presses Enter again while nothing has landed. Sent through the CONTROL channel (bare bytes, no
+ * bracketed paste) because it must arrive as a keystroke, not a pasted literal.
  */
 export function resubmitHosted(identity: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
   return sendControlToHost(hostRunDir(env), identity, [Buffer.from('\r', 'utf8')])

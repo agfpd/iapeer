@@ -84,17 +84,19 @@ describe('deliverWarm — hosted CLAUDE (transcript-confirm) confirms by a NEW r
   })
 
   // ── SUBMIT-RETRY (16.07.2026) ───────────────────────────────────────────────────────────────
-  // The grace does not merely WAIT: deliverToHost presses Enter once on a fixed settle, and an
-  // attachment paste is still hoisting then, so that CR is EATEN and no turn exists. Proven live: an
-  // att=4 envelope into an idle receiver left the transcript frozen 180 s with nothing sent. So while
-  // no record has landed, the grace re-presses Enter — whichever press falls after the hoist submits.
+  // deliverToHost presses Enter once, on a fixed settle. That CR is sometimes EATEN — measured on the
+  // FIRST attachment-bearing delivery into a session — and then NO turn exists and no record can ever
+  // appear, so a passive grace waits forever on nothing. Proven live: an att=4 into an idle receiver
+  // left the transcript byte-frozen for 180 s with nothing else sent, and moved only when a later
+  // delivery poked it. So while no record has landed, the grace re-presses Enter until one submits.
+  // WHY that first CR is eaten is unknown; the retry deliberately does not model it.
   describe('submit-retry', () => {
     test('THE FROZEN CASE: paste landed but the first CR was eaten → retries until the record appears → ok', async () => {
       let resubmits = 0
-      // Nothing is ever recorded until an Enter actually submits the composer: the hoist is still
-      // running, so it takes 2 presses. This is the shape that hung forever before the fix.
+      // Nothing is recorded until an Enter actually submits the composer — here it takes 2 presses.
+      // This is the shape that hung forever before the fix.
       const seam: WarmDeliverSeam = {
-        deliverHosted: async () => ({ ok: true }), // paste flushed; its CR was swallowed mid-hoist
+        deliverHosted: async () => ({ ok: true }), // paste flushed; its CR was eaten
         confirmLanded: () => resubmits >= 2,
         sleep: async () => {},
         resubmit: async () => void resubmits++,

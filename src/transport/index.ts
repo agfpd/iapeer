@@ -185,24 +185,28 @@ const LIVENESS_POLL_MS = 100
 const CONFIRM_GRACE_MS = 4000
 
 // ATTACHMENT grace. The "sub-second" assumption above holds only WITHOUT attachments: an att>0 paste
-// makes the receiving TUI hoist the files (read + encode, rewrite the composer) before any turn can
-// begin, which takes seconds.
+// makes the receiving TUI ingest the files (hoist them into image blocks, rewrite the composer) before
+// any turn can begin, so acceptance is not sub-second.
 //
 // CORRECTED 16.07.2026 — the model this number was first built on was WRONG. The original note here
 // read the 15.07 att=4 measurement as "the receiver writes the user-record when it BEGINS the turn,
 // and loading the images pushed that start ~22 s out", i.e. a LATE SELF-START that a longer grace
-// would catch. A confound-free repro disproved it: att=4 (2.7 MB) into a claude receiver idle 2m17s,
-// with NOTHING else sent, left the transcript byte-frozen for 180 s — the turn NEVER started. The
-// 15.07 "22 s self-start" was almost certainly the same confound (an unrelated later delivery poked
-// the session). The real mechanism is a SWALLOWED SUBMIT, not a slow write: deliverToHost is
-// paste → 300 ms settle → CR, and with attachments the CR lands mid-hoist and is eaten. Proven by
-// single-factor isolation: the SAME envelope with an 8 s settle submitted itself in 4 s.
+// would catch. A confound-free repro disproved it: att=4 into a claude receiver idle 2m17s, with
+// NOTHING else sent, left the transcript byte-frozen for 180 s — the turn NEVER started, and the
+// message moved only when an unrelated later delivery poked the session. The 15.07 "22 s self-start"
+// was almost certainly that same confound. There is no late self-start to wait for: the SUBMIT was
+// eaten, so a passive grace of ANY size waits for a record that cannot exist.
 //
-// So a passive grace of ANY size is useless here — it waits for a record that cannot exist, because
-// nothing was ever submitted. What makes the grace meaningful is the SUBMIT-RETRY below: we keep
-// pressing Enter while no record has landed, so the CR that falls after the hoist finishes does the
-// work. 60 s is then an upper BOUND on hoisting a large payload (not a calibrated latency), and it
-// costs nothing on the happy path — the confirm returns the moment the record lands.
+// WHICH deliveries get their CR eaten, measured: the FIRST attachment-bearing delivery into a session
+// (reproduced on two independent sessions, and again on a purpose-built fresh one). Every LATER
+// attachment delivery into the same session submits on the first CR in ~0.7–1 s, even at 9.3 MB. WHY
+// the first differs is UNKNOWN — an intermediate "the CR lands mid-hoist" story was retracted as
+// confounded, so no hoist-duration constant may be derived from it.
+//
+// What makes the grace meaningful is the SUBMIT-RETRY below, which needs no such answer: while no
+// record has landed we keep pressing Enter, and whichever press finds the composer submittable does
+// the work. 60 s is then just a generous give-up BOUND (not a calibrated latency), and it costs
+// nothing on the happy path — the confirm returns the moment the record lands.
 const CONFIRM_GRACE_ATTACHMENTS_MS = 60_000
 
 // Submit-retry cadence — how often, WHILE NO RECORD HAS LANDED, the grace re-presses Enter on the
@@ -213,8 +217,11 @@ const CONFIRM_GRACE_ATTACHMENTS_MS = 60_000
 // the turn already submitted — an empty composer ignores a CR. The loop is gated on `confirm()`
 // being false, so we stop the instant the record appears.
 //
-// Deliberately NOT every poll (100 ms): a CR is a keystroke into a live human-visible session, so it
-// is paced. 1.5 s is far below any plausible hoist time yet spaces the presses.
+// Deliberately NOT every poll (100 ms): a CR is a keystroke into a live, human-visible session, so the
+// presses are spaced rather than machine-gunned. This is a PACING number only — it is explicitly NOT a
+// "how long until the composer is submittable" estimate, because that duration is unknown and the whole
+// point of retrying is not needing it. Raising or lowering it changes only how promptly a stuck message
+// is rescued (measured live: a rescue landed at ~2.3 s with this value), never whether it is.
 const RESUBMIT_INTERVAL_MS = 1500
 
 function envNonNegative(raw: string | undefined): number | null {
@@ -385,10 +392,11 @@ async function deliverViaHost(
   const graceMs = confirmGraceMs(envelopeHasAttachments(envelope))
   const graceDeadline = monotonicMs() + graceMs
   // SUBMIT-RETRY (see RESUBMIT_INTERVAL_MS). deliverToHost already pressed Enter once, on a fixed
-  // settle; if the paste was still hoisting, that CR was eaten and NOTHING is running. So the grace
-  // does not merely WAIT for a record — while none has landed it keeps pressing Enter, and whichever
-  // press falls after the hoist submits the composer. Self-correcting for any payload weight: there is
-  // deliberately NO tuned "how long does hoisting take" constant anywhere in this path.
+  // settle; that CR is sometimes EATEN, and then NOTHING is running and no record can ever appear. So
+  // the grace does not merely WAIT for a record — while none has landed it keeps pressing Enter, and
+  // whichever press finds the composer submittable does the work. Cause-agnostic ON PURPOSE: it does
+  // not model WHY a CR was eaten (still unknown), so there is deliberately no tuned duration constant
+  // on this path — which is also what keeps it correct at any payload weight.
   let nextResubmitAt = monotonicMs() + RESUBMIT_INTERVAL_MS
   while (true) {
     if (confirm(envelope)) return ok(undefined)
