@@ -83,6 +83,74 @@ describe('deliverWarm — hosted CLAUDE (transcript-confirm) confirms by a NEW r
     expect(polls).toBeGreaterThanOrEqual(3)
   })
 
+  // ── SUBMIT-RETRY (16.07.2026) ───────────────────────────────────────────────────────────────
+  // The grace does not merely WAIT: deliverToHost presses Enter once on a fixed settle, and an
+  // attachment paste is still hoisting then, so that CR is EATEN and no turn exists. Proven live: an
+  // att=4 envelope into an idle receiver left the transcript frozen 180 s with nothing sent. So while
+  // no record has landed, the grace re-presses Enter — whichever press falls after the hoist submits.
+  describe('submit-retry', () => {
+    test('THE FROZEN CASE: paste landed but the first CR was eaten → retries until the record appears → ok', async () => {
+      let resubmits = 0
+      // Nothing is ever recorded until an Enter actually submits the composer: the hoist is still
+      // running, so it takes 2 presses. This is the shape that hung forever before the fix.
+      const seam: WarmDeliverSeam = {
+        deliverHosted: async () => ({ ok: true }), // paste flushed; its CR was swallowed mid-hoist
+        confirmLanded: () => resubmits >= 2,
+        sleep: async () => {},
+        resubmit: async () => void resubmits++,
+      }
+      const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+      expect(r.ok).toBe(true)
+      expect(resubmits).toBeGreaterThanOrEqual(2)
+    })
+
+    test('NO REGRESSION: a record that lands immediately (text-only) never triggers a retry', async () => {
+      let resubmits = 0
+      const seam: WarmDeliverSeam = {
+        deliverHosted: async () => ({ ok: true }),
+        confirmLanded: () => true, // first CR submitted it — sub-second record
+        sleep: async () => {},
+        resubmit: async () => void resubmits++,
+      }
+      const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+      expect(r.ok).toBe(true)
+      expect(resubmits).toBe(0) // no stray Enter into a live session
+    })
+
+    test('the retry STOPS the instant the record lands — never presses again after confirm', async () => {
+      let resubmits = 0
+      let landedAfter = 1 // lands once one retry has fired
+      const seam: WarmDeliverSeam = {
+        deliverHosted: async () => ({ ok: true }),
+        confirmLanded: () => resubmits >= landedAfter,
+        sleep: async () => {},
+        resubmit: async () => void resubmits++,
+      }
+      const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+      expect(r.ok).toBe(true)
+      expect(resubmits).toBe(1) // exactly the one that did the work — not one more
+    })
+
+    test('a genuinely unresponsive session still false-FAILs after the grace (retry is not a false-OK)', async () => {
+      let resubmits = 0
+      const seam: WarmDeliverSeam = {
+        deliverHosted: async () => ({ ok: true }),
+        confirmLanded: () => false, // nothing ever lands, however often we press
+        sleep: async () => {},
+        resubmit: async () => void resubmits++,
+      }
+      const prev = process.env.IAP_HOST_LIVENESS_GRACE_MS
+      process.env.IAP_HOST_LIVENESS_GRACE_MS = '0'
+      try {
+        const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+        expect(r.ok).toBe(false) // silent loss stays forbidden
+      } finally {
+        if (prev === undefined) delete process.env.IAP_HOST_LIVENESS_GRACE_MS
+        else process.env.IAP_HOST_LIVENESS_GRACE_MS = prev
+      }
+    })
+  })
+
   test('socket deliver fails (socket dead/stalled) → loud fail, confirm never consulted', async () => {
     let confirmProbes = 0
     const seam: WarmDeliverSeam = {

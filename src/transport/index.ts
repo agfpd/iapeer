@@ -55,6 +55,7 @@ import {
   hostSessionAlive,
   hostSessionToken,
   listHostedPeers,
+  resubmitHosted,
 } from '../launch/ptyHost.ts'
 import { sendControlToHost, type DeliverResult } from '../supervisor/deliver.ts'
 // Origin-guard (docs/18) — reply-channel mechanic for agent→human sends. Lives in
@@ -183,19 +184,38 @@ const LIVENESS_POLL_MS = 100
 // deterministic fail). Prefer a false-FAIL (sender retries) over a false-OK (silent loss, forbidden).
 const CONFIRM_GRACE_MS = 4000
 
-// ATTACHMENT grace. The "sub-second" assumption above holds only WITHOUT attachments. Measured
-// 15.07.2026 on a live att=4 delivery (1.3 MB of PNGs) into an IDLE receiver: the record was
-// stamped 19:34:59.269, the confirm polled the right file until 19:35:03.4 and did not see it,
-// and the receiver's first output came at 19:35:21.7. The receiver writes the user-record when it
-// BEGINS the turn, and loading/encoding the images pushed that start ~22 s out — so a 4 s grace
-// expired on a message that had landed. Every att>0 delivery to a claude receiver false-FAILED,
-// the sender retried on the lie, and the message duplicated in the receiver's context.
+// ATTACHMENT grace. The "sub-second" assumption above holds only WITHOUT attachments: an att>0 paste
+// makes the receiving TUI hoist the files (read + encode, rewrite the composer) before any turn can
+// begin, which takes seconds.
 //
-// 60 s is a CONSERVATIVE BOUND FROM THAT MEASUREMENT (≤22 s observed, ×3 headroom), not a
-// calibrated number: the exact paste→disk latency is still unmeasured (see docs/10). It costs
-// nothing on the happy path — the confirm returns the moment the record lands — and costs the
-// sender up to a minute only when an attachment message genuinely fails, which is rare.
+// CORRECTED 16.07.2026 — the model this number was first built on was WRONG. The original note here
+// read the 15.07 att=4 measurement as "the receiver writes the user-record when it BEGINS the turn,
+// and loading the images pushed that start ~22 s out", i.e. a LATE SELF-START that a longer grace
+// would catch. A confound-free repro disproved it: att=4 (2.7 MB) into a claude receiver idle 2m17s,
+// with NOTHING else sent, left the transcript byte-frozen for 180 s — the turn NEVER started. The
+// 15.07 "22 s self-start" was almost certainly the same confound (an unrelated later delivery poked
+// the session). The real mechanism is a SWALLOWED SUBMIT, not a slow write: deliverToHost is
+// paste → 300 ms settle → CR, and with attachments the CR lands mid-hoist and is eaten. Proven by
+// single-factor isolation: the SAME envelope with an 8 s settle submitted itself in 4 s.
+//
+// So a passive grace of ANY size is useless here — it waits for a record that cannot exist, because
+// nothing was ever submitted. What makes the grace meaningful is the SUBMIT-RETRY below: we keep
+// pressing Enter while no record has landed, so the CR that falls after the hoist finishes does the
+// work. 60 s is then an upper BOUND on hoisting a large payload (not a calibrated latency), and it
+// costs nothing on the happy path — the confirm returns the moment the record lands.
 const CONFIRM_GRACE_ATTACHMENTS_MS = 60_000
+
+// Submit-retry cadence — how often, WHILE NO RECORD HAS LANDED, the grace re-presses Enter on the
+// receiver's composer (see the correction above; the primitive is ptyHost.resubmitHosted).
+//
+// WHY THIS IS SAFE. A bare CR reaches the composer in exactly one of two states: (a) it still holds
+// our unsubmitted paste — the CR submits it, which is the entire point; or (b) it is empty because
+// the turn already submitted — an empty composer ignores a CR. The loop is gated on `confirm()`
+// being false, so we stop the instant the record appears.
+//
+// Deliberately NOT every poll (100 ms): a CR is a keystroke into a live human-visible session, so it
+// is paced. 1.5 s is far below any plausible hoist time yet spaces the presses.
+const RESUBMIT_INTERVAL_MS = 1500
 
 function envNonNegative(raw: string | undefined): number | null {
   const n = raw === undefined ? NaN : Number(raw)
@@ -246,6 +266,10 @@ export interface WarmDeliverSeam {
    *  loop (the grace is up to several seconds for codex, so a sync block would stall the whole router
    *  daemon for the duration of one delivery). */
   sleep?: (ms: number) => Promise<void>
+  /** SUBMIT-RETRY: press Enter again on the receiver's composer while no record has landed. Default:
+   *  the real `resubmitHosted` (a bare CR over the control channel). Tests inject a spy to assert the
+   *  retry fires only while unconfirmed — and never once the record is in. */
+  resubmit?: (identity: string) => Promise<void>
 }
 
 /**
@@ -357,11 +381,24 @@ async function deliverViaHost(
   // false-OK (silent loss the contract forbids).
   const confirm = seam.confirmLanded ?? ((payload: string) => transcriptCarriesEnvelope(baseline, payload, { env }))
   const sleep = seam.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  const resubmit = seam.resubmit ?? (async (identity: string) => void (await resubmitHosted(identity, env)))
   const graceMs = confirmGraceMs(envelopeHasAttachments(envelope))
   const graceDeadline = monotonicMs() + graceMs
+  // SUBMIT-RETRY (see RESUBMIT_INTERVAL_MS). deliverToHost already pressed Enter once, on a fixed
+  // settle; if the paste was still hoisting, that CR was eaten and NOTHING is running. So the grace
+  // does not merely WAIT for a record — while none has landed it keeps pressing Enter, and whichever
+  // press falls after the hoist submits the composer. Self-correcting for any payload weight: there is
+  // deliberately NO tuned "how long does hoisting take" constant anywhere in this path.
+  let nextResubmitAt = monotonicMs() + RESUBMIT_INTERVAL_MS
   while (true) {
     if (confirm(envelope)) return ok(undefined)
     if (monotonicMs() >= graceDeadline) break
+    if (monotonicMs() >= nextResubmitAt) {
+      // confirm() was false microseconds ago, so the composer still holds our paste — or the record
+      // landed in that gap and this CR meets an empty composer, which ignores it.
+      await resubmit(target.address)
+      nextResubmitAt = monotonicMs() + RESUBMIT_INTERVAL_MS
+    }
     await sleep(LIVENESS_POLL_MS)
   }
   return err(

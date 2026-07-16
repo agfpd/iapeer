@@ -11,7 +11,7 @@
 //   - sessionAlive comes from client.ts (no @xterm);
 //   - readiness reuses paneLogViewport, whose @xterm import is dynamic and only loads flag-on.
 import { existsSync, readFileSync } from 'node:fs'
-import { deliverToHost, type DeliverResult } from '../supervisor/deliver.ts'
+import { deliverToHost, sendControlToHost, type DeliverResult } from '../supervisor/deliver.ts'
 import { attachedPath, defaultRunDir, pidPath, readGeometry } from '../supervisor/paths.ts'
 import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { killSession as killSupervisorSession, listSessions as listSupervisorSessions } from '../supervisor/index.ts'
@@ -176,4 +176,23 @@ export async function waitHostReady(
 /** Deliver the first/next message to the hosted session over its supervisor socket. */
 export function deliverHosted(identity: string, message: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
   return deliverToHost(hostRunDir(env), identity, message)
+}
+
+/**
+ * Re-send a BARE CR to a hosted session — the submit-retry behind the landed-confirm grace
+ * (transport/index.ts). NOT a delivery: it pastes nothing and carries no payload, it only presses
+ * Enter on whatever the composer already holds.
+ *
+ * WHY THIS EXISTS. deliverToHost is paste → 300 ms settle → CR. When the paste carries attachments
+ * the receiving TUI hoists them (reads + encodes the files, rewrites the composer), and the CR fired
+ * on the fixed settle lands MID-HOIST and is swallowed — the composer keeps the envelope and NO turn
+ * is ever submitted. Proven live 16.07.2026 on an idle claude receiver: att=4 (2.7 MB) sat unsubmitted
+ * with a frozen transcript for 3m33s and moved only when an unrelated later delivery's CR arrived; the
+ * SAME envelope with an 8 s settle submitted itself in 4 s (single-factor isolation).
+ *
+ * Sent through the CONTROL channel (bare bytes, no bracketed paste) precisely because it must be a
+ * keystroke, not a pasted literal.
+ */
+export function resubmitHosted(identity: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
+  return sendControlToHost(hostRunDir(env), identity, [Buffer.from('\r', 'utf8')])
 }
