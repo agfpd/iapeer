@@ -9,6 +9,7 @@ import {
   goalWatchTick,
   readGoalRows,
   readThreadCwds,
+  readCurrentThreadByCwd,
   renderGoalContent,
   resolveGoalWatchPaths,
   scanStalledGoals,
@@ -81,6 +82,25 @@ describe('selectStalledGoals', () => {
     expect(selectStalledGoals([row()], mine, peerByCwd, T0)).toEqual([])
   })
 
+  // ── the fossil gate (16.07.2026) ────────────────────────────────────────────
+  // thread_goals is keyed by thread_id, so an ABANDONED thread keeps its last goal row forever.
+  // Measured live: a peer escaped a blocked goal the only way its own tools allowed — a fresh
+  // session — leaving `blocked` on the dead thread and `active` on the live one. Reporting the
+  // dead row would claim an objective is stalled while the peer is working it right now.
+  test('a stalled goal on an ABANDONED thread is not reported (the peer moved on)', () => {
+    const current = new Map([[CWD, 'newer-thread-id']]) // the peer's current thread is NOT ours
+    expect(selectStalledGoals([row()], cwdByThread, peerByCwd, T0, current)).toEqual([])
+  })
+
+  test('a stalled goal on the peer CURRENT thread is still reported', () => {
+    const current = new Map([[CWD, THREAD]])
+    expect(selectStalledGoals([row()], cwdByThread, peerByCwd, T0, current)).toHaveLength(1)
+  })
+
+  test('no known current thread for the cwd → nothing claimed', () => {
+    expect(selectStalledGoals([row()], cwdByThread, peerByCwd, T0, new Map())).toEqual([])
+  })
+
   test('objective is clipped before it can reach a notice', () => {
     const out = selectStalledGoals([row({ objective: 'x'.repeat(5000) })], cwdByThread, peerByCwd, T0)
     expect(out[0]?.objective.length).toBeLessThanOrEqual(300)
@@ -139,7 +159,7 @@ describe('resolveGoalWatchPaths', () => {
 
 // A real (temp) codex-shaped store: proves the SQL, the join and the guards — not just the
 // pure selector. Hermetic: it builds its own DBs and never touches the live ~/.codex.
-function makeCodexHome(opts: { status?: string; updatedAtMs?: number; cwd?: string } = {}): string {
+function makeCodexHome(opts: { status?: string; updatedAtMs?: number; cwd?: string; newerThread?: boolean } = {}): string {
   const home = mkdtempSync(join(tmpdir(), 'iapeer-codexhome-'))
   const g = new Database(join(home, 'goals_1.sqlite'))
   g.run(`CREATE TABLE thread_goals (
@@ -152,8 +172,10 @@ function makeCodexHome(opts: { status?: string; updatedAtMs?: number; cwd?: stri
   ])
   g.close()
   const s = new Database(join(home, 'state_5.sqlite'))
-  s.run('CREATE TABLE threads (id TEXT PRIMARY KEY NOT NULL, cwd TEXT)')
-  s.run('INSERT INTO threads VALUES (?,?)', [THREAD, opts.cwd ?? CWD])
+  s.run('CREATE TABLE threads (id TEXT PRIMARY KEY NOT NULL, cwd TEXT, recency_at_ms INTEGER, updated_at_ms INTEGER)')
+  s.run('INSERT INTO threads VALUES (?,?,?,?)', [THREAD, opts.cwd ?? CWD, T0, T0])
+  // The fossil shape: the peer abandoned THREAD and moved to a NEWER thread on the same cwd.
+  if (opts.newerThread) s.run('INSERT INTO threads VALUES (?,?,?,?)', ['newer-thread', opts.cwd ?? CWD, T0 + 60_000, T0 + 60_000])
   s.close()
   return home
 }
@@ -188,6 +210,24 @@ describe('reading codex state', () => {
       const out = await scanStalledGoals({ codexHome: home, peerByCwd }, T0)
       expect(out).toHaveLength(1)
       expect(out[0]).toMatchObject({ personality: 'zapret2-oneclick', status: 'blocked', threadId: THREAD })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('FOSSIL: a blocked goal on an abandoned thread is silent end-to-end', async () => {
+    const home = makeCodexHome({ newerThread: true })
+    try {
+      expect(await scanStalledGoals({ codexHome: home, peerByCwd }, T0)).toEqual([])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('readCurrentThreadByCwd picks the NEWEST thread per cwd', async () => {
+    const home = makeCodexHome({ newerThread: true })
+    try {
+      expect((await readCurrentThreadByCwd(home, [CWD])).get(CWD)).toBe('newer-thread')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

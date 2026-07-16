@@ -607,6 +607,92 @@ export interface CompactPeerOutcome {
  * crashed / never-run / non-resumable target returns an honest "nothing to compact"
  * instead of starting a fresh empty session and compacting that.
  */
+/** `iapeer goal` outcomes. `action` is what HAPPENED, never what we typed. */
+export interface GoalPeerOutcome {
+  personality: string
+  runtime: string
+  action: 'changed' | 'cleared' | 'no-goal' | 'unchanged' | 'unsupported' | 'offline'
+  from?: string
+  to?: string
+  reason?: string
+}
+
+/** How long we wait for codex to actually apply `/goal <sub>` before calling it unchanged. */
+const GOAL_APPLY_TIMEOUT_MS = 8000
+const GOAL_APPLY_POLL_MS = 250
+
+/**
+ * Drive a codex peer's thread goal out of a state its OWN tools cannot leave (docs/19 §2a).
+ *
+ * WHY THIS VERB EXISTS. Codex's goal control is split: the model may only mark complete|blocked,
+ * and `create_goal` is refused while a goal is unfinished — yet a transient turn error blocks a
+ * goal all by itself. So a headless peer can end up with a dead objective and NO way back except
+ * restarting its session and losing the thread. The transitions out of `blocked` exist, but only
+ * on the human's keyboard (`/goal resume|clear|pause`). We are the peer's keyboard.
+ *
+ * SUCCESS IS GATED ON THE GOAL STORE, not on keystrokes being accepted. Sending bytes into a pty
+ * proves nothing about whether the TUI acted on them — the delivery contour learned that the hard
+ * way. So we read codex's own goal row before and after, and report the transition we can SEE.
+ */
+export async function goalPeer(
+  personality: string,
+  sub: string,
+  runtime: string | undefined,
+  opts: CliEnvOptions & {
+    controlFn?: typeof routeControl
+    /** Injected goal reader (tests). Default: codex's own goal store, read-only. */
+    readGoalFn?: (cwd: string) => Promise<{ status: string; threadId: string } | null>
+    sleepFn?: (ms: number) => Promise<void>
+    timeoutMs?: number
+  } = {},
+): Promise<GoalPeerOutcome> {
+  const env = opts.env ?? process.env
+  const cfg = loadLifecycleConfig(env)
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  // Omitted runtime resolves the same way every operator verb resolves it (docs: the single
+  // resolvePeerRuntime authority) — never a hardcoded guess.
+  const rt: string = (runtime as Runtime | undefined) ?? resolvePeerRuntime(peer, cfg, env)
+  // Goals are a codex feature. Saying so beats typing '/goal' into a claude composer, where it
+  // would land as literal text in the peer's next message.
+  if (rt !== 'codex') {
+    return { personality, runtime: rt, action: 'unsupported', reason: `thread goals are a codex feature; "${personality}" is on ${rt}` }
+  }
+  const control = opts.controlFn ?? routeControl
+  const sleep = opts.sleepFn ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  const readGoal =
+    opts.readGoalFn ??
+    (async (cwd: string) => {
+      const { readGoalRows, readCurrentThreadByCwd, resolveGoalWatchPaths } = await import('../daemon/goalwatch.ts')
+      const home = resolveGoalWatchPaths(env).codexHome
+      const current = (await readCurrentThreadByCwd(home, [cwd])).get(cwd)
+      if (!current) return null
+      const row = (await readGoalRows(home)).find(g => g.threadId === current)
+      return row ? { status: row.status, threadId: row.threadId } : null
+    })
+
+  const before = await readGoal(peer.cwd)
+  if (!before) return { personality, runtime: rt, action: 'no-goal', reason: 'this peer has no goal on its current thread' }
+
+  const r = await control(personality, rt, { name: 'goal', args: [sub] })
+  if (!r.ok) return { personality, runtime: rt, action: 'offline', from: before.status, reason: r.error.message }
+
+  const deadline = Date.now() + (opts.timeoutMs ?? GOAL_APPLY_TIMEOUT_MS)
+  while (Date.now() < deadline) {
+    await sleep(GOAL_APPLY_POLL_MS)
+    const now = await readGoal(peer.cwd)
+    if (!now) return { personality, runtime: rt, action: 'cleared', from: before.status }
+    if (now.status !== before.status) return { personality, runtime: rt, action: 'changed', from: before.status, to: now.status }
+  }
+  return {
+    personality,
+    runtime: rt,
+    action: 'unchanged',
+    from: before.status,
+    reason: `goal still "${before.status}" ${GOAL_APPLY_TIMEOUT_MS}ms after /goal ${sub} — the session may be mid-turn (the composer takes the text but does not act on it until the turn ends)`,
+  }
+}
+
 export async function compactPeer(
   personality: string,
   runtime: string | undefined,
@@ -2540,6 +2626,24 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           return 0
         }
         errOut(`compact: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        return 1
+      }
+      case 'goal': {
+        // Recovery for a codex thread goal the peer's OWN tools cannot fix (docs/19 §2a).
+        const sub = positionals[1]
+        if (!positionals[0] || !sub) {
+          return argErr(errOut, 'goal needs a peer and a subcommand — usage: iapeer goal <peer> <resume|clear|pause> [runtime]')
+        }
+        const o = await goalPeer(positionals[0], sub, positionals[2], { env })
+        if (o.action === 'changed') {
+          out(`goal → ${o.personality} (${o.runtime}): ${o.from} → ${o.to}\n`)
+          return 0
+        }
+        if (o.action === 'cleared') {
+          out(`goal → ${o.personality} (${o.runtime}): ${o.from} → cleared (the peer can create_goal again)\n`)
+          return 0
+        }
+        errOut(`goal: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         return 1
       }
       case 'connect': {

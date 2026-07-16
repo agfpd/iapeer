@@ -128,6 +128,10 @@ export function selectStalledGoals(
   cwdByThread: Map<string, string>,
   peerByCwd: (cwd: string) => string | undefined,
   sinceMs: number,
+  /** cwd → the peer's CURRENT thread (see readCurrentThreadByCwd). A goal on any OTHER thread is
+   *  an abandoned session's leftover and is NOT this peer's objective. Omitted → no gate (the
+   *  pure-selection tests that predate the gate). */
+  currentThreadByCwd?: Map<string, string>,
 ): GoalDetection[] {
   const out: GoalDetection[] = []
   for (const g of goals) {
@@ -137,6 +141,12 @@ export function selectStalledGoals(
     if (!cwd) continue // thread not in the state DB → unattributable; ignore rather than guess
     const personality = peerByCwd(cwd)
     if (!personality) continue // a human's own codex thread — never notify
+    if (currentThreadByCwd) {
+      const current = currentThreadByCwd.get(cwd)
+      // A stalled goal on a thread the peer has moved on from is not news — it is a fossil. The
+      // peer may well be working the same objective on its current thread right now.
+      if (!current || current !== g.threadId) continue
+    }
     out.push({
       personality,
       runtime: 'codex',
@@ -270,6 +280,53 @@ export async function readThreadCwds(codexHome: string, threadIds: string[]): Pr
   return out
 }
 
+/**
+ * The CURRENT thread of each cwd — the newest by codex's own recency clock.
+ *
+ * WHY THIS GATES THE NOTICE. A peer's goal rows outlive its threads: `thread_goals` is keyed by
+ * thread_id, so a thread the peer has ABANDONED keeps its last goal row forever. Measured live
+ * 16.07.2026: a peer escaped a blocked goal the only way its tools allowed — a fresh session —
+ * and ended up with TWO rows, `blocked` on the dead thread and `active` on the live one. Reporting
+ * the dead row would tell the owner an objective is stalled while the peer is, in fact, working it
+ * on its current thread. That notice would be one-shot and WRONG, which is worse than noisy: the
+ * whole contract of this surface is that a card means something真 (docs/19 §2a).
+ *
+ * So a goal counts only on the cwd's newest thread. `recency_at_ms` is codex's field for exactly
+ * this; `updated_at_ms` is the fallback when it is absent.
+ */
+export async function readCurrentThreadByCwd(codexHome: string, cwds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (cwds.length === 0) return out
+  const path = findVersionedDb(codexHome, 'state')
+  if (!path) return out
+  const db = await openReadOnly(path)
+  if (!db) return out
+  try {
+    const holes = cwds.map(() => '?').join(',')
+    const rows = db
+      .query(
+        `SELECT id, cwd, COALESCE(recency_at_ms, updated_at_ms) AS rank FROM threads
+         WHERE cwd IN (${holes}) ORDER BY rank ASC`,
+      )
+      .all(...cwds) as Array<Record<string, unknown>>
+    // ASC + overwrite ⇒ the LAST write per cwd is the newest thread.
+    for (const r of rows) {
+      const id = str(r.id)
+      const cwd = str(r.cwd)
+      if (id && cwd) out.set(cwd, id)
+    }
+  } catch {
+    /* unrecognised schema → no gate we can trust → caller falls back to not notifying */
+  } finally {
+    try {
+      db.close()
+    } catch {
+      /* best-effort */
+    }
+  }
+  return out
+}
+
 export interface GoalScanDeps extends GoalWatchPaths {
   /** personality ← cwd. Built from the registry by the composition point. */
   peerByCwd: (cwd: string) => string | undefined
@@ -286,7 +343,10 @@ export async function scanStalledGoals(deps: GoalScanDeps, sinceMs: number): Pro
     deps.codexHome,
     candidates.map(g => g.threadId).filter(Boolean),
   )
-  return selectStalledGoals(candidates, cwds, deps.peerByCwd, floor)
+  // Gate on the cwd's CURRENT thread — a fossil goal on an abandoned session is not this peer's
+  // objective (see readCurrentThreadByCwd).
+  const current = await readCurrentThreadByCwd(deps.codexHome, [...new Set(cwds.values())])
+  return selectStalledGoals(candidates, cwds, deps.peerByCwd, floor, current)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -46,6 +46,19 @@ import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
 import { detectNumberedModal } from './modalDetect.ts'
 import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
 
+/**
+ * The `/goal` subcommands we will type into a live codex session (see executeControl → 'goal').
+ *
+ * DIALOG-FREE ONLY. Codex's own usage line is `/goal [<objective>|clear|edit|pause|resume]`, but:
+ *   - `<objective>` on an unfinished goal opens a "Replace goal?" modal (tui/thread_goal_actions.rs
+ *     `should_confirm_before_replacing_goal` → true for every status except Complete);
+ *   - `edit` opens $EDITOR.
+ * Both need us to blind-type past an interactive prompt, which is how a wrong option gets picked.
+ * `resume` / `clear` / `pause` apply straight through. `resume` is the one that matters: it is the
+ * documented user-side transition out of `blocked`, the state the model's own tools cannot leave.
+ */
+const GOAL_SUBCOMMANDS = new Set(['resume', 'clear', 'pause'])
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Boot dialog markers (watcher.codexUpdate/DirTrust/HooksReview, 253-261)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,11 +412,39 @@ export const codexAdapter: RuntimeAdapter = {
    *     conversation to prevent hitting the context limit») and a live run
    *     yields «• Context compacted». The 0.136-era "codex has no /compact"
    *     finding is stale; the mapping is keyboard-identical to claude's.
+   *   - goal <sub> → type '/goal <sub>' then Enter. The recovery path for a thread goal a
+   *     headless peer CANNOT fix with its own tools (docs/19 §2a). Codex exposes goal control
+   *     asymmetrically: the MODEL's `update_goal` may only mark complete|blocked ("pause,
+   *     resume, budget-limited, and usage-limited status changes are controlled by the user or
+   *     system"), and `create_goal` refuses while a goal is unfinished ("complete the existing
+   *     goal first"). So once a goal is `blocked` — which a transient turn error does BY ITSELF,
+   *     without the model — an agent peer has no way back and must restart its session. The
+   *     capability is not missing, it is HUMAN-ONLY: the TUI's `/goal [<objective>|clear|edit|
+   *     pause|resume]` calls thread/goal/set, an unconditional upsert that sets Active from any
+   *     status. We are the peer's keyboard, so we press it for them.
+   *
+   *     Verified live 16.07.2026 on a real codex peer: a blocked goal went blocked → ACTIVE and
+   *     codex resumed injecting its own continuation turns — same thread, same goal_id, no
+   *     self-fresh, nothing written to codex's sqlite by us.
+   *
+   *     Only DIALOG-FREE subcommands are allowed (see GOAL_SUBCOMMANDS). `/goal <objective>` is
+   *     deliberately NOT offered: replacing an unfinished goal opens a "Replace goal?"
+   *     confirmation, and blind-typing past a modal is how you submit the wrong answer. The
+   *     supported way to a NEW objective is `clear` (no goal → the peer's own `create_goal`
+   *     stops being refused), which keeps the objective the AGENT's to author, not ours.
    *   - anything else → null.
    */
   executeControl(command: ControlCommand): ControlPlan | null {
     if (command.name === 'interrupt') return { sequence: [['Escape']] }
     if (command.name === 'compact') return { sequence: [['-l', '/compact'], ['Enter']], stepDelayMs: 300 }
+    if (command.name === 'goal') {
+      const sub = command.args?.[0]
+      // Closed set — never interpolate caller text into a keystroke stream. An objective is
+      // free-form and would need the modal above; a typo'd subcommand must fail here, not land
+      // as literal garbage in a live composer.
+      if (!sub || !GOAL_SUBCOMMANDS.has(sub)) return null
+      return { sequence: [['-l', `/goal ${sub}`], ['Enter']], stepDelayMs: 300 }
+    }
     return null
   },
 }

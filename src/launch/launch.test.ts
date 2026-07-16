@@ -569,3 +569,33 @@ describe('executeControl (Ф-E control commands)', () => {
     expect(telegramAdapter.executeControl({ name: 'compact' })).toBeNull()
   })
 })
+
+// ── codex /goal control (16.07.2026) ─────────────────────────────────────────
+// Codex splits goal control: the MODEL may only mark complete|blocked and cannot create a new
+// goal while one is unfinished, yet a transient turn error blocks a goal by itself. The way out
+// exists only on the human keyboard (`/goal resume|clear|pause`), so the supervisor presses it.
+describe('codex executeControl — goal', () => {
+  test('resume/clear/pause map to a literal /goal <sub> + Enter', () => {
+    for (const sub of ['resume', 'clear', 'pause']) {
+      expect(codexAdapter.executeControl({ name: 'goal', args: [sub] })).toEqual({
+        sequence: [['-l', `/goal ${sub}`], ['Enter']],
+        stepDelayMs: 300,
+      })
+    }
+  })
+
+  // A free-form objective opens a "Replace goal?" modal, and blind-typing past a modal is how the
+  // wrong option gets picked. An unknown subcommand must fail HERE, not land as literal garbage in
+  // a live composer.
+  test.each([['improve benchmark coverage'], ['edit'], ['bogus'], ['']])('non-whitelisted arg %p → null', arg => {
+    expect(codexAdapter.executeControl({ name: 'goal', args: [arg] })).toBeNull()
+  })
+
+  test('missing args → null', () => {
+    expect(codexAdapter.executeControl({ name: 'goal' })).toBeNull()
+  })
+
+  test('claude has no thread goals → null (never type /goal into its composer)', () => {
+    expect(claudeAdapter.executeControl({ name: 'goal', args: ['resume'] })).toBeNull()
+  })
+})

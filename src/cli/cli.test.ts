@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { addRuntime, compactPeer, defaultRuntime, formatListTable, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
+import { addRuntime, compactPeer, defaultRuntime, formatListTable, goalPeer, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
 import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
 import { transcriptSlug } from '../launch/adapters/claude.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
@@ -931,5 +931,81 @@ describe('rename (full folder rename — personality = folder name, history move
 
   test('runCli rename missing args → usage error (exit 2)', async () => {
     expect(await runCli(['rename', 'only-one'], env())).toBe(2)
+  })
+})
+
+// ─── `iapeer goal` — recovery for a codex thread goal the peer's own tools cannot fix ────────
+// Codex only lets the MODEL mark complete|blocked, and refuses create_goal while a goal is
+// unfinished — yet a transient turn error blocks a goal by itself. The transitions out exist only
+// on the human keyboard. This verb is that keyboard, and it reports what the GOAL STORE says
+// happened, never "the keystrokes were accepted" (a pty write proves nothing about the TUI acting).
+describe('goal verb', () => {
+  const goalOpts = (over: Record<string, unknown> = {}) => ({
+    env: env(),
+    controlFn: async () => ({ ok: true as const, value: {} as never }),
+    sleepFn: async () => {},
+    timeoutMs: 50,
+    ...over,
+  })
+
+  test('blocked → active is reported as the transition we can SEE', async () => {
+    await register('cx', 'codex')
+    let status = 'blocked'
+    const o = await goalPeer('cx', 'resume', 'codex', goalOpts({
+      readGoalFn: async () => {
+        const cur = { status, threadId: 't1' }
+        status = 'active' // codex applied it between our before/after reads
+        return cur
+      },
+    }))
+    expect(o).toMatchObject({ action: 'changed', from: 'blocked', to: 'active', runtime: 'codex' })
+  })
+
+  test('the row disappearing is `cleared` — the peer can create_goal again', async () => {
+    await register('cx', 'codex')
+    let first = true
+    const o = await goalPeer('cx', 'clear', 'codex', goalOpts({
+      readGoalFn: async () => {
+        if (first) { first = false; return { status: 'blocked', threadId: 't1' } }
+        return null
+      },
+    }))
+    expect(o).toMatchObject({ action: 'cleared', from: 'blocked' })
+  })
+
+  // The lesson of the delivery contour: bytes leaving us is NOT the thing happening.
+  test('keystrokes accepted but the goal never moved → `unchanged`, not success', async () => {
+    await register('cx', 'codex')
+    const o = await goalPeer('cx', 'resume', 'codex', goalOpts({
+      readGoalFn: async () => ({ status: 'blocked', threadId: 't1' }),
+    }))
+    expect(o.action).toBe('unchanged')
+    expect(o.reason).toContain('mid-turn')
+  })
+
+  test('a claude peer is refused — goals are a codex feature', async () => {
+    await register('cl', 'claude')
+    const o = await goalPeer('cl', 'resume', 'claude', goalOpts({ readGoalFn: async () => ({ status: 'blocked', threadId: 't1' }) }))
+    expect(o.action).toBe('unsupported')
+  })
+
+  test('no goal on the current thread → nothing to drive, control never fired', async () => {
+    await register('cx', 'codex')
+    let controlCalls = 0
+    const o = await goalPeer('cx', 'resume', 'codex', goalOpts({
+      readGoalFn: async () => null,
+      controlFn: async () => { controlCalls++; return { ok: true as const, value: {} as never } },
+    }))
+    expect(o.action).toBe('no-goal')
+    expect(controlCalls).toBe(0)
+  })
+
+  test('an offline session is reported as offline, not as a goal failure', async () => {
+    await register('cx', 'codex')
+    const o = await goalPeer('cx', 'resume', 'codex', goalOpts({
+      readGoalFn: async () => ({ status: 'blocked', threadId: 't1' }),
+      controlFn: async () => ({ ok: false as const, error: new Error('no session') }),
+    }))
+    expect(o.action).toBe('offline')
   })
 })
