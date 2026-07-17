@@ -53,19 +53,41 @@ enum, so no prose is matched.
 
 ### codex — the rollout
 
-`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, in an `event_msg` / `token_count` payload:
+`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. **The primary signal is the death
+fingerprint, established on the real incident of 17.07.2026** (quota genuinely exhausted,
+both codex peers mute; forensics: `docs/internals/forensics/model-limit-2026-07-17/`). The
+rollout records **no error event**; what the refused API call leaves instead is:
 
 ```json
-{ "rate_limits": { "limit_id": "codex", "plan_type": "plus",
-    "primary":   { "used_percent": 1.0,  "window_minutes": 300,   "resets_at": 1783114795 },
-    "secondary": { "used_percent": 17.0, "window_minutes": 10080, "resets_at": 1783412915 },
-    "rate_limit_reached_type": null } }
+{ "payload": { "type": "token_count",
+    "info": null-or-cumulative-totals-UNCHANGED,
+    "rate_limits": { "limit_id": "premium", "primary": null, "secondary": null,
+      "credits": { "has_credits": false, "unlimited": false, "balance": "0" },
+      "rate_limit_reached_type": null } } }
+{ "payload": { "type": "task_complete", "last_agent_message": null, "completed_at": 1784309462 } }
 ```
 
-`rate_limit_reached_type` is `null` while healthy and non-null once a wall is hit. The
-detector keys on **non-null**, never on the variant strings (`rate_limit_reached`,
-`workspace_owner_usage_limit_reached`, `workspace_member_credits_depleted`, … — read out of
-the 0.144.1 binary), so a variant we have never seen still detects and reports itself.
+The detector requires the CONJUNCTION: both windows null AND no new usage recorded (`info`
+null in a fresh session, or cumulative totals identical to the previous `token_count` — a
+refused call consumes nothing) AND the turn closes with `task_complete{last_agent_message:
+null}`. Each conjunct is load-bearing: a lone null-window snapshot occurs transiently while
+the turn SURVIVES (measured 10.07.2026 — totals advanced, the turn lived on), and a
+message-less `task_complete` alone is an absence, not a signal (§8). The event time is
+`completed_at` (the original epoch) — never the line timestamp, which a session resume
+REWRITES when it replays history into a fresh rollout (measured 16.07: a 14:31:58 death
+re-recorded at 18:49:23).
+
+`errorType` is `usage_limit_exceeded` — codex's own error-code vocabulary (0.144.1 binary) —
+when the tail holds a window at `used_percent ≥ 100` (the evidence this is the usage-limit
+class); that window's `resets_at` becomes the notice's reset. Without such evidence the
+honest fallback is `api-refusal` and no reset is invented. The model comes from the dead
+turn's own `turn_context` (real bytes name it: `gpt-5.6-sol`).
+
+`rate_limit_reached_type` non-null is KEPT as a forward-compat second path — but the real
+incident **refuted it as the primary signal**: with the quota exhausted and turns dying, it
+stayed `null` in every snapshot of every rollout. When it does fire, the detector keys on
+**non-null**, never on the variant strings (`rate_limit_reached`,
+`workspace_owner_usage_limit_reached`, … — read out of the 0.144.1 binary).
 
 ## 2a. The signal: `peer-goal-stalled` (codex only)
 
@@ -331,14 +353,20 @@ there is nothing to derive from. Reading the file's own statement works for both
 - **claude — proven live.** The transcript signal, the missing reset, the whole path
   (detector → board → fleet surface) were exercised against a genuinely exhausted fable
   bucket on 15.07.2026. Tests replay the captured line byte-for-byte.
-- **codex — proven by replay, not live.** The rollout structure, windows, resets and the
-  healthy (`null`) path are real bytes from this host. Codex's quota never ran out here, so
-  **no real reached-bytes exist**: the tests flip that one field to a variant read out of the
-  binary. The detector keys on non-null precisely so this synthesis cannot flatter it. A real
-  codex reach should be captured opportunistically and folded in.
-- **The blocking-window heuristic is unverified.** Codex does not say WHICH window blocked;
-  the notice reports the **fullest** one. Both windows ride in `content`, so a human sees the
-  raw fact even if the heuristic picks wrong.
+- **codex — the 15.07 replay acceptance was REFUTED by the first real incident, and the
+  detector was rebuilt on the real bytes (17.07.2026).** The original detector keyed on
+  `rate_limit_reached_type` non-null — a field whose reached VALUE was synthesized at
+  acceptance (honestly flagged here at the time). When the quota genuinely ran out on
+  17.07.2026 the field stayed `null` through the entire incident and the detector missed
+  both mute peers; the owner found out by asking. The current death-fingerprint path (§2)
+  is built from and tested against the incident's verbatim bytes (four independent dying
+  sessions + a negative transient + the resume-replay trap), and proven live on the real
+  mute fleet. The reached path is retained as forward-compat only.
+- **The blocking-window heuristic (reached path only) is unverified.** Codex does not say
+  WHICH window blocked; that path reports the **fullest** one. The fingerprint path has no
+  such ambiguity in practice: the real incident carried exactly one exhausted window, and
+  with several the LATEST reset is reported (blocked until the last wall lifts). Windows
+  ride in `content`, so a human sees the raw fact either way.
 - **`peer-goal-stalled` — the state read is proven on real data; the CAUSE of one instance is
   not.** The detector was run against the live goal store on 16.07.2026 and returned exactly
   the real stall (`zapret2-oneclick`, `blocked`, goal `c25d2378…`, 09:54:32, attributed via the
@@ -356,9 +384,12 @@ Forensic evidence for all of the above: `docs/internals/forensics/model-limit-20
 
 ## 8. Known hole: codex generic API errors — measured, not assumed
 
-**A codex peer left mute by anything other than a rate limit is not detected.** Its
-rate-limit path — the actual incident class — IS covered by `rate_limit_reached_type`. Mute
-from overload or an expired auth is not.
+**A codex peer left mute by a cause that emits NO rate_limits snapshot is not detected.**
+The usage-limit class — the actual incident class — IS covered, by the §2 death fingerprint
+(the refused call's own snapshot; `rate_limit_reached_type` proved inert on the real
+incident and is forward-compat only). Mute from a cause whose refusal leaves no
+`token_count` at all (this section's fault-injected 429 on a custom provider left none) is
+not.
 
 This is a property of codex, not an omission here. Measured on 15.07.2026:
 
@@ -379,10 +410,15 @@ This is a property of codex, not an omission here. Measured on 15.07.2026:
 So codex's only structural error surface is the `rate_limits` snapshot this detector already
 reads. The claude/codex asymmetry in §2 is that fact, not a shortcut.
 
-**Rejected, deliberately:** `task_complete` with `last_agent_message: null` is the only tell
-that the turn failed — and it is an **absence, not a signal**. A detector on it would fire on
-every turn that legitimately produced no agent message. Inferring "mute" from it would be the
-exact plausible-inference defect this whole note exists to prevent; it is not built.
+**Rejected, deliberately:** `task_complete` with `last_agent_message: null` **alone** is an
+**absence, not a signal**. A detector on it by itself would fire on every turn that
+legitimately produced no agent message; that is not built, and the 17.07 rebuild did not
+change it. What the real incident ADDED (this probe could not see it — the custom provider
+emitted no `token_count` at all) is that the real ChatGPT provider's refused call leaves a
+POSITIVE artifact: the null-window, no-new-usage `token_count` snapshot. The §2 conjunction
+keys on that artifact and uses the message-less `task_complete` only to scope it to a turn
+that actually died. A mute from a cause that emits NO snapshot (as in this probe) remains
+undetected — this hole is narrowed, not closed.
 
 **Not answered:** whether `stream_error` — a real serde variant of codex's `EventMsg`, next to
 `deprecation_notice` and `patch_apply_begin` — is persisted to the rollout. Codex filters

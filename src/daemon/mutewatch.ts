@@ -24,12 +24,40 @@
 //     notice omits the reset rather than extrapolating from the 5h/7d buckets (a DIFFERENT
 //     limit: measured live at 5h 11% / 7d 66% while fable was fully exhausted).
 //
-//   • codex → the rollout (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl): an `event_msg` /
-//     `token_count` payload carries RateLimitSnapshot.rate_limit_reached_type — null while
-//     healthy, non-null once a wall is hit. We key on NON-NULL, never on the variant strings
-//     (`rate_limit_reached`, `workspace_owner_usage_limit_reached`, … — read out of the 0.144.1
-//     binary but never observed live here), so an unknown future variant still detects.
-//     Codex DOES carry resets_at per window → its notice states the reset time.
+//   • codex → the rollout (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl). TWO detections:
+//
+//     (a) `rate_limit_reached_type` non-null in a token_count's RateLimitSnapshot. Kept for
+//         forward-compat, but REFUTED as the primary signal by the real incident of
+//         17.07.2026: with the account's codex quota genuinely exhausted (both codex peers
+//         mute, turns dying on delivery), every snapshot in every rollout still said
+//         `rate_limit_reached_type: null` — the field simply does not fire on this class.
+//         The 15.07 acceptance replayed real bytes but SYNTHESIZED this field (docs/19 §7
+//         said so); the synthesis diverged from reality and the detector missed the real
+//         incident. We still key on NON-NULL (never the variant strings) in case a future
+//         codex starts populating it.
+//
+//     (b) The REAL fingerprint of a limit-death, read out of the incident's own bytes
+//         (doc, linus, zapret2-oneclick and a minimal `codex exec` probe, 17.07.2026 —
+//         fixtures in docs/internals/forensics/model-limit-2026-07-17/): the rollout has NO
+//         error event at all; the refused API call instead emits a token_count whose
+//         rate_limits snapshot has BOTH windows null (healthy snapshots carry a windowed
+//         primary), and whose `info` recorded no new usage (null in a fresh session, or
+//         cumulative totals identical to the previous token_count — the call consumed
+//         nothing because it was refused), immediately followed by `task_complete` with
+//         `last_agent_message: null` (the turn died). All three conjuncts are required:
+//           – a lone null-window snapshot happens transiently and the turn SURVIVES
+//             (observed 10.07.2026: null windows but totals advanced, turn continued);
+//           – `task_complete{last_agent_message:null}` alone is an absence, not a signal
+//             (docs/19 §8 rejected it deliberately — legitimate no-message turns exist).
+//         The event time is `completed_at` (epoch seconds), NOT the line timestamp: a
+//         resumed session REPLAYS history with fresh line timestamps but keeps the original
+//         completed_at, so a replayed old death does not re-raise after recovery.
+//         errorType is `usage_limit_exceeded` — codex's own error-code vocabulary (read out
+//         of the 0.144.1 binary) — when the tail holds an exhausted window (used_percent
+//         ≥ 100, the evidence this is the usage-limit class); `api-refusal` (our fallback,
+//         mirroring claude's `api-error`) when it does not. resets_at comes from that
+//         exhausted window — the refusal snapshot itself carries none. The model comes from
+//         the dead turn's own turn_context (real bytes name it, e.g. `gpt-5.6-sol`).
 //
 // PATHS ARE NOT DERIVED FROM cwd — but NOT for the reason first claimed here. The original note
 // said this host carries BOTH `-Users-macmini-Projects-IAPeer` and `-Users-macmini-Projects-iapeer`
@@ -156,9 +184,17 @@ function describeWindow(name: string, w: CodexWindow): string | null {
   return `${name} ${w.used_percent}% (${win}${reset})`
 }
 
+/** A window object out of a rate_limits snapshot, or null when absent/malformed. */
+function asWindow(w: unknown): CodexWindow | null {
+  return w && typeof w === 'object' ? (w as CodexWindow) : null
+}
+
 /**
- * The codex rollout's newest limit-reached snapshot newer than `sinceMs`, or null.
- * Keys on `rate_limit_reached_type` being NON-NULL — never on its variant strings.
+ * The codex rollout's newest limit-death evidence newer than `sinceMs`, or null. Two paths
+ * (see the header): (a) `rate_limit_reached_type` NON-NULL — kept forward-compat, refuted as
+ * the primary signal by the 17.07.2026 incident; (b) the real-bytes fingerprint — a refused
+ * API call's token_count (both windows null, no new usage) as the dying turn's last snapshot,
+ * closed by `task_complete{last_agent_message:null}`.
  * `cwd` comes from session_meta, which is the file's FIRST line — pass the file HEAD in
  * `head` when the tail alone may have cut it away.
  */
@@ -184,34 +220,121 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
   if (!cwd) return null // unattributable to a peer
 
   let found: RawDetection | null = null
+  // Path-(b) rolling state, in file order (= time order):
+  /** Latest snapshot that still HAD a window — the exhausted-window/resets evidence. */
+  let lastWindowed: { primary: CodexWindow | null; secondary: CodexWindow | null; planType?: string } | null = null
+  /** Previous token_count's CUMULATIVE total — the refused-call (no new usage) discriminator. */
+  let prevTotal: number | null = null
+  /** True while the current turn's last token_count is refusal-shaped. */
+  let refusalPending = false
+  let lastModel: string | undefined
+  const modelByTurn = new Map<string, string>()
+
   for (const line of text.split('\n')) {
     const s = line.trim()
-    if (!s.startsWith('{') || !s.includes('rate_limits')) continue
-    let d: { timestamp?: unknown; type?: unknown; payload?: { type?: unknown; rate_limits?: Record<string, unknown> } }
+    if (!s.startsWith('{')) continue
+    if (!s.includes('rate_limits') && !s.includes('turn_context') && !s.includes('task_started') && !s.includes('task_complete')) continue
+    let d: {
+      timestamp?: unknown
+      type?: unknown
+      payload?: {
+        type?: unknown
+        turn_id?: unknown
+        model?: unknown
+        last_agent_message?: unknown
+        completed_at?: unknown
+        info?: { total_token_usage?: { total_tokens?: unknown } } | null
+        rate_limits?: Record<string, unknown>
+      }
+    }
     try {
       d = JSON.parse(s)
     } catch {
       continue
     }
-    const rl = d.payload?.rate_limits
+    const p = d.payload
+    if (!p) continue
+
+    // The dead turn's own turn_context names the model (real bytes: "gpt-5.6-sol").
+    if (d.type === 'turn_context') {
+      if (typeof p.model === 'string' && p.model) {
+        lastModel = p.model
+        if (typeof p.turn_id === 'string') modelByTurn.set(p.turn_id, p.model)
+      }
+      continue
+    }
+
+    if (p.type === 'task_started') {
+      refusalPending = false // a refusal snapshot never crosses turn boundaries
+      continue
+    }
+
+    if (p.type === 'task_complete') {
+      // `=== null` (strict): the field is PRESENT and null in every real death; a turn that
+      // produced a message carries the message. The conjunction with refusalPending is what
+      // keeps docs/19 §8 honest — null alone is an absence, not a signal.
+      const died = refusalPending && p.last_agent_message === null
+      refusalPending = false
+      if (!died) continue
+      // Event time = completed_at (epoch s), NOT the line timestamp: a resumed session
+      // REPLAYS history with fresh line timestamps but keeps the original completed_at —
+      // keying on it stops a replayed old death from re-raising after recovery.
+      const atMs = typeof p.completed_at === 'number' ? p.completed_at * 1000 : toMs(d.timestamp)
+      if (atMs === null || atMs <= sinceMs) continue
+      const exhausted = [lastWindowed?.primary, lastWindowed?.secondary].filter(
+        (w): w is CodexWindow => !!w && typeof w.used_percent === 'number' && w.used_percent >= 100,
+      )
+      const resets = exhausted
+        .map(w => (typeof w.resets_at === 'number' ? w.resets_at * 1000 : null))
+        .filter((n): n is number => n !== null)
+      // usage_limit_exceeded = codex's own error-code vocabulary (0.144.1 binary), applied
+      // only when an exhausted window evidences the class; else our honest fallback.
+      const errorType = exhausted.length ? 'usage_limit_exceeded' : 'api-refusal'
+      const parts = lastWindowed
+        ? [describeWindow('primary', lastWindowed.primary ?? {}), describeWindow('secondary', lastWindowed.secondary ?? {})].filter(Boolean)
+        : []
+      const plan = lastWindowed?.planType ? ` plan=${lastWindowed.planType}` : ''
+      found = {
+        errorType,
+        model: (typeof p.turn_id === 'string' ? modelByTurn.get(p.turn_id) : undefined) ?? lastModel,
+        content: `Codex turn died on a refused API call (${errorType})${plan}${parts.length ? ` — ${parts.join('; ')}` : ''}`,
+        resetsAtMs: resets.length ? Math.max(...resets) : undefined,
+        sessionId,
+        atMs,
+        cwd,
+      }
+      continue
+    }
+
+    const rl = p.rate_limits
     if (!rl) continue
+    const primary = asWindow(rl.primary)
+    const secondary = asWindow(rl.secondary)
+    if (primary || secondary) lastWindowed = { primary, secondary, planType: typeof rl.plan_type === 'string' ? rl.plan_type : undefined }
+    // Did this snapshot's call consume anything? info:null (fresh session, refused outright)
+    // or cumulative totals identical to the previous token_count = NO — the refused-call
+    // discriminator. Unknown previous (tail cut) counts as usage: conservative, no guess.
+    const total = typeof p.info?.total_token_usage?.total_tokens === 'number' ? p.info.total_token_usage.total_tokens : null
+    const noUsage = p.info === null ? true : prevTotal !== null && total !== null && total === prevTotal
+    if (total !== null) prevTotal = total
+    const unlimited = (rl.credits as { unlimited?: unknown } | null | undefined)?.unlimited === true
+    refusalPending = !primary && !secondary && !unlimited && noUsage
+
+    // Path (a) — forward-compat: NON-NULL reached type, never the variant strings.
     const reached = rl.rate_limit_reached_type
-    // NON-NULL is the signal. An unknown future variant must still detect, so we never
-    // compare against the variant strings read out of the binary.
     if (reached === null || reached === undefined || reached === '') continue
     const atMs = toMs(d.timestamp)
     if (atMs === null || atMs <= sinceMs) continue
-    const primary = (rl.primary ?? {}) as CodexWindow
-    const secondary = (rl.secondary ?? {}) as CodexWindow
+    const pWin = primary ?? {}
+    const sWin = secondary ?? {}
     // Which window is blocking? Codex does not say — reported for the FULLEST one, the
-    // only defensible read. This mapping is a HEURISTIC: it could not be verified against
-    // a real reached-snapshot (the quota never ran out on this host). Both windows ride in
-    // `content`, so the human sees the raw fact even if the heuristic picked wrong.
-    const pu = typeof primary.used_percent === 'number' ? primary.used_percent : -1
-    const su = typeof secondary.used_percent === 'number' ? secondary.used_percent : -1
-    const blocking = su > pu ? secondary : primary
+    // only defensible read. Both windows ride in `content`, so the human sees the raw
+    // fact even if the heuristic picked wrong.
+    const pu = typeof pWin.used_percent === 'number' ? pWin.used_percent : -1
+    const su = typeof sWin.used_percent === 'number' ? sWin.used_percent : -1
+    const blocking = su > pu ? sWin : pWin
     const resetsAtMs = typeof blocking.resets_at === 'number' ? blocking.resets_at * 1000 : undefined
-    const parts = [describeWindow('primary', primary), describeWindow('secondary', secondary)].filter(Boolean)
+    const parts = [describeWindow('primary', pWin), describeWindow('secondary', sWin)].filter(Boolean)
     const plan = typeof rl.plan_type === 'string' ? ` plan=${rl.plan_type}` : ''
     found = {
       errorType: String(reached),
@@ -220,7 +343,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
       sessionId,
       atMs,
       cwd,
-      // Codex names no model in the snapshot → model omitted rather than guessed.
+      model: lastModel,
     }
   }
   return found

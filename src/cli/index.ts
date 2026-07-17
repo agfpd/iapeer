@@ -1392,7 +1392,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   },
   {
     sig: 'default-runtime <runtime> (--peer <p> | --all)',
-    desc: 'flip the PRIMARY (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command',
+    desc: 'switch/set the PRIMARY runtime of peer(s) (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command',
   },
   { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then attach to the pty session (Ctrl-] detaches)' },
   { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact' },

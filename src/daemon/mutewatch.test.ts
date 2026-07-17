@@ -28,11 +28,13 @@ const REAL_MODEL_REPLY =
 // ~/.codex/sessions on this host (2026-07-03) — the healthy case, byte-for-byte, including
 // `rate_limit_reached_type: null` and the real window figures (primary 1%, secondary 17%).
 //
-// HONEST BOUNDARY (docs/19 §5): codex's quota never ran out here, so no real REACHED bytes
-// exist to replay. `codexReached()` flips that ONE field to a variant read out of the 0.144.1
-// binary and touches nothing else. So: the structure, the windows, the resets and the healthy
-// path are real; the reached VALUE is synthesized. The detector keys on non-null precisely so
-// this synthesis cannot flatter it — any variant, known or not, takes the same path.
+// HISTORY OF AN HONEST BOUNDARY. The 15.07 acceptance had no real reached-bytes (the quota
+// had never run out here), so `codexReached()` SYNTHESIZES the one field — and docs/19 §7
+// said so. On 17.07.2026 the quota DID run out, and the real bytes REFUTED the synthesis:
+// through a full live incident (both codex peers mute, turns dying on delivery),
+// `rate_limit_reached_type` stayed null in every snapshot of every rollout. The reached path
+// below is kept as forward-compat only; the REAL death fingerprint has its own fixtures —
+// verbatim incident bytes — further down.
 // ─────────────────────────────────────────────────────────────────────────────
 const REAL_CODEX_TOKEN_COUNT =
   '{"timestamp":"2026-07-03T16:40:10.618Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":26124,"cached_input_tokens":4480,"output_tokens":754,"reasoning_output_tokens":463,"total_tokens":26878},"last_token_usage":{"input_tokens":26124,"cached_input_tokens":4480,"output_tokens":754,"reasoning_output_tokens":463,"total_tokens":26878},"model_context_window":258400},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":1.0,"window_minutes":300,"resets_at":1783114795},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1783412915},"credits":null,"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}'
@@ -48,6 +50,50 @@ const codexReached = (variant = 'rate_limit_reached'): string =>
 // Real session_meta (trimmed to the fields the detector reads), verbatim values.
 const CODEX_META =
   '{"timestamp":"2026-07-13T01:44:12.982Z","type":"session_meta","payload":{"session_id":"019f5925-6c1f-7911-85e5-87feba841fb9","cwd":"/Users/macmini/Peers/doc","originator":"codex-tui","cli_version":"0.144.1"}}'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL DEATH BYTES — the 17.07.2026 incident (codex quota exhausted, doc/linus mute, owner
+// found out by asking). Verbatim lines out of doc's rollout (019f70d0-…9477) and the minimal
+// `codex exec` probe (019f7127-…558b); full files in docs/internals/forensics/
+// model-limit-2026-07-17/. The fingerprint they establish: the refused call emits a
+// token_count with BOTH windows null and NO new usage, and the turn closes with
+// task_complete{last_agent_message:null}. No error event exists anywhere in the rollout.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** doc, 17:29:01Z — the last WINDOWED snapshot before death: primary 100%, resets_at present. */
+const DOC_WINDOWED_100 =
+  '{"timestamp":"2026-07-17T17:29:01.549Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3512591,"cached_input_tokens":3324160,"output_tokens":15042,"reasoning_output_tokens":7047,"total_tokens":3527633},"last_token_usage":{"input_tokens":98653,"cached_input_tokens":96000,"output_tokens":160,"reasoning_output_tokens":55,"total_tokens":98813},"model_context_window":258400},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":10080,"resets_at":1784817491},"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}'
+
+/** doc, 17:31:00Z — the dying turn opens. */
+const DOC_TASK_STARTED =
+  '{"timestamp":"2026-07-17T17:31:00.452Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7121-addf-7541-8ead-f9514250701d","started_at":1784309460,"model_context_window":258400,"collaboration_mode_kind":"default"}}'
+
+/** doc, 17:31:00Z — the dying turn's turn_context (trimmed to the fields read), verbatim values. */
+const DOC_TURN_CONTEXT =
+  '{"timestamp":"2026-07-17T17:31:00.458Z","type":"turn_context","payload":{"turn_id":"019f7121-addf-7541-8ead-f9514250701d","cwd":"/Users/macmini/Peers/doc","model":"gpt-5.6-sol","comp_hash":"3000","personality":"pragmatic"}}'
+
+/** doc, 17:31:02Z — the REFUSED call's snapshot: both windows null, cumulative totals UNCHANGED. */
+const DOC_REFUSAL_TC =
+  '{"timestamp":"2026-07-17T17:31:02.146Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3512591,"cached_input_tokens":3324160,"output_tokens":15042,"reasoning_output_tokens":7047,"total_tokens":3527633},"last_token_usage":{"input_tokens":98653,"cached_input_tokens":96000,"output_tokens":160,"reasoning_output_tokens":55,"total_tokens":98813},"model_context_window":258400},"rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}'
+
+/** doc, 17:31:02Z — the turn dies. completed_at 1784309462 is the ORIGINAL epoch (replay-stable). */
+const DOC_TASK_COMPLETE =
+  '{"timestamp":"2026-07-17T17:31:02.153Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"019f7121-addf-7541-8ead-f9514250701d","last_agent_message":null,"completed_at":1784309462,"duration_ms":1700}}'
+
+const DOC_DEATH_AT_MS = 1_784_309_462 * 1000
+const DOC_RESET_MS = 1_784_817_491 * 1000
+const DOC_DEATH_SEQ = [CODEX_META, DOC_WINDOWED_100, DOC_TASK_STARTED, DOC_TURN_CONTEXT, DOC_REFUSAL_TC, DOC_TASK_COMPLETE].join('\n')
+
+/** The probe (`codex exec` in /private/tmp) — a FRESH session refused outright: info is null. */
+const PROBE_REFUSAL_TC =
+  '{"timestamp":"2026-07-17T17:37:16.231Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"plan_type":null,"rate_limit_reached_type":null}}}'
+const PROBE_TASK_COMPLETE =
+  '{"timestamp":"2026-07-17T17:37:16.235Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"019f7127-54cb-76b2-b7f0-5920c8870b48","last_agent_message":null,"completed_at":1784309836,"duration_ms":5374}}'
+
+/** 10.07.2026 — the TRANSIENT that must NOT detect: windows null but totals ADVANCED (the call
+ *  succeeded; the very next rollout line was reasoning and the turn lived on). Verbatim. */
+const TRANSIENT_2026_07_10 =
+  '{"timestamp":"2026-07-10T14:17:02.743Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":270201,"cached_input_tokens":233984,"output_tokens":2372,"reasoning_output_tokens":1357,"total_tokens":272573},"last_token_usage":{"input_tokens":40059,"cached_input_tokens":37760,"output_tokens":443,"reasoning_output_tokens":189,"total_tokens":40502},"model_context_window":258400},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":null,"secondary":null,"credits":null,"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}'
 
 describe('parseClaudeTranscript — against the REAL captured rate-limit line', () => {
   test('detects the real line and reports the runtime taxonomy verbatim', () => {
@@ -194,6 +240,82 @@ describe('parseCodexRollout — replaying REAL rollout bytes', () => {
 
   test('respects the since-boundary', () => {
     expect(parseCodexRollout([CODEX_META, codexReached()].join('\n'), REAL_CODEX_TS_MS)).toBeNull()
+  })
+})
+
+describe('parseCodexRollout — the REAL death fingerprint (17.07.2026 incident bytes)', () => {
+  test('detects the real death and every field comes from the bytes', () => {
+    const d = parseCodexRollout(DOC_DEATH_SEQ, 0)
+    expect(d).not.toBeNull()
+    expect(d!.errorType).toBe('usage_limit_exceeded') // codex's own error-code vocab; window at 100% evidences the class
+    expect(d!.model).toBe('gpt-5.6-sol') // from the dead turn's own turn_context
+    expect(d!.resetsAtMs).toBe(DOC_RESET_MS) // from the exhausted window — the reset codex DOES state
+    expect(d!.atMs).toBe(DOC_DEATH_AT_MS) // completed_at, not the line timestamp
+    expect(d!.cwd).toBe('/Users/macmini/Peers/doc')
+    expect(d!.content).toContain('primary 100%')
+  })
+
+  test('a fresh session refused outright (the probe: info null, no windowed history) still detects', () => {
+    const d = parseCodexRollout([CODEX_META, PROBE_REFUSAL_TC, PROBE_TASK_COMPLETE].join('\n'), 0)
+    expect(d).not.toBeNull()
+    // No exhausted-window evidence in the file → the honest fallback class, and NO reset invented.
+    expect(d!.errorType).toBe('api-refusal')
+    expect(d!.resetsAtMs).toBeUndefined()
+  })
+
+  test('the real 10.07 transient (windows null but totals ADVANCED) does NOT detect', () => {
+    // REAL_CODEX_TOKEN_COUNT establishes the previous cumulative total; the transient's differs
+    // → the call consumed tokens → it was not refused, whatever its snapshot looked like.
+    const text = [CODEX_META, REAL_CODEX_TOKEN_COUNT, TRANSIENT_2026_07_10, DOC_TASK_COMPLETE].join('\n')
+    expect(parseCodexRollout(text, 0)).toBeNull()
+  })
+
+  test('a mid-turn refusal the turn RECOVERS from does not detect', () => {
+    // refusal snapshot → a later windowed token_count (the retry succeeded) → task_complete null.
+    const text = [CODEX_META, DOC_WINDOWED_100, DOC_REFUSAL_TC, REAL_CODEX_TOKEN_COUNT, DOC_TASK_COMPLETE].join('\n')
+    expect(parseCodexRollout(text, 0)).toBeNull()
+  })
+
+  test('a refusal snapshot never crosses a turn boundary (docs/19 §8 stands)', () => {
+    // Refusal in turn N, then task_started for turn N+1 which completes message-less WITHOUT
+    // any token_count of its own (the §8 custom-provider shape) → an absence, not a signal.
+    const text = [CODEX_META, DOC_WINDOWED_100, DOC_REFUSAL_TC, DOC_TASK_STARTED, DOC_TASK_COMPLETE].join('\n')
+    expect(parseCodexRollout(text, 0)).toBeNull()
+  })
+
+  test('task_complete WITH a message after a refusal snapshot does not detect', () => {
+    const survived = DOC_TASK_COMPLETE.replace('"last_agent_message":null', '"last_agent_message":"done"')
+    const text = [CODEX_META, DOC_WINDOWED_100, DOC_TASK_STARTED, DOC_REFUSAL_TC, survived].join('\n')
+    expect(parseCodexRollout(text, 0)).toBeNull()
+  })
+
+  test('an unlimited-credits account with windowless snapshots never detects', () => {
+    const unlimited = PROBE_REFUSAL_TC.replace('"unlimited":false', '"unlimited":true')
+    const text = [CODEX_META, unlimited, PROBE_TASK_COMPLETE].join('\n')
+    expect(parseCodexRollout(text, 0)).toBeNull()
+  })
+
+  test('REPLAY protection: the event time is completed_at, so a resumed session re-recording the death does not re-raise', () => {
+    // codex resume REPLAYS history into the new rollout with FRESH line timestamps but the
+    // ORIGINAL completed_at (measured 16.07: a death re-recorded 4h19m later). A boundary
+    // after the original death must skip it even though the line timestamps are new.
+    const replayed = DOC_DEATH_SEQ.replaceAll('2026-07-17T17:31:02', '2026-07-17T21:50:23').replaceAll('2026-07-17T17:29:01', '2026-07-17T21:50:23')
+    expect(parseCodexRollout(replayed, DOC_DEATH_AT_MS)).toBeNull()
+    expect(parseCodexRollout(replayed, DOC_DEATH_AT_MS - 1)).not.toBeNull()
+  })
+
+  test('attributes through the tree and raises with honest summary fields', () => {
+    const home = mkdtempSync(join(tmpdir(), 'iapeer-mutedeath-'))
+    const paths = resolveMuteWatchPaths({ HOME: home } as unknown as NodeJS.ProcessEnv)
+    mkdirSync(join(paths.codexSessionsDir, '2026', '07', '17'), { recursive: true })
+    writeFileSync(join(paths.codexSessionsDir, '2026', '07', '17', 'rollout-real.jsonl'), DOC_DEATH_SEQ)
+    const found = scanMuteEvents({ ...paths, peerByCwd: cwd => (cwd === '/Users/macmini/Peers/doc' ? 'doc' : undefined) }, 0)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.personality).toBe('doc')
+    expect(found[0]!.runtime).toBe('codex')
+    expect(found[0]!.errorType).toBe('usage_limit_exceeded')
+    expect(found[0]!.model).toBe('gpt-5.6-sol')
+    expect(found[0]!.resetsAtMs).toBe(DOC_RESET_MS)
   })
 })
 
