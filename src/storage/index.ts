@@ -197,6 +197,10 @@ export function ensureLocalRuntimeScopes(cwd: string, runtimes: readonly Runtime
   mkdirSync(root, { recursive: true, mode: DIR_MODE })
   for (const runtime of supportedLocalRuntimeScopes(runtimes)) {
     mkdirSync(join(root, runtime, PLUGINS_DIR, IAP_PLUGIN_DIR), { recursive: true, mode: DIR_MODE })
+    // Default launch.env skeleton — every agentic runtime scope carries the knob
+    // from birth, so fleet-wide launch.env operations (e.g. mass PEER_START_ARGS
+    // edits) never skip a peer for lack of the file. Existing files are untouched.
+    ensureLaunchEnv(cwd, runtime)
   }
 }
 
@@ -207,9 +211,43 @@ export function ensureLocalRuntimeScopes(cwd: string, runtimes: readonly Runtime
 export const LAUNCH_ENV_FILE = 'launch.env'
 
 /** `<cwd>/.iapeer/runtimes/<runtime>/launch.env` — the per-peer per-runtime launch
- *  fragment (PEER_START_ARGS + extra peer env). Written by init, read at launch. */
+ *  fragment (PEER_START_ARGS + extra peer env). Scaffolded as an all-comment
+ *  skeleton by create/init (ensureLocalRuntimeScopes) for every agentic runtime
+ *  scope; the operator uncomments/edits it. Read at launch; missing → empty. */
 export function peerLaunchEnvPath(cwd: string, runtime: Runtime): string {
   return join(cwd, IAPEER_DIR, RUNTIMES_DIR, runtime, LAUNCH_ENV_FILE)
+}
+
+/** The default launch.env skeleton. ALL lines are comments — deliberately: it must
+ *  parse to exactly the missing-file semantics ({startArgs: [], env: {}}, and
+ *  crucially NO PEER_DISALLOWED_TOOLS key, whose present-empty ≠ absent is the
+ *  opt-in gate). No trailing comments on the example lines — the parser keeps
+ *  everything after `=` as the value, so `KEY=x # note` would poison the value. */
+export const LAUNCH_ENV_TEMPLATE = `# launch.env — optional per-peer per-runtime launch overrides (iapeer, docs/06-storage).
+# Format: one KEY=VALUE per line (bash-style; an \`export \` prefix is allowed).
+# Blank lines and lines starting with # are ignored. Do NOT put a trailing
+# comment after a value — everything after \`=\` is taken verbatim as the value.
+# This skeleton is all comments: it behaves exactly like no file at all.
+#
+# Extra CLI args appended after the runtime's base argv (whitespace-split):
+#PEER_START_ARGS=""
+#
+# claude only — --disallowedTools override. Key absent = adapter default for the
+# whole fleet; present-empty ("") = omit the flag; a value = pass it verbatim:
+#PEER_DISALLOWED_TOOLS=""
+#
+# Any other KEY=VALUE becomes an env var of the peer's session:
+#MY_VAR=value
+`
+
+/** Create the default launch.env skeleton if (and only if) the file does not
+ *  exist yet — an existing operator-edited file is NEVER touched. 0600 like the
+ *  rest of the tree (an operator may later put secrets in it). */
+export function ensureLaunchEnv(cwd: string, runtime: Runtime): void {
+  const path = peerLaunchEnvPath(cwd, runtime)
+  if (existsSync(path)) return
+  mkdirSync(dirname(path), { recursive: true, mode: DIR_MODE })
+  writeFileAtomic(path, LAUNCH_ENV_TEMPLATE)
 }
 
 export interface LaunchEnv {
@@ -232,9 +270,10 @@ export interface LaunchEnv {
  * reproduced here with a whitespace split (faithful to that semantics; a value
  * with embedded spaces was never one arg in the bash either). Surrounding single/
  * double quotes around a value are stripped. Lines that are blank or start with
- * `#` are ignored. A missing/unreadable file → empty (no flags, no env). This is a
- * deliberately MINIMAL parser (assignments only — no command substitution, no
- * conditionals); init writes the file, so the format is controlled.
+ * `#` are ignored. A missing/unreadable file → empty (no flags, no env); the
+ * scaffolded all-comment skeleton (LAUNCH_ENV_TEMPLATE) parses to the same. This
+ * is a deliberately MINIMAL parser (assignments only — no command substitution, no
+ * conditionals); the format is a controlled convention, not arbitrary shell.
  */
 export function readLaunchEnv(cwd: string, runtime: Runtime): LaunchEnv {
   let text: string

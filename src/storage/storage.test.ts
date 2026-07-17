@@ -5,10 +5,16 @@
 // are ignored, and a missing file → empty.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { peerLaunchEnvPath, readLaunchEnv } from './index.ts'
+import {
+  LAUNCH_ENV_TEMPLATE,
+  ensureLaunchEnv,
+  ensureLocalRuntimeScopes,
+  peerLaunchEnvPath,
+  readLaunchEnv,
+} from './index.ts'
 
 let cwd: string
 beforeEach(() => {
@@ -80,5 +86,38 @@ describe('readLaunchEnv', () => {
   test('PEER_DISALLOWED_TOOLS with a value → that verbatim list (quotes stripped)', () => {
     writeLaunchEnv('claude', 'PEER_DISALLOWED_TOOLS="Edit,Write"\n')
     expect(readLaunchEnv(cwd, 'claude').disallowedTools).toBe('Edit,Write')
+  })
+})
+
+// ensureLaunchEnv — the default skeleton scaffold (owner decision 17.07: every
+// agentic runtime scope carries launch.env from birth, so fleet-wide launch.env
+// operations never skip a peer for lack of the file).
+describe('ensureLaunchEnv', () => {
+  test('creates the skeleton when missing', () => {
+    ensureLaunchEnv(cwd, 'claude')
+    expect(readFileSync(peerLaunchEnvPath(cwd, 'claude'), 'utf8')).toBe(LAUNCH_ENV_TEMPLATE)
+  })
+
+  test('the skeleton is semantically identical to no file at all (the neutrality invariant)', () => {
+    const noFile = readLaunchEnv(cwd, 'claude')
+    ensureLaunchEnv(cwd, 'claude')
+    const skeleton = readLaunchEnv(cwd, 'claude')
+    expect(skeleton).toEqual(noFile)
+    // the opt-in gate specifically: the KEY must be absent, not present-empty
+    expect('disallowedTools' in skeleton).toBe(false)
+  })
+
+  test('an existing operator-edited file is NEVER overwritten', () => {
+    writeLaunchEnv('claude', 'PEER_START_ARGS="--keep-me"\n')
+    ensureLaunchEnv(cwd, 'claude')
+    expect(readLaunchEnv(cwd, 'claude').startArgs).toEqual(['--keep-me'])
+  })
+
+  test('ensureLocalRuntimeScopes scaffolds launch.env for agentic scopes only', () => {
+    ensureLocalRuntimeScopes(cwd, ['claude', 'codex', 'telegram', 'notifier'])
+    expect(existsSync(peerLaunchEnvPath(cwd, 'claude'))).toBe(true)
+    expect(existsSync(peerLaunchEnvPath(cwd, 'codex'))).toBe(true)
+    expect(existsSync(peerLaunchEnvPath(cwd, 'telegram'))).toBe(false)
+    expect(existsSync(peerLaunchEnvPath(cwd, 'notifier'))).toBe(false)
   })
 })
