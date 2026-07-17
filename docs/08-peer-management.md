@@ -55,6 +55,8 @@ iapeer verify --fix    # repair
 
 `verify` checks two things: profiles' conformance to the standard, and divergences between the registry and the local profiles. With `--fix` the command self-heals the registry from the profiles (and migrates profiles from the old runtime-field format to the current one along the way). It's the standard way to put the registry in order if it's gone out of sync.
 
+**The daemon reconciles continuously (0.4.104).** The local `peer-profile.json` is the source of truth and the registry only its projection — but until 0.4.104 a direct edit of the source (the owner's legitimate move) propagated only when some reindexing verb happened to run afterwards; the router reads the INDEX per-request, so a stale projection mis-routed deliveries (measured live 17.07.2026: a peer's local profile said `default_runtime: claude` for days while the index kept `codex`, and deliveries went to a mute codex session). The daemon now runs a profile-sync sweep (`daemon/profilesync.ts`, 60 s, mtime/set-gated — steady state is stats only, zero writes): any change to a registered peer's local profile triggers the same locked `reindexFromLocals` the verbs use, and a boot sweep heals drift accumulated while the daemon was down. Heals are logged to `lifecycle.log` as `profile-reindex` events. `verify` remains the read-only report and the manual lever; the daemon closes the propagation gap.
+
 ## Stop and start: stop, start
 
 ```bash

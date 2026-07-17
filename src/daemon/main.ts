@@ -69,6 +69,7 @@ import { appendDeliveryEvent } from './deliverylog.ts'
 import { buildFleetHandler } from './fleet.ts'
 import { NoticeBoard } from './notices.ts'
 import { startMuteWatch } from './mutewatch.ts'
+import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
@@ -348,6 +349,8 @@ export interface ConfiguredDaemonOptions {
   goalWatchIntervalMs?: number
   /** Turn-watch sweep cadence (default DEFAULT_TURNWATCH_INTERVAL_MS). */
   turnWatchIntervalMs?: number
+  /** Profile-sync sweep cadence (default DEFAULT_PROFILE_SYNC_INTERVAL_MS). */
+  profileSyncIntervalMs?: number
   /** Write the router.json discovery file (default true for production). */
   discovery?: boolean
   rootDir?: string
@@ -414,6 +417,34 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       try {
         const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
         appendLifecycleEvent(cfg.eventLogDir, { ev: 'turnwatch-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
+      } catch { /* best-effort */ }
+    },
+  })
+  // Profile-sync (identity self-heal, continuous half) — the local peer-profile.json is
+  // the SOURCE OF TRUTH and the registry only its projection; this sweep is what makes
+  // that invariant operationally true (an owner's hand-edit of the source propagates
+  // within a minute instead of waiting for someone to run a reindexing verb — the
+  // 17.07.2026 routing-desync incident class). mtime-gated: steady state is stats only.
+  const stopProfileSync = startProfileSync({
+    env,
+    intervalMs: opts.profileSyncIntervalMs ?? DEFAULT_PROFILE_SYNC_INTERVAL_MS,
+    onHealed: r => {
+      try {
+        appendLifecycleEvent(
+          cfg.eventLogDir,
+          {
+            ev: 'profile-reindex',
+            ...(r.healed.length > 0 ? { healed: r.healed.join('; ').slice(0, 600) } : {}),
+            ...(r.missing.length > 0 ? { missing: r.missing.join(', ').slice(0, 300) } : {}),
+          },
+          { env },
+        )
+      } catch { /* best-effort */ }
+    },
+    onError: (err: unknown) => {
+      try {
+        const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'profilesync-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
       } catch { /* best-effort */ }
     },
   })
@@ -491,7 +522,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
   // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
   // every test that starts a daemon would hang on exit).
-  return { ...handle, close: async () => { stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); await handle.close() } }
+  return { ...handle, close: async () => { stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
