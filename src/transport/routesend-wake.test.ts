@@ -13,13 +13,14 @@
 // without having delivered the caller's task.
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
 import { ok } from '../core/errors.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
+import { hostRunDir } from '../launch/ptyHost.ts'
 
 let root: string
 const prevRoot = process.env.IAPEER_ROOT
@@ -34,6 +35,7 @@ const prevRoot = process.env.IAPEER_ROOT
 // daemon; capture-invariants here cover the routing layer.
 const TARGET = 'fpw'
 const TUI_TARGET = 'tq'
+const MULTI_TARGET = 'multirt'
 
 const callerRecord = {
   personality: 'boris',
@@ -71,6 +73,7 @@ beforeAll(() => {
         { personality: 'boris', runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial', cwd: '/tmp/boris' },
         { personality: TARGET, runtime: 'telegram', runtimes: ['telegram'], description: '', intelligence: 'artificial', cwd: root },
         { personality: TUI_TARGET, runtime: 'codex', runtimes: ['codex'], description: '', intelligence: 'artificial', cwd: root },
+        { personality: MULTI_TARGET, default_runtime: 'codex', runtimes: ['codex', 'claude'], description: '', intelligence: 'artificial', cwd: root },
       ],
     }),
   )
@@ -80,6 +83,108 @@ afterAll(() => {
   if (prevRoot === undefined) delete process.env.IAPEER_ROOT
   else process.env.IAPEER_ROOT = prevRoot
   rmSync(root, { recursive: true, force: true })
+})
+
+// default_runtime is the routing selector, not merely a wake fallback. This is
+// the exact regression from the 19.07 fleet transplant: default=codex while a
+// surviving claude session was alive made an implicit send land in Claude.
+describe('implicit runtime routing — default_runtime overrides live non-default sessions', () => {
+  const sessionFiles = (runtime: string): string[] => {
+    const dir = hostRunDir(process.env)
+    return [join(dir, `${runtime}-${MULTI_TARGET}.sock`), join(dir, `${runtime}-${MULTI_TARGET}.pid`)]
+  }
+  const markLive = (runtime: string): void => {
+    const [sock, pid] = sessionFiles(runtime)
+    mkdirSync(hostRunDir(process.env), { recursive: true })
+    writeFileSync(sock, '')
+    writeFileSync(pid, String(process.pid))
+  }
+  const clear = (runtime: string): void => {
+    for (const path of sessionFiles(runtime)) {
+      try { unlinkSync(path) } catch { /* absent is clean */ }
+    }
+  }
+
+  test('non-default is live, default is asleep: omitted runtime wakes/routes to default_runtime', async () => {
+    markLive('claude')
+    clear('codex')
+    let wakeCalled = false
+    let composerCalled = false
+    try {
+      const r = await routeSend(
+        caller,
+        { personality: MULTI_TARGET, message: 'implicit route probe' },
+        {
+          wake: async req => {
+            wakeCalled = true
+            expect(req.runtime).toBeUndefined() // lifecycle resolves the omitted runtime from the registry default
+            markLive('codex')
+            return { status: 'READY', woke: true, runtime: 'codex', taskDelivered: true }
+          },
+          // Pre-fix, the sole-live fallback selected claude and stopped here.
+          composerQueue: {
+            tryEnqueue: async args => {
+              composerCalled = true
+              return ok({
+                ok: true as const,
+                delivered_to: { personality: args.target.personality, runtime: args.target.runtime },
+                woke: false,
+                queued: true,
+                queuedBy: 'composer' as const,
+                queueDepth: 1,
+                ts: args.sentAt ?? 'missing',
+              })
+            },
+          },
+        },
+      )
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.value.delivered_to.runtime).toBe('codex')
+        expect(r.value.woke).toBe(true)
+      }
+      expect(wakeCalled).toBe(true)
+      expect(composerCalled).toBe(false)
+    } finally {
+      clear('claude')
+      clear('codex')
+    }
+  })
+
+  test('explicit runtime still targets the requested live non-default surface', async () => {
+    markLive('claude')
+    clear('codex')
+    let wakeCalled = false
+    try {
+      const r = await routeSend(
+        caller,
+        { personality: MULTI_TARGET, runtime: 'claude', message: 'explicit route probe' },
+        {
+          wake: async () => {
+            wakeCalled = true
+            return { status: 'FAILED', woke: false, reason: 'must not wake' }
+          },
+          composerQueue: {
+            tryEnqueue: async args => ok({
+              ok: true as const,
+              delivered_to: { personality: args.target.personality, runtime: args.target.runtime },
+              woke: false,
+              queued: true,
+              queuedBy: 'composer' as const,
+              queueDepth: 1,
+              ts: args.sentAt ?? 'missing',
+            }),
+          },
+        },
+      )
+      expect(r.ok).toBe(true)
+      if (r.ok) expect(r.value.delivered_to.runtime).toBe('claude')
+      expect(wakeCalled).toBe(false)
+    } finally {
+      clear('claude')
+      clear('codex')
+    }
+  })
 })
 
 

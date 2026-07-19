@@ -25,7 +25,7 @@ The `--from` flag sets the sender (`<runtime>-<name>`); by default it's the iden
 
 ## The delivery path
 
-The daemon finds the recipient in the registry and looks at its state:
+The daemon finds the recipient in the registry and selects its endpoint first. With no explicit `runtime`, the endpoint is always the recipient's `default_runtime`; liveness of other declared runtimes does not change that choice. An explicit `runtime` selects that exact surface. The daemon then looks at the selected endpoint's state:
 
 - **alive** — the daemon writes the message into the peer's session through the supervisor socket onto the session's input. The daemon waits for confirmation that the input was accepted (the input field cleared); the answer is `delivered`.
 - **busy** (the agent is mid-turn, the input field isn't empty) — the message goes into the composer queue and is delivered as soon as the agent is free; the answer to the sender is `queued`. The queue waits up to 120 seconds, then force-delivers.

@@ -67,6 +67,8 @@ iapeer default-runtime codex --all              # all peers
 
 Switches the primary runtime — where routing goes and which runtime comes up first. A bulk `--all` switch is exactly the "transplant" of the whole team from one agent runtime to another; it's symmetric back (`default-runtime claude --all`). The command refuses if the peer doesn't declare that runtime (run `add-runtime` first), and skips infrastructure peers. The registry is fixed in the same command, so routing switches at once.
 
+The routing choice is strict: a send without an explicit `runtime` always targets `default_runtime`. A live session on another declared runtime does not capture that send; if the default session is asleep, the daemon wakes it. Passing `runtime` explicitly remains the way to target a non-default surface.
+
 ## Connecting Telegram: connect
 
 ```bash

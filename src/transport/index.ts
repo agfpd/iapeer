@@ -162,12 +162,18 @@ export function resolvePeerDeliveryTarget(
   peer: PeerRecord,
   env: NodeJS.ProcessEnv = process.env,
 ): Result<DeliveryTarget> {
-  if (runtime) return resolveDeliveryTarget({ personality, runtime, env })
-  if (peer.runtime) {
-    const exactDefault = resolveDeliveryTarget({ personality, runtime: peer.runtime, env })
-    if (exactDefault.ok) return exactDefault
-  }
-  return resolveDeliveryTarget({ personality, env })
+  // Routing is CONFIG-ANCHORED, not liveness-selected. An omitted runtime means
+  // exactly the peer's default_runtime (`PeerRecord.runtime` is the normalized
+  // in-memory name), even when another declared runtime already has a live
+  // session. If that default endpoint is asleep, returning its exact offline
+  // miss is load-bearing: routeSend will wake THE DEFAULT instead of falling
+  // through to whichever non-default session happens to be alive.
+  //
+  // An explicit runtime remains an exact override. `resolveDeliveryTarget`
+  // without a runtime is deliberately NOT used here: its sole-live discovery is
+  // useful for observation/control callers, but would silently defeat the
+  // operator's `default-runtime` routing lever.
+  return resolveDeliveryTarget({ personality, runtime: runtime ?? peer.runtime, env })
 }
 
 // Confirm poll interval — how often deliverViaHost re-reads the transcript for a NEW record carrying
@@ -1407,8 +1413,7 @@ export function hasTelegramPresence(record: PeerRecord): boolean {
  *  ok:true — a false-OK + silent loss, the class this contract forbids. Applied to
  *  the INTENDED channel (override / target default — before any wake side-effect,
  *  since a wake delivers the envelope as the boot first-message) AND to the RESOLVED
- *  channel at both delivery points (the only-live-session fallback can land on
- *  telegram without either). */
+ *  channel at both delivery points (defence in depth against registry/wake drift). */
 function telegramSenderGuard(
   caller: ResolvedCaller,
   targetRuntime: string,
@@ -1500,9 +1505,8 @@ async function routeSendInner(
   // a mismatch is HELD (persisted verbatim + instructive error), not delivered — the
   // agent then confirms cross-channel or redirects to the origin, zero regeneration.
   // Intended runtime = the explicit override or the human's default; exact for the
-  // natural-peer class (their channels are always-on launchd routers, so the
-  // only-live-session fallback cannot silently diverge outside a seconds-wide crash
-  // window). Initiative (answered / no inbound / ARM_TTL-stale) passes untouched.
+  // natural-peer class (implicit routing is strictly default_runtime-anchored).
+  // Initiative (answered / no inbound / ARM_TTL-stale) passes untouched.
   if (
     !deps.originGuardBypass &&
     originGuardEnabled(env) &&
@@ -1561,8 +1565,8 @@ async function routeSendInner(
   const target = resolvePeerDeliveryTarget(personality, runtime, peer, env)
   if (target.ok) {
     if (target.value.address === caller.address) return err('cannot send to self')
-    // Telegram sender policy — RESOLVED channel (the only-live-session fallback can
-    // land on telegram without an override and without telegram being the default).
+    // Telegram sender policy — RESOLVED channel (defence in depth: the resolved
+    // target must still obey the domain guard even though selection is exact).
     const liveGuard = telegramSenderGuard(caller, target.value.runtime, personality)
     if (!liveGuard.ok) return liveGuard
     const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: target.value, envelope, topic, sentAt })
