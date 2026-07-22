@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { launchctlBootstrap, installAlwaysOnPlist } from './index.ts'
+import { bootstrapFailed } from './launchd.ts'
 
 const dirs: string[] = []
 function mkTmp(): string {
@@ -51,8 +52,25 @@ describe('launchctlBootstrap guards', () => {
     expect(r.label).toBe('com.iapeer.timer.notifier')
   })
 
-  test('absent/unreadable plist → refused-foreign (not provably ours)', () => {
+  test('ABSENT plist → missing-plist, never refused-foreign (no ownership verdict on a file that is not there)', () => {
+    // Live defect: `iapeer start arthur voicetalk` with no plist answered "not
+    // foundation-owned (no com.iapeer.managed sentinel) — refusing" — a sentinel verdict
+    // on a nonexistent file. It sent the operator hunting a foreign fleet plist instead
+    // of provisioning the channel. Absent and foreign are different facts.
     const r = launchctlBootstrap('ghost', join(mkTmp(), 'nope.plist'), { IAPEER_TEST_SANDBOX: '1' } as NodeJS.ProcessEnv)
+    expect(r.state).toBe('missing-plist')
+    expect(r.detail).toContain('does not exist')
+    expect(r.detail).not.toContain('sentinel') // no ownership accusation
+    expect(bootstrapFailed(r.state)).toBe(true) // still not "started" — callers must fail
+  })
+
+  test('EXISTING plist without the sentinel → refused-foreign (the fleet guard still bites)', () => {
+    const dir = mkTmp()
+    const foreign = join(dir, 'com.iapeer.pp.plist')
+    writeFileSync(foreign, '<?xml version="1.0"?><plist><dict><key>Label</key><string>com.iapeer.pp</string></dict></plist>')
+    const r = launchctlBootstrap('pp', foreign, { IAPEER_TEST_SANDBOX: '1' } as NodeJS.ProcessEnv)
     expect(r.state).toBe('refused-foreign')
+    expect(r.detail).toContain('sentinel')
+    expect(bootstrapFailed(r.state)).toBe(true)
   })
 })

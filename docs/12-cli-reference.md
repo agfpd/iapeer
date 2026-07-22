@@ -49,7 +49,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 | `attach <peer> [runtime]` | Bring up (if asleep), resume the conversation, open the session under the supervisor in the terminal (detach — `Ctrl-]`). |
 | `interrupt <peer> [runtime]` | Interrupt the current turn (Escape), context intact. |
 | `compact <peer> [runtime]` | Compact the conversation; a sleeper is resumed first after idle sleep. |
-| `add-runtime <runtime> (--peer <p> \| --all)` | Add an agent runtime to existing peers. Doesn't touch `default_runtime`. |
+| `add-runtime <runtime> (--peer <p> \| --all)` | Add a runtime to existing peers. Doesn't touch `default_runtime`. An infrastructure runtime attaches an always-on channel and is `--peer`-only (never an `--all` sweep). |
 | `default-runtime <runtime> (--peer <p> \| --all)` | Switch the primary runtime (routing / first bring-up). Refuses if the runtime isn't declared. |
 
 `stop`/`start`/`new` refuse to touch peers under a foreign launchd plist — the core doesn't intervene in what it doesn't manage.
@@ -69,6 +69,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 |---|---|
 | `<runtime>` (e.g. `iapeer claude`) | Launch the current folder's peer on this runtime — always as a fresh session. |
 | `connect telegram <peer> [--token <t>]` | Connect a Telegram bot to a peer: register the bot → write into the profile → restart the router. Asks only for the token. |
+| `connect <runtime> <peer>` | Attach any other presence channel (web, voicetalk, …) to an existing peer: per-runtime plist → the package's `selfConfig` hook → load. Same path as `add-runtime <runtime> --peer <peer>`. |
 
 ## Extensions and memory
 

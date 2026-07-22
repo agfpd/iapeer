@@ -56,7 +56,20 @@ iapeer add-runtime codex --peer assistant   # for one peer
 iapeer add-runtime codex --all              # for all peers
 ```
 
-Adds an agent runtime to existing peers: appends it to `runtimes`, scaffolds the runtime space, and does the full Codex setup (pre-trusting the folder, the native-memory lever, attaching memory, MCP). The command **doesn't touch** `default_runtime` — this is extending options, not changing routing. Idempotent. Infrastructure peers are skipped: giving them an agent runtime is an operator decision via `create`, not a bulk operation.
+Adds a runtime to existing peers: appends it to `runtimes`, scaffolds the runtime space, and does the full Codex setup (pre-trusting the folder, the native-memory lever, attaching memory, MCP). The command **doesn't touch** `default_runtime` — this is extending options, not changing routing. Idempotent. A peer whose default is infrastructure is skipped when the runtime being added is an *agent* one: giving a router peer an agent runtime is an operator decision via `create`, not a bulk operation.
+
+An **infrastructure** runtime can also be added this way, but only to one named peer:
+
+```bash
+iapeer add-runtime voicetalk --peer arthur   # attach a second always-on channel
+iapeer connect voicetalk arthur              # the same thing, said the way `connect` taught you
+```
+
+This is the operator path for the multi-channel scheme above — giving an *existing* personality another always-on presence. It resolves the peer's folder from the registry, installs the per-runtime plist, runs the runtime package's own `selfConfig` hook (which owns `interfaces.<runtime>`), and loads the job. `--all` is refused for an infrastructure runtime: every channel is a launchd job, and fanning them across the fleet is never what an operator means.
+
+`create` cannot do this. It resolves a peer by **location** (`~/.iapeer/peers/<name>` unless `--path` is given), so for a peer whose folder lives elsewhere it never reaches the existing record — it would scaffold a second, bogus folder instead.
+
+Declaration and reality can diverge: `runtimes` only *declares* the channel, the plist *realizes* it. If the record declares the runtime but the plist is gone, the command re-provisions it rather than reporting "already" for a channel that does not exist.
 
 ### default-runtime — switch the primary
 
@@ -69,7 +82,7 @@ Switches the primary runtime — where routing goes and which runtime comes up f
 
 The routing choice is strict: a send without an explicit `runtime` always targets `default_runtime`. A live session on another declared runtime does not capture that send; if the default session is asleep, the daemon wakes it. Passing `runtime` explicitly remains the way to target a non-default surface.
 
-## Connecting Telegram: connect
+## Connecting a channel: connect
 
 ```bash
 iapeer connect telegram assistant --token <bot-token>
@@ -78,6 +91,8 @@ iapeer connect telegram assistant --token <bot-token>
 Connects a Telegram bot to a peer in one pass: registers the bot, writes it into the peer profile, restarts the router. From a human only the token is needed (from `@BotFather`). Afterward — send the bot the **first message**: Telegram doesn't let a bot start a chat first, so the channel comes alive only after an inbound message from a human.
 
 The command is idempotent, and behavior depends on the token. **The same token** is a clean no-op: the bot's credentials file doesn't change, the live router already runs on these credentials, no restart. **A new or changed token** requires a router restart (credentials are read only at start) — a second's pause in delivery for all Telegram peers; inbound messages aren't lost (long-polling remembers the offset, Telegram holds messages for up to 24 hours). An invalid token is rejected at once, with the verbatim reason from Telegram.
+
+`connect` is not Telegram-only. `iapeer connect <runtime> <peer>` attaches any presence channel: Telegram keeps its bespoke flow (it owes a bot token, a `@BotFather` round-trip and a credential store), while every other infrastructure runtime takes the generic bind — the same per-peer path as `add-runtime <runtime> --peer <peer>`. The runtime package must be installed on the host first (`install-runtime`), which the command checks before touching anything.
 
 ## Runtime packages
 

@@ -12,7 +12,7 @@ import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
 import { transcriptSlug } from '../launch/adapters/claude.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
 import { lifecycleLogPath } from '../lifecycle/eventlog.ts'
-import { launchdPlistPath } from '../launch/launchd.ts'
+import { launchdPlistPath, resolveAlwaysOnTarget } from '../launch/launchd.ts'
 import { err, ok } from '../core/errors.ts'
 
 let root: string
@@ -791,9 +791,62 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     expect(outcomes[0].action).toBe('added')
   })
 
-  test('add-runtime refuses an infra runtime as the argument', async () => {
+  test('add-runtime refuses an infra runtime as an --all SWEEP (never fans always-on plists across the fleet)', async () => {
+    // The invariant is about the SWEEP, not the runtime class: every always-on channel is
+    // a launchd job, and provisioning one per peer host-wide is never what an operator
+    // means. A TARGETED add is the sanctioned operator path (next test).
     await register('x1')
-    await expect(addRuntime('telegram', { peer: 'x1', env: env() })).rejects.toThrow('infra runtime')
+    await expect(addRuntime('telegram', { all: true, env: env() })).rejects.toThrow('never as an --all sweep')
+  })
+
+  test('add-runtime ATTACHES an infra channel to one existing peer — the operator path create cannot reach', async () => {
+    // Live gap (voicetalk on arthur): `create` resolves a peer by LOCATION, so for an
+    // existing peer whose cwd is not the default it cannot reach the record at all;
+    // `add-runtime` refused infra outright and `connect` was telegram-only — leaving NO
+    // verb to give an existing personality a second presence channel, though the
+    // multi-plist scheme exists precisely for it.
+    const e = env()
+    const cwd = join(root, 'peers', 'chan1')
+    mkdirSync(cwd, { recursive: true })
+    await upsertPeer({ personality: 'chan1', runtime: 'claude', cwd, intelligence: 'natural' }, { rootDir: root })
+    const { initPeer } = await import('../init/index.ts')
+    const cleanE = { ...e } as NodeJS.ProcessEnv
+    delete cleanE.PEER_PERSONALITY; delete cleanE.PEER_RUNTIME; delete cleanE.PEER_IDENTITY
+    await initPeer({ cwd, runtime: 'claude', env: cleanE })
+
+    const outcomes = await addRuntime('telegram', { peer: 'chan1', env: e })
+    expect(outcomes[0].action).toBe('added')
+    // The channel is REALIZED: the per-runtime always-on plist exists and is ours.
+    const target = resolveAlwaysOnTarget('chan1', 'telegram', e)
+    expect(target.scheme).toBe('per-runtime')
+    expect(existsSync(target.path)).toBe(true)
+    // …and the peer now DECLARES it without its routing default being flipped.
+    const rec = findPeer(readPeersIndex({ env: e }), 'chan1')!
+    expect(rec.runtimes).toContain('telegram')
+    expect(rec.runtime).toBe('claude') // capability ≠ routing flip
+  })
+
+  test('add-runtime re-provisions an infra channel DECLARED but not realized (plist torn down)', async () => {
+    // `runtimes` is the declaration, the plist realizes it — they can diverge (a
+    // hand-built bind, a torn-down plist). Reporting "already" off the declaration alone
+    // would claim a channel that does not exist and leave the operator with no repair.
+    const e = env()
+    const cwd = join(root, 'peers', 'chan2')
+    mkdirSync(cwd, { recursive: true })
+    await upsertPeer({ personality: 'chan2', runtime: 'claude', cwd, intelligence: 'natural' }, { rootDir: root })
+    const { initPeer } = await import('../init/index.ts')
+    const cleanE = { ...e } as NodeJS.ProcessEnv
+    delete cleanE.PEER_PERSONALITY; delete cleanE.PEER_RUNTIME; delete cleanE.PEER_IDENTITY
+    await initPeer({ cwd, runtime: 'claude', env: cleanE })
+    await addRuntime('telegram', { peer: 'chan2', env: e })
+    const target = resolveAlwaysOnTarget('chan2', 'telegram', e)
+
+    expect((await addRuntime('telegram', { peer: 'chan2', env: e }))[0].action).toBe('already') // realized → idempotent
+    rmSync(target.path, { force: true }) // operator tears the plist down; the record still declares it
+    const repaired = await addRuntime('telegram', { peer: 'chan2', env: e })
+    expect(repaired[0].action).toBe('added')
+    expect(repaired[0].detail).toContain('declared but no plist')
+    expect(existsSync(target.path)).toBe(true)
   })
 
   test('default-runtime flips the primary (profile + registry in one command); refuses undeclared; symmetric back', async () => {

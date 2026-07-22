@@ -15,6 +15,7 @@ import { existsSync, readFileSync, renameSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import {
+  INFRA_RUNTIME_LIST,
   isInfraRuntime,
   isRuntime,
   type Intelligence,
@@ -53,6 +54,7 @@ import { getAdapter } from '../launch/index.ts'
 import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
 import {
+  bootstrapFailed,
   cycleDaemon,
   existingAlwaysOnPlists,
   launchctlBootstrap,
@@ -195,7 +197,7 @@ export function formatListTable(rows: PeerListing[]): string {
 export interface StopStartOutcome {
   personality: string
   runtime: Runtime
-  action: 'stopped' | 'started' | 'bootout' | 'bootstrap' | 'refused-foreign-launchd'
+  action: 'stopped' | 'started' | 'bootout' | 'bootstrap' | 'refused-foreign-launchd' | 'no-plist'
   reason?: string
 }
 
@@ -320,6 +322,18 @@ export function startPeer(personality: string, runtime: string | undefined, opts
       // every attempt is LOUD with the manual rescue recipe. (Also gains the
       // sentinel fleet-guard + sandbox guard the raw spawn never had.)
       const r = launchctlBootstrap(personality, plist, env)
+      // NO PLIST ≠ FOREIGN PLIST. The peer declares this infra runtime but no always-on
+      // plist was ever provisioned for the (personality, runtime) channel — there is
+      // nothing to bootstrap, and the honest answer is the verb that PROVISIONS it, not
+      // a fleet-guard refusal (which is what the missing file used to be misread as).
+      if (r.state === 'missing-plist') {
+        const reason =
+          `no always-on plist for the "${rt}" channel (${plist}) — nothing to start. ` +
+          `Provision the channel first: \`iapeer add-runtime ${rt} --peer ${personality}\``
+        out.push({ personality, runtime: rt, action: 'no-plist', reason })
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'started', identity, personality, runtime: rt, action: 'no-plist', reason }, { env })
+        continue
+      }
       const ok = r.state === 'loaded' || r.state === 'already-loaded' || r.state === 'skipped-sandbox'
       const reason = ok
         ? undefined
@@ -380,16 +394,25 @@ export interface AddRuntimeOutcome {
 
 /**
  * add-runtime <runtime> (--peer <p> | --all) — give EXISTING peers an additional
- * AGENTIC runtime in one command (the fleet-switch enabler — a claude-only peer
- * has nothing to switch to).
+ * runtime in one command. Two shapes:
+ *   • AGENTIC runtime (claude/codex) — the fleet-switch enabler (a claude-only peer
+ *     has nothing to switch to); works per-peer or as an `--all` sweep.
+ *   • INFRA/presence runtime (telegram/web/voicetalk/notifier) — attach ANOTHER
+ *     always-on CHANNEL to an existing personality (`--peer` only, never a sweep).
+ *     This is the operator path the multi-plist scheme (docs/09 §Plist scheme)
+ *     always implied but nothing implemented: `create` resolves a peer by LOCATION
+ *     (default `~/.iapeer/peers/<p>`), so for a peer whose cwd lives elsewhere it
+ *     cannot reach the existing record at all — it would scaffold a second, bogus
+ *     folder. add-runtime resolves the cwd from the REGISTRY, which is exactly the
+ *     resolution this needs.
  * Per target: initPeer({cwd, runtime}) — ensurePeerProfile MERGES runtimes (the
  * default_runtime lever is deliberately untouched — capability ≠ routing flip; see
- * `default-runtime`), scaffolds the runtime scope, and the codex side runs its
- * whole birth chain: cwd pre-trust, native-memory lever, memory provision
- * (occasion=birth), host-wide MCP block + update-check-off. Idempotent by
- * construction (merge + append-if-absent everywhere). Infra PEERS (telegram/
- * notifier defaults) are skipped — adding an agentic runtime to a router peer is
- * an operator decision, not a sweep.
+ * `default-runtime`), scaffolds the runtime scope, and for infra installs the
+ * per-runtime always-on plist, runs the runtime package's own selfConfig hook (which
+ * owns `interfaces.<runtime>`), then bootstraps it. The codex side runs its whole
+ * birth chain: cwd pre-trust, native-memory lever, memory provision (occasion=birth),
+ * host-wide MCP block + update-check-off. Idempotent by construction (merge +
+ * append-if-absent everywhere).
  */
 export async function addRuntime(
   runtime: string,
@@ -397,8 +420,16 @@ export async function addRuntime(
 ): Promise<AddRuntimeOutcome[]> {
   const env = opts.env ?? process.env
   if (!isRuntime(runtime)) throw new Error(`invalid runtime "${runtime}"`)
-  if (isInfraRuntime(runtime)) {
-    throw new Error(`"${runtime}" is an infra runtime — infra presence is operator-add via \`iapeer create\` (plist semantics), not a sweep`)
+  // The real invariant behind the old blanket infra refusal is "an always-on channel is
+  // never provisioned by a SWEEP" — each plist is a launchd job, and fanning them across
+  // the whole fleet is never what an operator means. That is a guard on `--all`, NOT on
+  // the runtime class: attaching one channel to ONE named peer is precisely the operator
+  // path the multi-plist scheme exists for, and it had no verb at all.
+  if (isInfraRuntime(runtime) && opts.all === true) {
+    throw new Error(
+      `"${runtime}" is an infra runtime — an always-on channel is provisioned per peer, never as an --all sweep; ` +
+        `target one peer: \`iapeer add-runtime ${runtime} --peer <peer>\``,
+    )
   }
   const index = readPeersIndex({ env })
   const targets = opts.all === true ? index.peers : index.peers.filter(p => p.personality === opts.peer)
@@ -414,18 +445,36 @@ export async function addRuntime(
   const { initPeer } = await import('../init/index.ts')
   const out: AddRuntimeOutcome[] = []
   for (const p of targets) {
-    if (isInfraRuntime(p.runtime)) {
+    // Skip an infra-DEFAULT peer only when the runtime being added is AGENTIC: giving a
+    // router peer (a human on telegram) an agent runtime is meaningless. Adding another
+    // CHANNEL to that same human is the whole point of this path, so it must not be
+    // caught by the same guard — the old check keyed on the peer alone and swallowed it.
+    if (isInfraRuntime(p.runtime) && !isInfraRuntime(runtime)) {
       out.push({ personality: p.personality, action: 'skipped-infra-peer', detail: `default runtime "${p.runtime}" is infra` })
       continue
     }
-    if (p.runtimes.includes(runtime as Runtime)) {
+    // DECLARED ≠ REALIZED. For an infra channel the record's `runtimes` is only the
+    // DECLARATION; the always-on plist is what actually realizes it, and the two can
+    // diverge (a hand-built bind, a torn-down plist, a record restored from backup).
+    // Short-circuiting on the declaration alone would report "already" while the channel
+    // does not exist — so for infra, converge: a missing plist means there IS work to do.
+    // initPeer is idempotent, so the repair costs nothing when everything is in place.
+    const realized = isInfraRuntime(runtime)
+      ? existsSync(resolveAlwaysOnTarget(p.personality, runtime as Runtime, env).path)
+      : true
+    if (p.runtimes.includes(runtime as Runtime) && realized) {
       out.push({ personality: p.personality, action: 'already' })
       continue
     }
     try {
       const warns: string[] = []
+      const repair = p.runtimes.includes(runtime as Runtime)
       await initPeer({ cwd: p.cwd, runtime: runtime as Runtime, env: cleanEnv, warn: m => warns.push(m) })
-      out.push({ personality: p.personality, action: 'added', detail: warns.length ? warns.join(' | ') : undefined })
+      out.push({
+        personality: p.personality,
+        action: 'added',
+        detail: [repair ? 'declared but no plist — channel re-provisioned' : undefined, ...warns].filter(Boolean).join(' | ') || undefined,
+      })
     } catch (e) {
       out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })
     }
@@ -1037,6 +1086,52 @@ async function connectTelegramVerb(
   return rs.state === 'restarted' ? 0 : 1
 }
 
+/**
+ * `connect <runtime> <peer>` for a NON-telegram presence runtime — attach one always-on
+ * channel to an EXISTING personality. Thin surface over addRuntime's per-peer infra path
+ * (registry-resolved cwd → initPeer → per-runtime plist + the package's selfConfig hook
+ * that owns `interfaces.<runtime>` → bootstrap); this exists so the operator reaches it
+ * by the same verb telegram taught them. Returns the process exit code.
+ */
+async function connectChannelVerb(
+  runtime: string,
+  peer: string,
+  env: NodeJS.ProcessEnv,
+  out: (s: string) => void,
+  errOut: (s: string) => void,
+): Promise<number> {
+  // A channel whose runtime package was never installed would provision a plist whose
+  // launcher does not resolve — provisionPeer refuses, but late and obscurely. Say it here.
+  const { isRuntimeInstalled } = await import('../init/index.ts')
+  if (!isRuntimeInstalled(runtime as Runtime, env)) {
+    errOut(`connect ${runtime} ${peer}: runtime "${runtime}" is not installed on this host — \`iapeer install-runtime ${runtime}\` first\n`)
+    return 1
+  }
+  let outcomes: AddRuntimeOutcome[]
+  try {
+    outcomes = await addRuntime(runtime, { peer, env })
+  } catch (e) {
+    errOut(`connect ${runtime} ${peer}: ${e instanceof Error ? e.message : String(e)}\n`)
+    return 1
+  }
+  const o = outcomes.find(x => x.personality === peer) ?? outcomes[0]
+  if (!o || o.action === 'failed') {
+    errOut(`connect ${runtime} ${peer}: ${o?.detail ?? 'failed'}\n`)
+    return 1
+  }
+  if (o.action === 'skipped-infra-peer') {
+    errOut(`connect ${runtime} ${peer}: ${o.detail ?? 'skipped'}\n`)
+    return 1
+  }
+  const plist = resolveAlwaysOnTarget(peer, runtime as Runtime, env)
+  out(
+    o.action === 'already'
+      ? `"${peer}" already carries the "${runtime}" channel (${plist.label}) — nothing to do\n`
+      : `connected "${runtime}" to "${peer}": plist ${plist.path} (${plist.label}) installed + loaded${o.detail ? `; ${o.detail}` : ''}\n`,
+  )
+  return 0
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // rename — first-class peer-identity rename (parity with remove/create). Wraps
 // renamePeer (registry + per-cwd profile, atomic, inside the lock) and KEEPS the
@@ -1381,6 +1476,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   },
   { sig: '<runtime>', desc: "launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached" },
   { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token). Alias: `iapeer enable telegram <peer>`' },
+  { sig: 'connect <runtime> <peer>', desc: 'attach another always-on presence channel (web, voicetalk, …) to an EXISTING peer: per-runtime plist → the package self-config hook → load. Same as `add-runtime <runtime> --peer <peer>`' },
   { sig: 'enable <plugin> [peer] [--no-setup]', desc: 'install + enable an agfpd capability for a peer' },
   {
     sig: 'new <peer> [runtime]',
@@ -1883,7 +1979,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // В47 — a failed runtime self-config means initPeer deliberately did NOT bootstrap:
         // the always-on peer is not running. Exit 0 here read as success to automation.
         if (r.selfConfig?.state === 'failed') return 1
-        return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
+        return r.bootstrapped && bootstrapFailed(r.bootstrapped.state) ? 1 : 0
       }
       case 'create': {
         // cwd-INDEPENDENT: resolve a location (default ~/.iapeer/peers/<p> or --path),
@@ -1957,7 +2053,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // always-on peer is NOT running; `create x --runtime telegram` with a broken hook
         // exited 0 and automation read a dead telegram router as provisioned.
         if (r.selfConfig?.state === 'failed') return 1
-        return r.bootstrapped && (r.bootstrapped.state === 'failed' || r.bootstrapped.state === 'refused-foreign') ? 1 : 0
+        return r.bootstrapped && bootstrapFailed(r.bootstrapped.state) ? 1 : 0
       }
       case 'list': {
         // tty + no --json → the live Ink dashboard (Фаза 3: host header · live peer
@@ -2075,7 +2171,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // Fleet-switch enabler (codex-parity audit): add an agentic runtime to
         // existing peer(s) — full codex birth chain per target, idempotent.
         const rt = positionals[0]
-        if (!rt) return argErr(errOut, 'add-runtime needs a runtime — usage: iapeer add-runtime <runtime> (--peer <p> | --all)')
+        if (!rt) return argErr(errOut, 'add-runtime needs a runtime — usage: iapeer add-runtime <runtime> (--peer <p> | --all); an infra/presence runtime is --peer only')
         const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
         if (flags.all !== true && !peerName) return argErr(errOut, 'add-runtime needs a target — pass --peer <p> or --all')
         const outcomes = await addRuntime(rt, { peer: peerName, all: flags.all === true, env })
@@ -2123,7 +2219,11 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         // В48 — a failed launchctl bootstrap (reason set) means the always-on peer is NOT
         // started; exit 0 here let automation read a dead telegram/notifier as running.
-        return outcomes.some(o => o.action === 'refused-foreign-launchd' || (o.action === 'bootstrap' && o.reason !== undefined)) ? 1 : 0
+        return outcomes.some(
+          o => o.action === 'refused-foreign-launchd' || o.action === 'no-plist' || (o.action === 'bootstrap' && o.reason !== undefined),
+        )
+          ? 1
+          : 0
       }
       case 'refresh': {
         // LAZY soft-reload (fleet doctrine refresh): arm `.fresh-next` so each agentic peer comes up FRESH
@@ -2651,8 +2751,24 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // `connect telegram <peer> [--token <t>]`. The human owes only the token;
         // alias/bot-add/interface/router-restart are resolved by the system. The
         // FIRST message from the human to the bot activates the chat (platform rule).
-        if (positionals[0] !== 'telegram' || !positionals[1]) return argErr(errOut, 'connect needs "telegram <peer>" — usage: iapeer connect telegram <peer> [--token <t>] (e.g. iapeer connect telegram boris)')
-        return await connectTelegramVerb(positionals[1], typeof flags.token === 'string' ? flags.token : undefined, env, out, errOut)
+        // GENERALIZED (was telegram-only): `connect <runtime> <peer>` attaches ANY
+        // presence channel. telegram keeps its bespoke flow (it owes a bot token, a
+        // @BotFather round-trip and a credential store); every other infra runtime is
+        // the generic bind — add-runtime's per-peer infra path. Same verb, same shape,
+        // so "give this person a voicetalk channel" is discoverable where the operator
+        // already looks.
+        const channel = positionals[0]
+        const channelPeer = positionals[1]
+        if (!channel || !channelPeer) {
+          return argErr(errOut, 'connect needs "<runtime> <peer>" — usage: iapeer connect telegram <peer> [--token <t>] | iapeer connect <runtime> <peer> (e.g. iapeer connect voicetalk arthur)')
+        }
+        if (channel === 'telegram') {
+          return await connectTelegramVerb(channelPeer, typeof flags.token === 'string' ? flags.token : undefined, env, out, errOut)
+        }
+        if (!isRuntime(channel) || !isInfraRuntime(channel)) {
+          return argErr(errOut, `connect: "${channel}" is not a presence runtime — connect attaches an always-on CHANNEL (${INFRA_RUNTIME_LIST.join(', ')}); for an agent runtime use \`iapeer add-runtime ${channel} --peer ${channelPeer}\``)
+        }
+        return await connectChannelVerb(channel, channelPeer, env, out, errOut)
       }
       case 'enable': {
         // DISCOVERABILITY ALIAS: `enable telegram <peer>` → `connect telegram <peer>`

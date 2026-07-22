@@ -30,7 +30,7 @@ import {
 } from '../storage/index.ts'
 import { provisionPeer, type ProvisionResult } from '../provision/index.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
-import { launchctlBootstrap, resolveAlwaysOnTarget, type BootstrapResult } from '../launch/launchd.ts'
+import { bootstrapFailed, launchctlBootstrap, resolveAlwaysOnTarget, type BootstrapResult } from '../launch/launchd.ts'
 import { runtimeSelfConfig, type SelfConfigResult } from '../runtime/index.ts'
 import type { Intelligence } from '../core/constants.ts'
 
@@ -576,7 +576,7 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
         resolveAlwaysOnTarget(provisioned.personality, provisioned.runtime, env).path,
         env,
       )
-      if (bootstrapped.state === 'failed' || bootstrapped.state === 'refused-foreign') {
+      if (bootstrapFailed(bootstrapped.state)) {
         opts.warn?.(`bootstrap ${bootstrapped.state}: ${bootstrapped.detail ?? ''}`)
       }
     }

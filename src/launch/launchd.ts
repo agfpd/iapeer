@@ -320,13 +320,22 @@ export type BootstrapState =
   | 'loaded' // bootstrapped now (was not loaded)
   | 'already-loaded' // service already in the gui domain → no-op (idempotent)
   | 'skipped-sandbox' // IAPEER_TEST_SANDBOX=1 → never touch the real launchd
-  | 'refused-foreign' // the plist is not foundation-owned → never load someone else's
+  | 'refused-foreign' // the plist EXISTS but is not foundation-owned → never load someone else's
+  | 'missing-plist' // no plist at that path at all — nothing to load (NOT a foreign plist)
   | 'failed' // launchctl bootstrap exited non-zero
 
 export interface BootstrapResult {
   state: BootstrapState
   label: string
   detail?: string
+}
+
+/** Did a bootstrap attempt leave the job NOT running? The single definition every caller
+ *  shares, so adding a state can never silently pass someone's hand-rolled failure check
+ *  (`state === 'failed' || state === 'refused-foreign'` had to be edited in three places).
+ *  `skipped-sandbox` is a deliberate no-op, not a failure. */
+export function bootstrapFailed(state: BootstrapState): boolean {
+  return state === 'failed' || state === 'refused-foreign' || state === 'missing-plist'
 }
 
 /** Is `com.iapeer.<personality>` already loaded in the gui domain? (`launchctl print`
@@ -632,6 +641,20 @@ export function launchctlBootstrap(
   // (Deriving from `personality` alone would mis-label a per-runtime plist.)
   const base = plistPath.slice(plistPath.lastIndexOf('/') + 1)
   const label = base.endsWith('.plist') ? base.slice(0, -'.plist'.length) : launchdLabel(personality)
+  // ABSENT ≠ FOREIGN. isFoundationOwnedPlist reads the file and returns false on ANY
+  // read error, so a plist that simply does not exist used to be reported as "not
+  // foundation-owned (no sentinel) — refusing a foreign plist": a sentinel verdict on a
+  // file that was never there. That is a FALSE ownership accusation, and it sent the
+  // operator hunting for a foreign fleet plist instead of the real cause (no channel
+  // provisioned yet). Discriminate first — the caller turns this into an actionable
+  // "provision it with <verb>" instead of a fleet-guard refusal.
+  if (!existsSync(plistPath)) {
+    return {
+      state: 'missing-plist',
+      label,
+      detail: `${plistPath} does not exist — no always-on plist has been provisioned for peer "${personality}" on this channel`,
+    }
+  }
   if (!isFoundationOwnedPlist(plistPath)) {
     return {
       state: 'refused-foreign',
@@ -799,8 +822,16 @@ export function installAlwaysOnPlist(opts: InstallAlwaysOnPlistOptions): string 
     programArguments: [...(opts.entrypointArgv ?? defaultEntrypointArgv(env)), opts.personality, opts.runtime],
     workingDirectory: opts.cwd,
     environment,
-    stdoutPath: join(logDir, 'launchd-stdout.log'),
-    stderrPath: join(logDir, 'launchd-stderr.log'),
+    // MULTI-INFRA log separation: the log dir is PERSONALITY-scoped, so with a second
+    // always-on channel both plists pointed at the SAME launchd-stdout/stderr.log and the
+    // two routers interleaved into one file (live on this host: arthur's telegram and web
+    // channels shared it) — unreadable, and a crash-loop in one channel looks like noise
+    // from the other. The per-runtime plist gets a per-runtime file. The LEGACY BASE plist
+    // keeps the unsuffixed names: it is the personality's original single channel, and
+    // renaming its log on an unrelated regeneration would orphan the operator's existing
+    // tails for no gain (same no-forced-migration rule resolveAlwaysOnTarget follows).
+    stdoutPath: join(logDir, target.scheme === 'per-runtime' ? `launchd-${opts.runtime}-stdout.log` : 'launchd-stdout.log'),
+    stderrPath: join(logDir, target.scheme === 'per-runtime' ? `launchd-${opts.runtime}-stderr.log` : 'launchd-stderr.log'),
     throttleIntervalSecs: opts.throttleIntervalSecs,
   }
   mkdirSync(launchAgentsDir(env), { recursive: true })
