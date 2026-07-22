@@ -21,7 +21,24 @@
 // swallows errors. The dropped head of an already-oversized legacy file is redraw noise; the
 // last maxBytes is snapshotted, older bytes are discarded (never a giant copy of the bloat).
 
-import { openSync, closeSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync, fstatSync, renameSync } from 'fs'
+// VOLUME RETENTION (gcPaneLogs, below) is the SECOND half of the bound. Per-file rotation caps one
+// identity (16 MiB base + N×16 MiB copies), but the DIRECTORY total is then a product of the fleet
+// size — it only ever grows with peers × runtimes, and nothing ever reclaimed the artifacts of a peer
+// that died or was removed months ago. The janitor therefore also enforces an age retention and a
+// hard directory BUDGET each tick, so the ceiling is a fixed number instead of a per-peer multiple.
+
+import {
+  openSync,
+  closeSync,
+  readSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  fstatSync,
+  renameSync,
+  utimesSync,
+} from 'fs'
 import { join } from 'path'
 
 /** Rotate threshold (env IAPEER_PANELOG_MAX_BYTES) — a base pane-log over this is rotated.
@@ -35,6 +52,17 @@ export const PANELOG_COPIES = 2
  *  truncated to — NOT the copy count (that is IAPEER_PANELOG_KEEP). Internal invariant, not
  *  env-tunable: capping the base below the seed would starve occupancy/ready-gate detection. */
 export const PANELOG_TAIL_BYTES = 8 * 1024 * 1024
+
+/** Directory BUDGET (env IAPEER_PANELOG_DIR_BUDGET) — the observable ceiling on the WHOLE
+ *  pane-log dir, enforced every tick by gcPaneLogs. Default 512 MiB. Sized off the live shape of
+ *  this host: the artifacts that are load-bearing are the bases of CONCURRENTLY warm sessions
+ *  (~12 × ≤16 MiB here), everything else is history. See gcPaneLogs for the honest boundary. */
+export const PANELOG_DIR_BUDGET_BYTES = 512 * 1024 * 1024
+/** Age retention (env IAPEER_PANELOG_STALE_DAYS) — any pane-log artifact untouched for longer is
+ *  reclaimed. Default 14 d: FAR beyond any live signal (idle-reap kills a warm session in minutes,
+ *  the ready-gate seed and the mtime-occupancy contract only ever read a CURRENT session's base),
+ *  so a base this cold belongs to a peer that is dead, removed, or renamed. A wake recreates it. */
+export const PANELOG_STALE_MS = 14 * 24 * 60 * 60 * 1000
 
 /** Parse a positive integer env value, else the default (mirror of the daemon-log config helpers). */
 function envPosInt(raw: string | undefined, dflt: number): number {
@@ -134,4 +162,165 @@ export function capPaneLogs(
     if (rotateFile(path, cap, copies, tailBytes)) rotated.push(path)
   }
   return rotated
+}
+
+// ─────────────────────────── volume retention (dir budget) ───────────────────────────
+
+/** Resolve the retention knobs from env (defaults above). */
+export function paneLogGcConfig(env: NodeJS.ProcessEnv = process.env): { budgetBytes: number; staleMs: number } {
+  const days = env.IAPEER_PANELOG_STALE_DAYS
+  const staleDays = days !== undefined && Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 14
+  return {
+    budgetBytes: envPosInt(env.IAPEER_PANELOG_DIR_BUDGET, PANELOG_DIR_BUDGET_BYTES),
+    staleMs: Math.round(staleDays * 24 * 60 * 60 * 1000),
+  }
+}
+
+/** One pane-log artifact on disk. `base` = `<identity>.log` (live-readable), else a rotated copy. */
+type PaneLogArtifact = { path: string; size: number; mtimeMs: number; base: boolean }
+
+/** Snapshot the dir's artifacts (bases + rotated copies). Unreadable entries are skipped. */
+function scanPaneLogs(logDir: string): PaneLogArtifact[] {
+  let names: string[]
+  try {
+    names = readdirSync(logDir)
+  } catch {
+    return []
+  }
+  const out: PaneLogArtifact[] = []
+  for (const name of names) {
+    const base = name.endsWith('.log')
+    if (!base && !/\.log\.\d+$/.test(name)) continue // only OUR artifacts — never a foreign file
+    const path = join(logDir, name)
+    try {
+      const st = statSync(path)
+      if (st.isFile()) out.push({ path, size: st.size, mtimeMs: st.mtimeMs, base })
+    } catch {
+      /* vanished mid-scan → fine */
+    }
+  }
+  return out
+}
+
+/** Truncate a base IN PLACE to its last tailBytes, PRESERVING its mtime. Same inode (writer's
+ *  O_APPEND fd + В19 heal survive, exactly as rotateFile step 3), and the mtime restore keeps the
+ *  pane-log OCCUPANCY contract honest: a janitor write must never masquerade as peer activity.
+ *  Returns the bytes reclaimed (0 on no-op/error). */
+function shrinkBase(path: string, tailBytes: number): number {
+  try {
+    const st = statSync(path)
+    if (st.size <= tailBytes) return 0
+    const tail = readTail(path, tailBytes)
+    if (tail === null) return 0
+    writeFileSync(path, tail, { mode: 0o600 })
+    try {
+      utimesSync(path, st.atime, st.mtime) // janitor ≠ activity
+    } catch {
+      /* best-effort */
+    }
+    return st.size - tail.length
+  } catch {
+    return 0
+  }
+}
+
+/** What one GC pass did — observability for the supervise-tick trace. */
+export type PaneLogGcResult = {
+  bytesBefore: number
+  bytesAfter: number
+  /** Artifacts deleted by the AGE retention (dead/removed peers, ancient rotations). */
+  reapedStale: number
+  /** Rotated copies deleted by the BUDGET, oldest first. */
+  droppedCopies: number
+  /** Live bases shrunk to the reader-floor as the budget backstop. */
+  shrunkBases: number
+  /** True when even the backstop could not reach the budget — see the honest boundary below. */
+  overBudget: boolean
+}
+
+/**
+ * RETENTION pass over the pane-log dir — turns the per-file rotation bound into a DIRECTORY bound.
+ * Runs right after capPaneLogs on every supervise tick (idempotent, best-effort, no manual step),
+ * reclaiming in cheapest-loss-first order:
+ *
+ *   1. AGE — every artifact (base OR copy) untouched for > staleMs is deleted. This is what finally
+ *      reclaims peers that died, were removed, or renamed: nothing live reads a base that cold, and
+ *      the supervisor recreates it on the next wake.
+ *   2. BUDGET / copies — while the dir exceeds budgetBytes, delete rotated copies OLDEST FIRST.
+ *      Copies are history nobody reads live, so they are the correct first casualty.
+ *   3. BUDGET / backstop — if copies ran out and the dir is STILL over, shrink the largest bases to
+ *      the reader-floor (tailBytes, ≥ the ready-gate seed window) with mtime preserved.
+ *
+ * HONEST BOUNDARY: the floor of step 3 is `live-identities × tailBytes` (8 MiB each). The budget is
+ * therefore authoritative up to ~`budgetBytes / tailBytes` concurrently warm identities (~64 at the
+ * defaults); beyond that the reader-floor wins, `overBudget` comes back true, and the budget must be
+ * raised via IAPEER_PANELOG_DIR_BUDGET. Truncating below the seed window would starve
+ * occupancy/ready-gate detection, so the floor deliberately outranks the budget.
+ */
+export function gcPaneLogs(
+  logDir: string,
+  opts: { budgetBytes?: number; staleMs?: number; tailBytes?: number; nowMs?: number } = {},
+): PaneLogGcResult {
+  const budgetBytes = opts.budgetBytes ?? PANELOG_DIR_BUDGET_BYTES
+  const staleMs = opts.staleMs ?? PANELOG_STALE_MS
+  const tailBytes = opts.tailBytes ?? PANELOG_TAIL_BYTES
+  const nowMs = opts.nowMs ?? Date.now()
+
+  let live = scanPaneLogs(logDir)
+  const bytesBefore = live.reduce((s, a) => s + a.size, 0)
+  const res: PaneLogGcResult = {
+    bytesBefore,
+    bytesAfter: bytesBefore,
+    reapedStale: 0,
+    droppedCopies: 0,
+    shrunkBases: 0,
+    overBudget: false,
+  }
+  if (live.length === 0) return res
+
+  let total = bytesBefore
+  const drop = (a: PaneLogArtifact): boolean => {
+    try {
+      unlinkSync(a.path)
+      total -= a.size
+      return true
+    } catch {
+      return false // per-file best-effort — retention never fails a supervise tick
+    }
+  }
+
+  // 1 — AGE retention.
+  const staleCutoff = nowMs - staleMs
+  const kept: PaneLogArtifact[] = []
+  for (const a of live) {
+    if (a.mtimeMs < staleCutoff && drop(a)) res.reapedStale++
+    else kept.push(a)
+  }
+  live = kept
+
+  // 2 — BUDGET: rotated copies, oldest first.
+  if (total > budgetBytes) {
+    const copies = live.filter((a) => !a.base).sort((x, y) => x.mtimeMs - y.mtimeMs)
+    for (const a of copies) {
+      if (total <= budgetBytes) break
+      if (drop(a)) res.droppedCopies++
+    }
+  }
+
+  // 3 — BUDGET backstop: shrink the largest bases to the reader-floor.
+  if (total > budgetBytes) {
+    const bases = live.filter((a) => a.base && a.size > tailBytes).sort((x, y) => y.size - x.size)
+    for (const a of bases) {
+      if (total <= budgetBytes) break
+      const freed = shrinkBase(a.path, tailBytes)
+      if (freed > 0) {
+        total -= freed
+        res.shrunkBases++
+      }
+    }
+  }
+
+  res.bytesAfter = total
+  res.overBudget = total > budgetBytes
+  return res
 }

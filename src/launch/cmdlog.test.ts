@@ -6,11 +6,31 @@
 // 0600, and the cap keeps volume bounded without losing the tail.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from 'fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+  existsSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
-import { PANELOG_MAX_BYTES, PANELOG_TAIL_BYTES, PANELOG_COPIES, capPaneLogs, paneLogRotateConfig } from './cmdlog.ts'
+import {
+  PANELOG_MAX_BYTES,
+  PANELOG_TAIL_BYTES,
+  PANELOG_COPIES,
+  PANELOG_DIR_BUDGET_BYTES,
+  PANELOG_STALE_MS,
+  capPaneLogs,
+  gcPaneLogs,
+  paneLogGcConfig,
+  paneLogRotateConfig,
+} from './cmdlog.ts'
 
 const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0
 
@@ -106,5 +126,118 @@ describe('capPaneLogs (pane-log copytruncate rotation, hermetic)', () => {
     // window (readyGateModel SEED_BYTES = 4 MiB) so rotation never starves occupancy detection.
     expect(PANELOG_TAIL_BYTES).toBeGreaterThanOrEqual(4 * 1024 * 1024)
     expect(PANELOG_TAIL_BYTES).toBeLessThan(PANELOG_MAX_BYTES)
+  })
+
+  // ── RETENTION (gcPaneLogs): the directory-level bound on top of the per-file rotation ──
+
+  const NOW = 1_800_000_000_000 // fixed clock — retention must never depend on the wall clock
+  const DAY = 24 * 60 * 60 * 1000
+  /** Write a pane-log artifact of `size` bytes with an explicit mtime `ageDays` in the past. */
+  const artifact = (name: string, size: number, ageDays: number): string => {
+    const p = join(logDir, name)
+    writeFileSync(p, Buffer.alloc(size, 0x61))
+    const t = new Date(NOW - ageDays * DAY)
+    utimesSync(p, t, t)
+    return p
+  }
+
+  test('AGE retention reclaims artifacts of dead/removed peers (base + copies), fresh ones survive', () => {
+    const dead = artifact('claude-gone.log', 4096, 40) // peer removed weeks ago
+    const deadCopy = artifact('claude-gone.log.1', 4096, 40)
+    const warm = artifact('claude-live.log', 4096, 0.1) // warm session — minutes old
+    const recentCopy = artifact('claude-live.log.1', 4096, 3)
+    const foreign = artifact('not-a-log.txt', 4096, 99) // never ours → never touched
+
+    const r = gcPaneLogs(logDir, { budgetBytes: 10 * MB, staleMs: 14 * DAY, nowMs: NOW })
+
+    expect(r.reapedStale).toBe(2)
+    expect(existsSync(dead)).toBe(false)
+    expect(existsSync(deadCopy)).toBe(false)
+    expect(existsSync(warm)).toBe(true)
+    expect(existsSync(recentCopy)).toBe(true)
+    expect(existsSync(foreign)).toBe(true) // foreign files are outside the janitor's scope
+    expect(r.overBudget).toBe(false)
+    expect(r.bytesAfter).toBe(2 * 4096) // foreign file is not counted either
+  })
+
+  test('BUDGET drops rotated copies OLDEST first and stops at the budget; live bases untouched', () => {
+    const base = artifact('claude-a.log', 3 * MB, 0.1)
+    const oldest = artifact('claude-a.log.2', 3 * MB, 5)
+    const newer = artifact('claude-a.log.1', 3 * MB, 1)
+
+    const r = gcPaneLogs(logDir, { budgetBytes: 7 * MB, staleMs: 14 * DAY, nowMs: NOW })
+
+    expect(r.droppedCopies).toBe(1)
+    expect(existsSync(oldest)).toBe(false) // oldest history is the first casualty
+    expect(existsSync(newer)).toBe(true) // …and it stops as soon as the budget is met
+    expect(statSync(base).size).toBe(3 * MB) // the live base is never a budget casualty while copies remain
+    expect(r.shrunkBases).toBe(0)
+    expect(r.bytesAfter).toBeLessThanOrEqual(7 * MB)
+    expect(r.overBudget).toBe(false)
+  })
+
+  test('BUDGET backstop shrinks the largest base to the reader-floor — tail kept, inode + MTIME preserved', () => {
+    const big = join(logDir, 'claude-big.log')
+    writeFileSync(big, Buffer.concat([Buffer.alloc(4 * MB, 0x61), Buffer.from('PANE-TAIL')]))
+    const mt = new Date(NOW - 2 * DAY)
+    utimesSync(big, mt, mt)
+    const inoBefore = statSync(big).ino
+    artifact('claude-small.log', 512, 0.1)
+
+    // No copies to drop → the backstop is the only lever.
+    const r = gcPaneLogs(logDir, { budgetBytes: MB, staleMs: 14 * DAY, tailBytes: 64 * 1024, nowMs: NOW })
+
+    expect(r.droppedCopies).toBe(0)
+    expect(r.shrunkBases).toBe(1)
+    const after = readFileSync(big)
+    expect(after.length).toBe(64 * 1024) // shrunk to the reader-floor…
+    expect(after.toString()).toEndWith('PANE-TAIL') // …keeping the LIVE tail readers seed from
+    expect(statSync(big).ino).toBe(inoBefore) // same inode → supervisor's O_APPEND fd survives
+    // A janitor write must NOT masquerade as peer activity (mtime-occupancy contract).
+    expect(Math.round(statSync(big).mtimeMs)).toBe(Math.round(mt.getTime()))
+    expect(r.overBudget).toBe(false)
+  })
+
+  test('reports overBudget when the reader-floor outranks the budget (honest boundary, no starving)', () => {
+    // Two bases that cannot go below the floor: floor(2 × 64 KiB) > budget(64 KiB).
+    artifact('claude-a.log', MB, 0.1)
+    artifact('claude-b.log', MB, 0.1)
+    const r = gcPaneLogs(logDir, { budgetBytes: 64 * 1024, staleMs: 14 * DAY, tailBytes: 64 * 1024, nowMs: NOW })
+    expect(r.shrunkBases).toBe(2)
+    expect(r.bytesAfter).toBe(2 * 64 * 1024) // floored at the seed window, NOT truncated below it
+    expect(r.overBudget).toBe(true) // surfaced, not silently violated
+  })
+
+  test('is idempotent and a no-op in steady state (runs every tick, needs no manual step)', () => {
+    artifact('claude-a.log', 512, 0.1)
+    artifact('claude-a.log.1', 512, 1)
+    const opts = { budgetBytes: 10 * MB, staleMs: 14 * DAY, nowMs: NOW }
+    const first = gcPaneLogs(logDir, opts)
+    const second = gcPaneLogs(logDir, opts)
+    for (const r of [first, second]) {
+      expect([r.reapedStale, r.droppedCopies, r.shrunkBases, r.overBudget]).toEqual([0, 0, 0, false])
+    }
+    expect(second.bytesAfter).toBe(first.bytesAfter)
+    expect(gcPaneLogs(join(logDir, 'absent')).bytesBefore).toBe(0) // missing dir → clean no-op
+  })
+
+  test('paneLogGcConfig reads env with defaults', () => {
+    expect(paneLogGcConfig({})).toEqual({ budgetBytes: PANELOG_DIR_BUDGET_BYTES, staleMs: PANELOG_STALE_MS })
+    expect(paneLogGcConfig({ IAPEER_PANELOG_DIR_BUDGET: String(64 * MB), IAPEER_PANELOG_STALE_DAYS: '3' })).toEqual({
+      budgetBytes: 64 * MB,
+      staleMs: 3 * DAY,
+    })
+    // garbage → defaults (a typo'd knob must never disable retention or nuke the fleet's logs)
+    expect(paneLogGcConfig({ IAPEER_PANELOG_DIR_BUDGET: 'x', IAPEER_PANELOG_STALE_DAYS: '-1' })).toEqual({
+      budgetBytes: PANELOG_DIR_BUDGET_BYTES,
+      staleMs: PANELOG_STALE_MS,
+    })
+  })
+
+  test('the default budget leaves room for the concurrently-warm fleet at the reader-floor', () => {
+    // The budget is only authoritative while live-identities × TAIL_BYTES fits under it.
+    // Guard the headroom the default was sized for (~64 warm identities).
+    expect(Math.floor(PANELOG_DIR_BUDGET_BYTES / PANELOG_TAIL_BYTES)).toBeGreaterThanOrEqual(48)
+    expect(PANELOG_DIR_BUDGET_BYTES).toBeGreaterThan(PANELOG_MAX_BYTES * PANELOG_COPIES)
   })
 })

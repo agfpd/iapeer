@@ -63,6 +63,8 @@ The daemon's supervisory tick is fixed — once a minute, not configurable.
 | `IAPEER_DELIVERY_LOG_KEEP` | `5` | How many `delivery.log` rotations to keep. |
 | `IAPEER_PANELOG_MAX_BYTES` | `16 MiB` | The per-peer pane-log (`logs/lifecycle/<runtime>-<peer>.log`, the raw terminal byte stream) size at which rotation happens. |
 | `IAPEER_PANELOG_KEEP` | `2` | How many rotated pane-log copies to keep (`<log>.1` newest … `.N`). |
+| `IAPEER_PANELOG_DIR_BUDGET` | `512 MiB` | The retention ceiling on the WHOLE `logs/lifecycle/` directory — the bound that does not grow with the fleet. |
+| `IAPEER_PANELOG_STALE_DAYS` | `14` | Age after which a pane-log artifact (base or copy) is reclaimed — this is what frees the logs of dead/removed peers. |
 | `IAPEER_SUPERVISE_LOG_VERBOSE` | off | A verbose log of supervisory ticks (by default only decisions are written, not routine "doing nothing"). |
 | `IAPEER_DAEMON_LOG` | off | An extended daemon log. |
 
@@ -83,6 +85,14 @@ The daemon keeps three durable logs in `~/.iapeer/logs/iapeer/`:
 - **`exits.log`** — session deaths with postmortem data: the supervisor records the cause (exit code / signal) at the moment a session dies.
 
 Per-peer **pane-logs** live separately under `~/.iapeer/logs/lifecycle/<runtime>-<peer>.log` — the raw terminal (pty) byte stream the supervisor appends for a session's whole life (occupancy/typing detection, the boot ready-gate, and `tail`-based monitors read them). They are rotated on the supervise tick by **copytruncate** (`IAPEER_PANELOG_MAX_BYTES` × `IAPEER_PANELOG_KEEP`, default 16 MiB × 2): the base file keeps its path and inode (its last 8 MiB tail is retained in place, so the live writer and every reader are undisturbed) while the preceding window is promoted to `<log>.1` … `.N`. Total per peer is bounded by roughly `MAX_BYTES × (KEEP + 1)`.
+
+That per-file bound alone is a *per-peer* one, so the directory total was still a product of the fleet size (peers × runtimes) and nothing ever reclaimed the artifacts of a peer that had died or been removed. The same supervise tick therefore also runs a **retention** pass over the directory, reclaiming in cheapest-loss-first order:
+
+1. **Age** — every artifact (base or copy) untouched for longer than `IAPEER_PANELOG_STALE_DAYS` (14 d) is deleted. Nothing live reads a base that cold — idle-reap ends a warm session in minutes, and only a *current* session's base feeds the ready-gate seed and the mtime-occupancy signal — so this is what finally frees dead, removed, and renamed peers. The supervisor recreates the file on the next wake.
+2. **Budget / copies** — while the directory exceeds `IAPEER_PANELOG_DIR_BUDGET` (512 MiB), rotated copies are deleted oldest-first. They are history nobody reads live, so they are the correct first casualty.
+3. **Budget / backstop** — if the copies run out and the directory is still over budget, the largest bases are shrunk in place to the 8 MiB reader-floor, inode *and mtime* preserved (a janitor write must never masquerade as peer activity in the occupancy contract).
+
+The floor of step 3 is `live-identities × 8 MiB`, so the budget is authoritative up to roughly 64 concurrently warm identities at the defaults; past that the reader-floor deliberately outranks the budget (truncating below the seed window would starve occupancy/ready-gate detection) and the pass records `outcome=over-budget-after-gc` in `lifecycle.log`, where raising `IAPEER_PANELOG_DIR_BUDGET` is the remedy. Every pass that reclaims anything leaves an `action=panelog-gc` line with the before/after megabytes. The whole pass is idempotent and best-effort by construction: it runs on each tick and never fails one.
 
 ### Postmortem diagnostics
 

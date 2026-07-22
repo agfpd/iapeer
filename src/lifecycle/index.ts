@@ -28,7 +28,7 @@ import {
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { renderEnvelopeForAgent } from '../codec/index.ts'
 import { err, ok, type Result } from '../core/errors.ts'
-import { capPaneLogs, paneLogRotateConfig } from '../launch/cmdlog.ts'
+import { capPaneLogs, gcPaneLogs, paneLogGcConfig, paneLogRotateConfig } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { resolveMemoryWritableRoots } from '../status/index.ts'
 import { approvalModeOf, readPeerProfile, resolveIdentity, type ApprovalMode } from '../identity/index.ts'
@@ -1524,12 +1524,31 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   // to lifecycle ownership, so launchd-managed routers' pane-logs are rotated too.
   const paneLogRc = paneLogRotateConfig(env)
   capPaneLogs(cfg.logDir, paneLogRc.maxBytes, paneLogRc.copies)
+  // Pane-log volume RETENTION (gcPaneLogs): rotation bounds ONE identity, but the DIRECTORY total
+  // is that bound × the fleet — it only grew with peers × runtimes, and the artifacts of dead /
+  // removed peers were never reclaimed. Enforce the age retention + the directory BUDGET right
+  // after the rotation, on the same tick and the same best-effort contract (knobs:
+  // IAPEER_PANELOG_DIR_BUDGET / IAPEER_PANELOG_STALE_DAYS, defaults 512 MiB / 14 d).
+  const paneLogGc = gcPaneLogs(cfg.logDir, { ...paneLogGcConfig(env), nowMs })
   // Durable decision trace (eventlog.ts): every reap/death/eager-fresh gets a line
   // so a postmortem can answer "when & how did peer X's prior session end" even
   // after the .idle-reaped / .deaths markers are consumed. alive / skipped-launchd
   // are steady-state non-decisions → logged only under IAPEER_SUPERVISE_LOG_VERBOSE.
   const trace = (fields: Record<string, string | number | undefined>): void =>
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'supervise', ...fields }, { env, nowMs })
+  // Retention is silent in steady state (nothing to reclaim); a pass that actually reclaimed —
+  // or that could NOT reach the budget even after the backstop — leaves a durable line.
+  if (paneLogGc.reapedStale || paneLogGc.droppedCopies || paneLogGc.shrunkBases || paneLogGc.overBudget) {
+    trace({
+      action: 'panelog-gc',
+      stale: paneLogGc.reapedStale,
+      copies: paneLogGc.droppedCopies,
+      shrunk: paneLogGc.shrunkBases,
+      mb_before: Math.round(paneLogGc.bytesBefore / (1024 * 1024)),
+      mb_after: Math.round(paneLogGc.bytesAfter / (1024 * 1024)),
+      outcome: paneLogGc.overBudget ? 'over-budget-after-gc' : 'within-budget',
+    })
+  }
   const out: SuperviseOutcome[] = []
   const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace }
   for (const s of readSessionStates(cfg)) {
