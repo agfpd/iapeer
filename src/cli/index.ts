@@ -1102,8 +1102,19 @@ async function connectChannelVerb(
 ): Promise<number> {
   // A channel whose runtime package was never installed would provision a plist whose
   // launcher does not resolve — provisionPeer refuses, but late and obscurely. Say it here.
-  const { isRuntimeInstalled } = await import('../init/index.ts')
-  if (!isRuntimeInstalled(runtime as Runtime, env)) {
+  //
+  // NB: `isRuntimeInstalled` is the AGENTIC probe and is WRONG for this question — it ends
+  // at `Bun.which(runtime)`, while an infra launcher is named `<runtime>-runtime`
+  // (INFRA_RUNTIME_DEFAULT_BIN). It reported a fully installed voicetalk as missing and
+  // blocked the very path this verb exists for (caught live on the first real run).
+  // The installed-ness of a runtime PACKAGE is its self-deployed manifest — the contract's
+  // own install stamp ("on self-install the package writes ~/.iapeer/runtimes/<rt>/runtime.json;
+  // the core reads it", docs/13). Deliberately NOT a PATH probe for the launcher: that would
+  // read host state a temp-rooted run cannot control, and whether the launcher RESOLVES is
+  // already checked downstream by provisionPeer, which refuses with its own clear error
+  // rather than writing a plist that crash-loops.
+  const { runtimeManifestPath } = await import('../runtime/index.ts')
+  if (!existsSync(runtimeManifestPath(runtime as Runtime, { env }))) {
     errOut(`connect ${runtime} ${peer}: runtime "${runtime}" is not installed on this host — \`iapeer install-runtime ${runtime}\` first\n`)
     return 1
   }

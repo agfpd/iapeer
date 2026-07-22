@@ -476,6 +476,37 @@ describe('enable telegram <peer> — discoverability alias for connect telegram'
     expect(code).toBe(2)
     expect(cap).toContain('connect telegram')
   })
+
+  test('connect <runtime> <peer>: an INSTALLED infra runtime is not misread as missing (launcher is <rt>-runtime)', async () => {
+    // Caught on the first live run: the installed-check used the AGENTIC probe, which ends
+    // at Bun.which('voicetalk') — but an infra launcher is named `voicetalk-runtime`. A
+    // fully installed runtime read as "not installed" and the verb refused the very path
+    // it exists for. Installed-ness of a runtime PACKAGE is its self-deployed manifest.
+    const e = env()
+    await register('vpeer', 'claude', 'natural')
+    mkdirSync(join(root, 'runtimes', 'voicetalk'), { recursive: true })
+    writeFileSync(
+      join(root, 'runtimes', 'voicetalk', 'runtime.json'),
+      JSON.stringify({ runtime: 'voicetalk', version: '0.2.1' }),
+    )
+    await runCli(['connect', 'voicetalk', 'vpeer'], e)
+    expect(cap).not.toContain('is not installed on this host')
+  })
+
+  test('connect <runtime> <peer>: a genuinely ABSENT runtime package still refuses with the install hint', async () => {
+    await register('npeer', 'claude', 'natural')
+    const code = await runCli(['connect', 'web', 'npeer'], env()) // no manifest in the temp root
+    expect(code).toBe(1)
+    expect(cap).toContain('is not installed on this host')
+    expect(cap).toContain('install-runtime web')
+  })
+
+  test('connect refuses an AGENTIC runtime — it attaches CHANNELS, and says where to go instead', async () => {
+    await register('apeer')
+    const code = await runCli(['connect', 'codex', 'apeer'], env())
+    expect(code).toBe(2)
+    expect(cap).toContain('add-runtime codex --peer apeer')
+  })
 })
 
 describe('--help/-h global intercept (CLI hygiene — usage printed, NOTHING executed)', () => {
