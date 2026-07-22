@@ -43,6 +43,22 @@ async function register(personality: string, runtime = 'claude', intelligence: '
   await upsertPeer({ personality, runtime, cwd: `/tmp/${personality}`, intelligence }, { rootDir: root })
 }
 
+/**
+ * An env whose PATH carries a FAKE `<runtime>-runtime` launcher. provisionPeer resolves the
+ * infra launcher against env.PATH and REFUSES when it is missing (it will not write a plist
+ * that crash-loops under launchd), so an infra test that relied on the ambient host passed
+ * on a dev box with the real runtime installed and FAILED on CI's clean machine — the exact
+ * hermeticity rule in CLAUDE.md. Injecting the launcher makes the outcome identical on both.
+ */
+function envWithLauncher(runtime: string): NodeJS.ProcessEnv {
+  const bin = join(root, 'fake-bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, `${runtime}-runtime`), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const e = env()
+  e.PATH = `${bin}:${e.PATH ?? ''}`
+  return e
+}
+
 // ─── v1.2 provision-инверсия at the CLI joints (remove → unprovision) ─────────
 // NB: the memory-plugin verb was REMOVED 11.06 (ADR-017 — the plugin form is
 // retired ecosystem-wide; fleet sweeps are the provider's side). The core's
@@ -836,7 +852,7 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     // `add-runtime` refused infra outright and `connect` was telegram-only — leaving NO
     // verb to give an existing personality a second presence channel, though the
     // multi-plist scheme exists precisely for it.
-    const e = env()
+    const e = envWithLauncher('telegram')
     const cwd = join(root, 'peers', 'chan1')
     mkdirSync(cwd, { recursive: true })
     await upsertPeer({ personality: 'chan1', runtime: 'claude', cwd, intelligence: 'natural' }, { rootDir: root })
@@ -861,7 +877,7 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     // `runtimes` is the declaration, the plist realizes it — they can diverge (a
     // hand-built bind, a torn-down plist). Reporting "already" off the declaration alone
     // would claim a channel that does not exist and leave the operator with no repair.
-    const e = env()
+    const e = envWithLauncher('telegram')
     const cwd = join(root, 'peers', 'chan2')
     mkdirSync(cwd, { recursive: true })
     await upsertPeer({ personality: 'chan2', runtime: 'claude', cwd, intelligence: 'natural' }, { rootDir: root })
