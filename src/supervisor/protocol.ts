@@ -164,6 +164,18 @@ export function keysToBytes(keys: string[], enc: KeyEncoding = {}): Buffer {
   return Buffer.from(out, 'utf8')
 }
 
+// ── client terminal normalization ────────────────────────────────────────────────
+// A (re)attach can start in an already-used Terminal.app normal buffer: the shell prompt and a prior
+// attach's differently-wrapped frame still occupy the physical viewport. The daemon's serialized model
+// deliberately carries NO clear (it is shared protocol data, while the stale viewport belongs to each
+// client), so the client must home + erase the CURRENT display before the one-time snapshot arrives.
+//
+// Use ED0 from HOME, NOT ED2/ED3. Apple Terminal implements neither of the latter as the primitive we
+// need: ED2 pushes the old display into native scrollback and ED3 is ignored, so repeated attaches stack
+// broken-width dumps in history. HOME+ED0 clears the viewport in place; the daemon still sends exactly
+// one model snapshot and later SIGWINCH resizes remain raw/live (no repeated dump).
+export const TERM_ATTACH_RESET = '\x1b[H\x1b[J'
+
 // ── port-dep #1: terminal reset on every client exit path ───────────────────────
 // The child sets a STACK of app-modes on the live terminal (alt-screen, bracketed-paste,
 // focus-events, theme-update, ALL mouse tracking, kitty-keyboard, scroll-region, hidden cursor).

@@ -3,7 +3,7 @@
 // port-deps live here + in protocol.ts: #1 TERM_RESET on EVERY exit path (incl. SIGHUP window-close,
 // via writeSync which works inside a signal handler), and #2 backpressure is the daemon's side.
 import { writeSync } from 'node:fs'
-import { FRAME_DATA, FRAME_RESIZE, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
+import { FRAME_DATA, FRAME_RESIZE, TERM_ATTACH_RESET, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
 import { ownershipVerdict, pidStartToken, readPidFile, sockPath } from './paths.ts'
 
 const DETACH = 0x1d // Ctrl-]
@@ -81,6 +81,17 @@ export async function runSupervisorClient(runDir: string, session: string): Prom
   // Ready the terminal BEFORE connecting, so the repaint snapshot renders the instant it arrives.
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.resume()
+  // The daemon owns the emulated session/model; THIS client owns the physical operator viewport.
+  // Normalize that viewport before connecting so its one-time snapshot cannot be appended below a
+  // shell prompt or a prior attach's differently-wrapped frame. HOME+ED0 is intentional: unlike
+  // ED2/ED3 it does not trigger Apple Terminal's clear-to-scrollback trap (protocol.ts).
+  if (process.stdout.isTTY) {
+    try {
+      writeSync(1, TERM_ATTACH_RESET)
+    } catch {
+      /* a failed cosmetic reset must not block attach */
+    }
+  }
 
   const curSize = (): Buffer => sizePayload(process.stdout.columns || 80, process.stdout.rows || 24)
   const sock = await Bun.connect({
@@ -142,9 +153,9 @@ export async function runSupervisorClient(runDir: string, session: string): Prom
     })
   }
   process.on('exit', () => restore()) // last-resort sync net
-  // NO pre-repaint attach banner: any stdout (even stderr — same tty device) printed before the daemon's
-  // snapshot lands pollutes the fresh terminal's scrollback, defeating native-history reconstruction. The
-  // detach key (Ctrl-]) is documented in CLI help / the attach verb, not emitted as a scrollback line.
+  // NO pre-repaint attach banner: after TERM_ATTACH_RESET, the daemon snapshot must be the first CONTENT
+  // painted into the normalized viewport. The detach key (Ctrl-]) is documented in CLI help / the attach
+  // verb, not emitted as a scrollback line.
   // STAY ATTACHED. The client lives on its handles (raw stdin + the socket); EVERY terminal path
   // (detach Ctrl-], session-end close(), SIGHUP/SIGTERM, socket error) calls process.exit ITSELF.
   // This promise INTENTIONALLY never resolves: returning here would resolve runSupervisorClient the

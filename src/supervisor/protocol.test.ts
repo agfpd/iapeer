@@ -7,6 +7,7 @@ import {
   BackpressureWriter,
   FRAME_DATA,
   FRAME_RESIZE,
+  TERM_ATTACH_RESET,
   TERM_RESET,
   capabilityResponses,
   frame,
@@ -110,6 +111,14 @@ describe('TERM_RESET (port-dep #1: clean every client exit path)', () => {
     expect(TERM_RESET).toContain('\x1b[?1000l') // mouse tracking off
     expect(TERM_RESET).toContain('\x1b[?25h') // show cursor
     expect(TERM_RESET).toContain('\x1b[<u') // pop kitty-keyboard
+  })
+})
+
+describe('TERM_ATTACH_RESET (clean physical viewport before the one-time snapshot)', () => {
+  test('uses HOME+ED0, never Apple Terminal clear-to-scrollback ED2/unsupported ED3', () => {
+    expect(TERM_ATTACH_RESET).toBe('\x1b[H\x1b[J')
+    expect(TERM_ATTACH_RESET).not.toContain('\x1b[2J')
+    expect(TERM_ATTACH_RESET).not.toContain('\x1b[3J')
   })
 })
 

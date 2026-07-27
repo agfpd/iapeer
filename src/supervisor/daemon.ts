@@ -399,8 +399,9 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
    *  Scrollback rows are spinner-stripped; the viewport stays verbatim. The child's SIGWINCH redraw (from
    *  applyGeometry) then settles the live viewport at the client's width. Backpressure-safe
    *  (BackpressureWriter) — a large snapshot MUST NOT drop past the socket buffer (port-dep #2). Called
-   *  EXACTLY ONCE per client (its first FRAME_RESIZE). NO clears (\x1b[2J/3J): a fresh window needs none,
-   *  and Apple Terminal scrolls 2J into scrollback + ignores 3J. */
+   *  EXACTLY ONCE per client (its first FRAME_RESIZE). The daemon/model sends NO clears
+   *  (\x1b[2J/3J): Apple Terminal scrolls 2J into scrollback + ignores 3J. The attach client owns its
+   *  physical viewport and normalizes it once with HOME+ED0 before connecting. */
   // Await until the model has parsed ALL writes AND none arrived during the wait (stable). Awaiting a single
   // write promise is not enough: while the client is gated (initializing, live-forward skipped) new child
   // bytes still land in the model and bump writeSeq — loop until the sequence holds steady so the snapshot

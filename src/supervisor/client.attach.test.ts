@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { killSession, sessionAlive, startSupervisorDaemon } from './index.ts'
+import { TERM_ATTACH_RESET } from './protocol.ts'
 
 // SURFACE-5 regression — the interactive attach-and-stay loop. The other supervisor tests attach a
 // RAW socket; none drives the real `runSupervisorClient` under a TTY, so the canary's first live
@@ -90,6 +91,10 @@ d('runSupervisorClient interactive attach (surface-5, Bun-native pty)', () => {
     // snapshot/live forwarding all succeeded). There is deliberately NO attach banner now — any pre-snapshot
     // stdout would pollute the fresh terminal's scrollback — so first live frames ARE the handshake signal.
     expect(await waitFor(() => /STREAMTICK_\d+/.test(c.out()))).toBe(true)
+    // Live incident 27.07: reattach in an already-used Terminal viewport appended the serialized grid below
+    // stale shell/prior-frame rows. The REAL TTY client must normalize its own physical viewport BEFORE the
+    // first daemon byte; the daemon cannot own per-client terminal state.
+    expect(c.out().startsWith(TERM_ATTACH_RESET)).toBe(true)
 
     // THE BUG was a handshake-then-exit within ~ms. Assert the client is STILL attached well past
     // that window AND that live child output (STREAMTICK from the tick runtime) is reaching it —
