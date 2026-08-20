@@ -26,6 +26,7 @@ The same plugin can store data at both levels: shared in `~/.iapeer/`, peer-boun
 │       └── .iapeer/           (peer-level layout — see below)
 ├── state/
 │   ├── iapeer/                daemon state (router.sock, router.json …)
+│   │   └── attachments/       recipient-owned IAP attachment copies
 │   └── <plugin>/              a plugin's mutable state
 ├── logs/
 │   ├── iapeer/                daemon logs: lifecycle.log, delivery.log, exits.log
@@ -53,7 +54,7 @@ The same plugin can store data at both levels: shared in `~/.iapeer/`, peer-boun
 A few nodes worth highlighting:
 
 - **`peers-profiles.json`** — the registry. Written only through a single writer under the file lock `peers-profiles.lock`; direct editing is forbidden at the core level.
-- **`state/iapeer/`** — where the daemon lives: its local socket `router.sock` and config `router.json`.
+- **`state/iapeer/`** — where the daemon lives: its local socket `router.sock`, config `router.json`, and `attachments/<recipient>/<sha256>/<basename>` inboxes. Attachment inboxes are durable recipient state (not cache); peer removal cleans that recipient's inbox.
 - **`logs/<name>/`** — an infrastructure peer's logs are placed by peer name at the shared level (not in the peer's folder), because it's the output of a launchd service.
 - **`runtimes/<runtime>/`** — dual ownership: the root belongs to the runtime itself (Telegram keeps bot tokens and poll state here), while the `plugins/<plugin>/` subfolder is the plugins' space, holding their config under this runtime.
 - **`docs/<package>/`** — on-host reference docs, one folder per ecosystem package (see below).

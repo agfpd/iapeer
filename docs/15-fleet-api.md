@@ -203,10 +203,10 @@ What the headline states look like on the stream: a peer **waking** is `ev=wake`
 `POST /fleet/v1/send` — deliver a message through the same routing path as the `send_to_peer` tool (wake-on-miss, queueing, delivery log — identical semantics):
 
 ```json
-{ "personality": "boris", "message": "…", "runtime": "claude", "topic": "…", "from": "nova" }
+{ "personality": "boris", "message": "…", "runtime": "claude", "topic": "…", "attachments": ["/tmp/report.pdf"], "from": "nova" }
 ```
 
-`from` is optional: a full `<runtime>-<personality>`, or a bare personality (its default runtime). Default: the **single natural-intelligence peer** of the registry — a GUI-originated message is the human's. With zero or several natural peers the request is refused (`400`) with an instruction to pass `from`.
+`from` is optional: a full `<runtime>-<personality>`, or a bare personality (its default runtime). Default: the **single natural-intelligence peer** of the registry — a GUI-originated message is the human's. With zero or several natural peers the request is refused (`400`) with an instruction to pass `from`. `attachments`, when present, is the same array of absolute source paths as the MCP tool; the shared `routeSend` path copies them into the recipient inbox before acceptance.
 
 Not part of the *command* API, deliberately: **attach** (a terminal handoff — a client opens the system terminal with `iapeer attach <peer>`), registry/host **admin verbs** (`create`/`remove`/`update`/`uninstall` — will be added when a client actually needs them). The **human-approval broker** now lives under `/fleet/v1/approvals*` (`GET` the queue / one item, `POST /<id>/(approve|deny)`) with the `approval-request` / `approval-resolved` SSE `ev` kinds and the `approvals` snapshot field above — the full contract is **docs/17-approval**. The **notice board** lives under `/fleet/v1/notices*` (`GET` the board / one item — **read-only**: a notice is one-way and has nothing to resolve) with the `notice-raised` SSE `ev` kind and the `notices` snapshot field above — the full contract is **docs/19-notices**.
 

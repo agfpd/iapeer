@@ -133,10 +133,10 @@ GET /fleet/v1/events?replay=50
 `POST /fleet/v1/send` — доставить сообщение тем же маршрутом, что инструмент `send_to_peer` (wake-on-miss, очереди, delivery-лог — семантика идентична):
 
 ```json
-{ "personality": "boris", "message": "…", "runtime": "claude", "topic": "…", "from": "nova" }
+{ "personality": "boris", "message": "…", "runtime": "claude", "topic": "…", "attachments": ["/tmp/report.pdf"], "from": "nova" }
 ```
 
-`from` опционален: полный `<runtime>-<personality>` или голая personality (её default-рантайм). По умолчанию — **единственный natural-intelligence пир** реестра: сообщение из GUI принадлежит человеку. При нуле или нескольких natural-пирах запрос отклоняется (`400`) с указанием передать `from`.
+`from` опционален: полный `<runtime>-<personality>` или голая personality (её default-рантайм). По умолчанию — **единственный natural-intelligence пир** реестра: сообщение из GUI принадлежит человеку. При нуле или нескольких natural-пирах запрос отклоняется (`400`) с указанием передать `from`. `attachments`, если передан, — тот же массив абсолютных путей источников, что и у MCP-инструмента; общий путь `routeSend` копирует их в inbox получателя до принятия.
 
 Не входит в *командный* API, намеренно: **attach** (передача терминала — клиент открывает системный терминал с `iapeer attach <peer>`), реестровые/хостовые **admin-verb'ы** (`create`/`remove`/`update`/`uninstall` — добавятся, когда появится клиент с реальной потребностью). **Брокер human-approval** теперь живёт под `/fleet/v1/approvals*` (`GET` очередь / один item, `POST /<id>/(approve|deny)`) с видами SSE `approval-request` / `approval-resolved` и полем `approvals` в снапшоте выше — полный контракт в **docs/17-approval**.
 

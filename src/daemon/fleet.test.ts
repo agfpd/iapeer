@@ -30,6 +30,7 @@ import { approvalsLogPath } from './approvalslog.ts'
 import { noticesLogPath } from './noticeslog.ts'
 import { NoticeBoard } from './notices.ts'
 import { daemonDiscoveryPath, startDaemon, type DaemonHandle } from './index.ts'
+import { decodeEnvelope } from '../codec/index.ts'
 
 let root: string
 let daemon: DaemonHandle
@@ -263,6 +264,63 @@ describe('POST /fleet/v1/send', () => {
       body: JSON.stringify({ personality: 'offlinepeer', message: 'hi', from: 'ghost' }),
     })
     expect(badFrom.status).toBe(400)
+  })
+  test('attachments use the same copy-on-send route as MCP (successful queued send)', async () => {
+    let capturedEnvelope = ''
+    const isolated = await startDaemon({
+      port: 0,
+      host: '127.0.0.1',
+      env: process.env,
+      fleet: buildFleetHandler({ env: process.env, ops: FAKE_OPS, pollMs: 50, board }),
+      ephemeral: {
+        isEphemeral: cwd => cwd === '/tmp/iapeer-fleet-test/off',
+        deliver: async ({ peer, envelope, sentAt }) => {
+          capturedEnvelope = envelope
+          return {
+            ok: true,
+            value: {
+              ok: true as const,
+              delivered_to: { personality: peer.personality, runtime: 'claude' },
+              woke: false,
+              queued: true,
+              queuedBy: 'ephemeral' as const,
+              queueDepth: 1,
+              ts: sentAt!,
+            },
+          }
+        },
+      },
+    })
+    const sourceDir = mkdtempSync(join(tmpdir(), 'iapeer-fleet-attachment-'))
+    const source = join(sourceDir, 'fleet.txt')
+    writeFileSync(source, 'Fleet API attachment bytes')
+    try {
+      const r = await fetch(`${isolated.url!.replace(/\/mcp$/, '')}/fleet/v1/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          personality: 'offlinepeer',
+          message: 'with file',
+          attachments: [source],
+          from: 'claude-boris',
+        }),
+      })
+      expect(r.status).toBe(200)
+      const deliveredPath = decodeEnvelope(capturedEnvelope).attachments[0]!
+      expect(deliveredPath).not.toBe(source)
+      rmSync(sourceDir, { recursive: true, force: true })
+      expect(readFileSync(deliveredPath, 'utf8')).toBe('Fleet API attachment bytes')
+    } finally {
+      await isolated.close()
+      rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
+  test('malformed attachments shape → 400 (never silently ignored)', async () => {
+    const r = await fetch(`${base()}/fleet/v1/send`, {
+      method: 'POST',
+      body: JSON.stringify({ personality: 'offlinepeer', message: 'hi', attachments: '/tmp/not-an-array' }),
+    })
+    expect(r.status).toBe(400)
   })
   test('resolveSendCaller: explicit identity / bare personality / natural default', () => {
     expect(resolveSendCaller('claude-boris', process.env).address).toBe('claude-boris')

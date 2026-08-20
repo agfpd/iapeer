@@ -658,7 +658,13 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
           return sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
         }
         if (typeof body.personality !== 'string' || !body.personality || typeof body.message !== 'string' || !body.message) {
-          return sendJson(res, 400, { error: 'send needs {personality, message} (+ optional runtime/topic/from)' })
+          return sendJson(res, 400, { error: 'send needs {personality, message} (+ optional runtime/topic/attachments/from)' })
+        }
+        if (
+          body.attachments !== undefined &&
+          (!Array.isArray(body.attachments) || !body.attachments.every(item => typeof item === 'string'))
+        ) {
+          return sendJson(res, 400, { error: 'send attachments must be an array of absolute local source-file paths' })
         }
         let caller: ResolvedCaller
         try {
@@ -676,6 +682,7 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
             runtime: typeof body.runtime === 'string' ? body.runtime : undefined,
             message: body.message,
             topic: typeof body.topic === 'string' ? body.topic : undefined,
+            attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
           },
           ctx.deps,
         )

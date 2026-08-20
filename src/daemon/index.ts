@@ -163,7 +163,7 @@ export function listTools(): unknown[] {
           topic: { type: 'string', description: 'Optional short topic for threading related peer messages.', maxLength: MAX_TOPIC_LEN },
           attachments: {
             type: 'array',
-            description: 'Optional absolute local file paths. IAP delivers them as a separate <attachments> field, not as part of message text.',
+            description: 'Optional absolute local source-file paths. Before accepting the send, IAP copies each regular file into durable recipient-owned state and puts the copy paths in the separate <attachments> field; the sources may be deleted immediately after success.',
             maxItems: MAX_ATTACHMENTS,
             items: { type: 'string' },
           },

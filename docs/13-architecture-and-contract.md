@@ -13,6 +13,7 @@ The system's behavior rests on these:
 - **A single registry writer.** `peers-profiles.json` is written only through one writer under a file lock. Direct writing of the file is forbidden at the core level — this rules out races.
 - **Liveness is defined by a peer's live session.** A peer is alive if and only if it has a live session under the supervisor. This isn't a separate state flag that can desync, but an observable fact.
 - **`delivered` ⟺ landed in a live session.** Delivery success means the message was accepted by a live session (the daemon waited for confirmation). If it didn't confirm — the daemon treats the session as dead rather than lying about success.
+- **Attachments are copied before routing.** Caller paths are only sources. Before an envelope can be accepted as delivered or queued, `routeSend` copies every attachment into the target peer's foundation-owned inbox and puts those copy paths into the envelope. A later delete, rename, or cleanup of the caller's source cannot break the received attachment. The copies live for the lifetime of the recipient peer and `iapeer remove <peer>` removes that inbox.
 - **The source of truth is the local profile.** The registry is a reprojectable projection of the peer profiles. On a divergence, the profile wins.
 - **The binary is installed on the host.** The daemon runs from the installed `~/.local/bin/iapeer`, not from a source working tree. An update is replacing the binary and restarting the daemon onto it.
 

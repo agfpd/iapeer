@@ -30,7 +30,7 @@ verbatim as og-1a2b3c4d (expires in 15 min).
 Do not re-send the message text — confirm-send delivers the held message.
 ```
 
-Both exits cost one shell command and **zero message regeneration**: the held send carries the full original input (message, topic, attachments).
+Both exits cost one shell command and **zero message regeneration**: the held send carries the original message/topic/runtime and recipient-owned copies of every attachment. Copying happens before the hold is persisted, so deleting a caller's temporary sources during the 15-minute decision window cannot break `confirm-send`.
 
 ```bash
 iapeer confirm-send og-1a2b3c4d                 # deliver as addressed (intentional cross-channel)
@@ -48,7 +48,7 @@ State is on disk (it must survive daemon restarts and short-lived CLI processes)
 ```text
 ~/.iapeer/state/iapeer/origin/
   state.json          # (agent → human → {rt, inboundTs, answeredTs}) — last-wins, atomic writes
-  pending/<id>.json   # held sends, verbatim; lazily GC'd past the pending TTL
+  pending/<id>.json   # held sends; attachment fields already name recipient-inbox copies
 ```
 
 ## Scope and non-interference

@@ -71,6 +71,17 @@ import {
 } from './originGuard.ts'
 import { keysToBytes } from '../supervisor/protocol.ts' // pure send-keys-vocab→pty-byte translation (boot-driver slice a), @xterm-free
 import { paneLogComposerOccupied } from '../launch/readyGateModel.ts' // spawn-flip Ф0b-3 slice 3c: hosted busy-composer detector (slice 2). @xterm dynamic-loaded inside it → warm path stays @xterm-free with the flip off
+import { spoolAttachments } from './attachments.ts'
+
+export {
+  ATTACHMENT_SPOOL_DIR,
+  attachmentInboxDir,
+  attachmentSpoolRoot,
+  purgeAttachmentInbox,
+  spoolAttachments,
+  type AttachmentPurgeResult,
+  type SpooledAttachments,
+} from './attachments.ts'
 
 export interface OnlinePeer {
   personality: string
@@ -1502,8 +1513,11 @@ async function routeSendInner(
   // Origin-guard (docs/18) — an agent's PRESUMED REPLY to a human (the human's latest
   // inbound to this agent is unanswered) must target the channel the human wrote from.
   // Checked FIRST, before any resolve/wake side-effect and before the telegram policy:
-  // a mismatch is HELD (persisted verbatim + instructive error), not delivered — the
-  // agent then confirms cross-channel or redirects to the origin, zero regeneration.
+  // a mismatch is HELD, not delivered — the agent then confirms cross-channel or
+  // redirects to the origin, zero regeneration. Attachment PATHS are the deliberate
+  // exception to "verbatim": sources are copied into the intended recipient's durable
+  // inbox before the hold is persisted, so deleting a /tmp source cannot break a later
+  // confirm-send. Message/topic/runtime remain verbatim.
   // Intended runtime = the explicit override or the human's default; exact for the
   // natural-peer class (implicit routing is strictly default_runtime-anchored).
   // Initiative (answered / no inbound / ARM_TTL-stale) passes untouched.
@@ -1516,9 +1530,11 @@ async function routeSendInner(
     const armed = armedOrigin(caller.personality, peer.personality, { env })
     const intendedRt = runtime ?? peer.runtime
     if (armed && armed.rt !== intendedRt) {
+      const spooled = spoolAttachments(attachmentsResult.value, peer.personality, env)
+      if (!spooled.ok) return spooled
       const held = holdSend(
         caller.address,
-        { personality, runtime, message, topic, attachments: attachmentsResult.value },
+        { personality, runtime, message, topic, attachments: spooled.value.paths },
         armed,
         intendedRt,
         { env },
@@ -1532,6 +1548,14 @@ async function routeSendInner(
   // the boot first-message, past the resolved-target guards further down.
   const intendedGuard = telegramSenderGuard(caller, runtime ?? peer.runtime, personality)
   if (!intendedGuard.ok) return intendedGuard
+
+  // Attachment ownership boundary: caller paths are SOURCES only. Materialize
+  // recipient-owned, content-addressed copies BEFORE building any live/wake/queue
+  // envelope. Every path below (including ephemeral/composer queues and bridge
+  // runtimes) therefore has the same durability semantics. Copy failure is a
+  // synchronous NOT-delivered error; no route side effect has happened yet.
+  const spooled = spoolAttachments(attachmentsResult.value, peer.personality, env)
+  if (!spooled.ok) return spooled
 
   // Stamped ONCE at router acceptance: the same instant travels as the envelope's
   // `ts` attribute (recipient side) AND is returned as the result's `ts` (sender
@@ -1547,7 +1571,7 @@ async function routeSendInner(
     fromIntelligence: caller.intelligence,
     sentAt,
     topic,
-    attachments: attachmentsResult.value,
+    attachments: spooled.value.paths,
     message,
   })
 

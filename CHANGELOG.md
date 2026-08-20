@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **IAP attachments now transfer ownership instead of forwarding fragile source paths.**
+  Every `send_to_peer`, `iapeer send`, and Fleet API send copies regular-file sources
+  into the target peer's durable, content-addressed foundation inbox before an
+  envelope can be accepted. The recipient can read or forward the copy after the
+  sender deletes `/tmp` or otherwise removes the source. Copies live for the
+  recipient peer's lifetime and `iapeer remove` purges its inbox.
+
 ## [0.4.25] - 2026-06-22
 
 ### Fixed

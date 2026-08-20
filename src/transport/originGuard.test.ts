@@ -7,7 +7,7 @@
 // per the isolation invariant (a leaked write would hit the real ~/.iapeer).
 
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -220,10 +220,16 @@ describe('routeSend origin-guard wiring', () => {
     const env = sandboxEnv()
     registryWith(env)
     noteHumanInbound('agent', HUMAN, 'web', { env })
+    const source = join(env.IAPEER_ROOT!, 'held-source.txt')
+    writeFileSync(source, 'held attachment bytes')
     let wakeCalled = false
     const wake: WakeFn = async () => ((wakeCalled = true), { status: 'READY', woke: true, taskDelivered: true })
     // no runtime → intended = the human's default (telegram) ≠ armed origin (web)
-    const r = await routeSend(agentCaller, { personality: HUMAN, message: 'reply body' }, { env, wake })
+    const r = await routeSend(
+      agentCaller,
+      { personality: HUMAN, message: 'reply body', attachments: [source] },
+      { env, wake },
+    )
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.error.message).toContain('origin-guard')
@@ -238,7 +244,13 @@ describe('routeSend origin-guard wiring', () => {
     const id = pendings[0].replace('.json', '')
     const claimed = claimHeldSend(id, { env })
     expect(claimed.ok).toBe(true)
-    if (claimed.ok) expect(claimed.value.message).toBe('reply body')
+    if (claimed.ok) {
+      expect(claimed.value.message).toBe('reply body')
+      const stable = claimed.value.attachments![0]!
+      expect(stable).not.toBe(source)
+      rmSync(source)
+      expect(readFileSync(stable, 'utf8')).toBe('held attachment bytes')
+    }
   })
 
   test('same-channel reply (explicit runtime = armed origin) → NO hold (passes to normal routing)', async () => {

@@ -26,7 +26,15 @@ import { cascadeTail, recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaem
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { ensureGlobalIapScaffold } from '../storage/index.ts'
 import { findPeer, readPeersIndex, removePeer, type PeerRecord } from '../registry/index.ts'
-import { compactDoneBaseline, isPeerLive, routeControl, routeSend, waitForCompactDone, type WakeFn } from '../transport/index.ts'
+import {
+  compactDoneBaseline,
+  isPeerLive,
+  purgeAttachmentInbox,
+  routeControl,
+  routeSend,
+  waitForCompactDone,
+  type WakeFn,
+} from '../transport/index.ts'
 import {
   attachPeer,
   clearIdleReaped,
@@ -888,6 +896,9 @@ export interface RemoveOutcome {
    *  personality inherits the dead namesake's parking (defect: stale .stopped →
    *  `mode=refused cause=stopped` on a freshly-created peer). */
   purgedState?: string[]
+  /** Recipient-owned IAP attachment inbox cleanup. Completed attachment copies
+   *  are state for the peer lifetime, so explicit peer removal owns their purge. */
+  attachmentInbox?: string
 }
 
 /**
@@ -1039,11 +1050,19 @@ export async function removePeerCli(
   // remove never half-purges a still-registered peer.
   const cfg = loadLifecycleConfig(env)
   const purgedState = peer.runtimes.flatMap(rt => purgeIdentityState(cfg, buildProcessAddress(rt, personality)))
+  let attachmentInbox: string | undefined
+  try {
+    const purged = purgeAttachmentInbox(personality, env)
+    if (purged.removed) attachmentInbox = `removed ${purged.path}`
+  } catch (e) {
+    attachmentInbox = `FAILED: ${e instanceof Error ? e.message : String(e)}`
+  }
   return {
     personality,
     action: 'removed',
     cwd: peer.cwd,
     purgedState,
+    ...(attachmentInbox ? { attachmentInbox } : {}),
     ...(plistTeardown ? { plistTeardown } : {}),
     ...(unprovisionOutcomes.length ? { unprovision: unprovisionOutcomes } : {}),
     ...(trustCleaned ? { codexTrust: trustCleaned } : {}),
@@ -2279,6 +2298,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           // newborn inherited a dead peer's .stopped → refused to wake).
           if (o.purgedState?.length) {
             out(`lifecycle state purged: ${o.purgedState.join(', ')}\n`)
+          }
+          if (o.attachmentInbox) {
+            out(`attachment inbox: ${o.attachmentInbox}\n`)
           }
           // Deliberate: the registry reap never deletes user data — but SAY so, or
           // the default-location peers leave silent orphan folders.

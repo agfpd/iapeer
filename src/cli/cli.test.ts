@@ -4,7 +4,7 @@
 // persistent-peer launchd plist must be refused.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { addRuntime, compactPeer, defaultRuntime, formatListTable, goalPeer, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
@@ -14,6 +14,8 @@ import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleRea
 import { lifecycleLogPath } from '../lifecycle/eventlog.ts'
 import { launchdPlistPath, resolveAlwaysOnTarget } from '../launch/launchd.ts'
 import { err, ok } from '../core/errors.ts'
+import { decodeEnvelope } from '../codec/index.ts'
+import { attachmentInboxDir, spoolAttachments } from '../transport/index.ts'
 
 let root: string
 let laDir: string
@@ -318,6 +320,20 @@ describe('remove (registry record via the locked writer)', () => {
     expect(isStopped(cfg, 'claude-reborn2')).toBe(true) // dot-delimited: no prefix bleed
   })
 
+  test('remove purges the recipient-owned attachment inbox (peer-lifetime cleanup)', async () => {
+    await register('retired')
+    const e = env()
+    const source = join(root, 'deliverable.txt')
+    writeFileSync(source, 'recipient state')
+    expect(spoolAttachments([source], 'retired', e).ok).toBe(true)
+    expect(existsSync(attachmentInboxDir('retired', e))).toBe(true)
+
+    const o = await removePeerCli('retired', { env: e })
+    expect(o.action).toBe('removed')
+    expect(o.attachmentInbox).toContain('removed ')
+    expect(existsSync(attachmentInboxDir('retired', e))).toBe(false)
+  })
+
   // PLIST TEARDOWN (boris 22.06): removing an always-on peer WITHOUT booting out + rm-ing
   // its com.iapeer.<p> plist left an ORPHAN → launchd KeepAlive crash-looped run-infra
   // against the deleted record. remove now tears down a FOUNDATION-OWNED plist, with the
@@ -438,19 +454,36 @@ describe('send → ephemeral target: M3 FIFO parity with the daemon path (iapeer
     // routeSend resolves the peers index from the PROCESS env (transport reads
     // readPeersIndex() bare) — point the process-level root at the sandbox too.
     const prevRoot = process.env.IAPEER_ROOT
+    let sourceDir: string | undefined
     process.env.IAPEER_ROOT = root
     try {
       await upsertPeer({ personality: 'ephw', runtime: 'claude', cwd, intelligence: 'artificial' }, { rootDir: root })
       await register('sender')
-      const r = await sendMessage({ from: 'claude-sender', target: 'ephw', message: 'task', env: e })
+      sourceDir = mkdtempSync(join(tmpdir(), 'iapeer-cli-attachment-'))
+      const source = join(sourceDir, 'task.txt')
+      writeFileSync(source, 'CLI attachment bytes')
+      const r = await sendMessage({
+        from: 'claude-sender',
+        target: 'ephw',
+        message: 'task',
+        attachments: [source],
+        env: e,
+      })
       expect(r.queued).toBe(true) // serialized via the disk FIFO, exactly like the daemon path
       expect(r.queueDepth).toBe(1)
       // the task is durably on disk for the daemon tick to drain
       const qdir = join(loadLifecycleConfig(e).stateDir, 'claude-ephw.queue')
       expect(existsSync(qdir)).toBe(true)
+      const seq = readdirSync(qdir).find(name => /^\d+$/.test(name))!
+      const queued = JSON.parse(readFileSync(join(qdir, seq), 'utf8')) as { task: string }
+      const deliveredPath = decodeEnvelope(queued.task).attachments[0]!
+      expect(deliveredPath).not.toBe(source)
+      rmSync(sourceDir, { recursive: true, force: true })
+      expect(readFileSync(deliveredPath, 'utf8')).toBe('CLI attachment bytes')
     } finally {
       if (prevRoot !== undefined) process.env.IAPEER_ROOT = prevRoot
       else delete process.env.IAPEER_ROOT
+      if (sourceDir) rmSync(sourceDir, { recursive: true, force: true })
       rmSync(cwd, { recursive: true, force: true })
     }
   })

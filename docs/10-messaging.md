@@ -23,6 +23,18 @@ iapeer send assistant --message "..." --topic "release" --from claude-reviewer
 
 The `--from` flag sets the sender (`<runtime>-<name>`); by default it's the identity of the current folder's peer. `--attachment` is repeatable. `--message-file`, with the body from a file or stdin, is handy for long, multi-line messages.
 
+## Attachment ownership
+
+An attachment argument is a **source path**, not the delivered path. `routeSend` opens every source as a regular file and copies its bytes into the target peer's foundation-owned inbox before it builds the envelope:
+
+```text
+~/.iapeer/state/iapeer/attachments/<recipient>/<sha256>/<basename>
+```
+
+The envelope contains these absolute inbox paths. Therefore an `ok`/`delivered`/`queued` result also means that every attachment already has a readable recipient copy; the sender may immediately delete or rename its source. A missing, unreadable, or non-regular source fails the send before delivery. Re-sending an inbox file to a third peer makes another copy in that third peer's inbox.
+
+The copy is recipient-owned state, not cache: it is not age-GCed and lives for the recipient peer's lifetime. `iapeer remove <recipient>` removes the complete inbox. Removing the sender, cleaning `/tmp`, restarting the daemon, draining an ephemeral queue, and bridge history rotation do not remove it.
+
 ## The delivery path
 
 The daemon finds the recipient in the registry and selects its endpoint first. With no explicit `runtime`, the endpoint is always the recipient's `default_runtime`; liveness of other declared runtimes does not change that choice. An explicit `runtime` selects that exact surface. The daemon then looks at the selected endpoint's state:

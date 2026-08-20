@@ -12,6 +12,7 @@ import {
   resolveCallerFromHeader,
 } from './index.ts'
 import { readPeersIndex } from '../registry/index.ts'
+import { decodeEnvelope } from '../codec/index.ts'
 
 // Point the registry at a fixture root via IAPEER_ROOT so these unit tests are
 // deterministic and never touch the live host registry.
@@ -92,6 +93,8 @@ describe('listTools', () => {
     expect(sendTool.description).toContain('parallel to the default runtime')
     expect(sendTool.inputSchema.properties.runtime.description).toContain('wakes it warm-on-demand')
     expect(sendTool.inputSchema.properties.runtime.description).toContain('parallel session')
+    expect(sendTool.inputSchema.properties.attachments.description).toContain('copies each regular file')
+    expect(sendTool.inputSchema.properties.attachments.description).toContain('sources may be deleted immediately')
   })
 })
 
@@ -190,10 +193,13 @@ describe('ephemeral serial-queue seam (M3)', () => {
     const logDir = join(root, 'logs', 'm3')
     const caller = resolveCallerFromHeader('claude-boris', readPeersIndex())
     const delivered: string[] = []
+    const source = join(root, 'mcp-source.txt')
+    writeFileSync(source, 'MCP attachment bytes')
+    let recipientCopy = ''
     const r = await callTool(
       caller,
       'send_to_peer',
-      { personality: 'offlinepeer', message: 'job for the worker', topic: 'job-1' },
+      { personality: 'offlinepeer', message: 'job for the worker', topic: 'job-1', attachments: [source] },
       {
         deliveryLogDir: logDir,
         ephemeral: {
@@ -204,6 +210,11 @@ describe('ephemeral serial-queue seam (M3)', () => {
           deliver: async ({ peer, envelope, topic }) => {
             delivered.push(`deliver:${peer.personality}:${topic}`)
             expect(envelope).toContain('job for the worker') // the routed envelope, not the raw body
+            const decoded = decodeEnvelope(envelope)
+            expect(decoded.attachments).toHaveLength(1)
+            recipientCopy = decoded.attachments[0]!
+            expect(recipientCopy).not.toBe(source)
+            expect(recipientCopy).toContain('/state/iapeer/attachments/offlinepeer/')
             return {
               ok: true,
               value: {
@@ -221,6 +232,8 @@ describe('ephemeral serial-queue seam (M3)', () => {
       },
     )
     expect(r.isError).toBeUndefined()
+    rmSync(source)
+    expect(readFileSync(recipientCopy, 'utf8')).toBe('MCP attachment bytes')
     expect(delivered).toEqual(['checked:/tmp/offlinepeer', 'deliver:offlinepeer:job-1'])
     const line = readFileSync(join(logDir, 'delivery.log'), 'utf8').trim()
     expect(line).toContain('queued=true')
