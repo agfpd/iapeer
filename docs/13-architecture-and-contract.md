@@ -83,6 +83,49 @@ Commands like `prepare`, `interface`, `bot`, `doctor` are the package's own inte
 - **`install-runtime <runtime>`** determines the npm package (from the built-in registry or the `--package` flag), installs it via `npx`, then provisions the declared peer set.
 - **`update-runtime <runtime>`** compares the manifest version with npm; when behind, it reinstalls, re-provisions, and restarts the runtime's peers with the standard `stop`/`start`.
 
+### Executable signature before activation (macOS)
+
+A successful Bun compile or executable copy does not guarantee a valid Mach-O
+signature. Each package owns this gate on **every** self-install path (compile and
+copy-self), including direct `npx` installs outside the foundation:
+
+1. Build/copy to a sibling temporary file and set its executable permissions.
+2. Run `/usr/bin/codesign --verify --deep --strict <tmp>`. Preserve a valid signature
+   unchanged, including certificate-backed signatures used for stable TCC grants.
+3. For an invalid/unsigned **installer-owned build artifact**, repair with
+   `/usr/bin/codesign --force --sign - <tmp>` and repeat strict verification.
+4. Only after verification succeeds, atomically rename the file over the installed
+   binary and publish the new manifest. On failure, remove the temporary file, exit
+   non-zero, and leave the previous binary and manifest unchanged.
+
+The optional lightweight helper `ensureExecutableSignature` is exported from
+`@agfpd/iapeer/install-signature`; a package may implement the same contract locally.
+It throws on verification/repair failure, skips shebang script launchers and non-macOS
+hosts, and supports injected command runners for hermetic tests. Its repair mode is
+for trusted installer artifacts, **not** a general authenticity check or a way to
+trust arbitrary modified installed code. Stable certificate signing for TCC is a
+separate concern; signature validity is fail-closed even if stable signing is soft.
+
+The foundation additionally verifies installed runtime launchers before provisioning
+or restart, including already-installed/already-latest paths. This secondary gate
+is verify-only: it reports invalid signatures rather than re-signing live binaries.
+It cannot replace the package's pre-rename gate, since launchd may reopen a binary
+as soon as the package publishes it.
+
+Foundation install and rollback apply the same staged validity gate before binary
+replacement. Stable local-certificate signing happens on the staged inode; a
+certificate-signing failure can fall back to a verified ad-hoc signature, but an
+unrepairable executable is never activated. Repair is not guaranteed for malformed
+Bun output: a strict-validation failure aborts safely and requires a working build.
+The update orchestrator also verify-only checks the installed foundation binary before
+daemon activation, including the same-version stale-daemon recovery path.
+
+The shipped `scripts/proof-install-signature.ts` exercises the actual package CLI
+installer and native codesign in disposable paths (requires the existing local signing
+identity). It includes refusal/state preservation, verify-only runtime gates and
+rollback. Update lifecycle calls are injected: this proof never restarts the host daemon
+and is not a deployed-health acceptance.
+
 ## The capability-plugin standard
 
 A capability plugin adds an ability to a peer without being a runtime. The distinction is clear: a runtime is a peer's mode of presence, a plugin is an ability on top of a runtime.

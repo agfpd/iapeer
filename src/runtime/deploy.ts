@@ -22,6 +22,7 @@ import { type Runtime } from '../core/constants.ts'
 import { IapError } from '../core/errors.ts'
 import { createPeer, type CreatePeerResult } from '../create/index.ts'
 import { readRuntimeManifest, writeRuntimeManifest, type RuntimeManifest, type RuntimePeerDecl } from './index.ts'
+import { verifyRuntimeSignatures, type RuntimeSignatureVerifier } from './signature.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Built-in runtime → npm package registry (§6): onboard AUTO-resolves
@@ -52,6 +53,7 @@ export interface DeployRuntimeOptions {
   bootstrap?: boolean
   env?: NodeJS.ProcessEnv
   warn?: (message: string) => void
+  verifySignatures?: RuntimeSignatureVerifier
 }
 
 export interface DeployedPeer {
@@ -90,6 +92,8 @@ export async function deployRuntime(opts: DeployRuntimeOptions): Promise<DeployR
     )
   }
   const declared = opts.peers ?? manifest.peers ?? []
+  const verifySignatures = opts.verifySignatures ?? verifyRuntimeSignatures
+  verifySignatures(opts.runtime, env, { ...manifest, peers: declared })
   const peers: DeployedPeer[] = []
   for (const decl of declared) {
     const result = await createPeer({
@@ -164,6 +168,8 @@ export interface InstallRuntimePackageOptions {
   env?: NodeJS.ProcessEnv
   /** Injected npx runner (tests / sandbox proof). */
   runNpx?: NpxRunner
+  /** Verify-only activation gate; injected in hermetic orchestration tests. */
+  verifySignatures?: RuntimeSignatureVerifier
 }
 
 /**
@@ -183,6 +189,11 @@ export function installRuntimePackage(opts: InstallRuntimePackageOptions): Insta
   const existing = readRuntimeManifest(opts.runtime, { env })
   const pkg = resolveRuntimePackage(opts.runtime, opts.package ?? existing?.package)
   if (existing && !opts.force) {
+    try {
+      (opts.verifySignatures ?? verifyRuntimeSignatures)(opts.runtime, env)
+    } catch (e) {
+      return { runtime: opts.runtime, package: pkg, state: 'failed', detail: e instanceof Error ? e.message : String(e) }
+    }
     return { runtime: opts.runtime, package: pkg, state: 'skipped' }
   }
   if (!pkg) {
@@ -193,6 +204,13 @@ export function installRuntimePackage(opts: InstallRuntimePackageOptions): Insta
   const r = run(spec, env)
   if (!r.ok) {
     return { runtime: opts.runtime, package: pkg, state: 'failed', detail: r.detail }
+  }
+  // Verification is not version-gated and precedes manifest stamping/provision.
+  // Never repair an installed launcher here: the package owns staged repair.
+  try {
+    (opts.verifySignatures ?? verifyRuntimeSignatures)(opts.runtime, env)
+  } catch (e) {
+    return { runtime: opts.runtime, package: pkg, state: 'failed', detail: e instanceof Error ? e.message : String(e) }
   }
   // В52 — stamp the delivering package into the fresh manifest (best-effort: a
   // missing manifest is the package's own contract breach, surfaced elsewhere).
@@ -212,6 +230,7 @@ export interface OnboardRuntimeOptions extends DeployRuntimeOptions {
   npx?: boolean
   /** Injected npx runner (tests / sandbox proof). */
   runNpx?: NpxRunner
+  verifySignatures?: RuntimeSignatureVerifier
 }
 
 export interface OnboardRuntimeResult {
@@ -235,6 +254,7 @@ export async function onboardRuntime(opts: OnboardRuntimeOptions): Promise<Onboa
     force: opts.npx,
     env,
     runNpx: opts.runNpx,
+    verifySignatures: opts.verifySignatures,
   })
   if (install.state === 'failed') {
     throw new IapError(`npx install of runtime "${opts.runtime}" package ${install.package} failed: ${install.detail ?? ''}`)
@@ -250,6 +270,7 @@ export async function onboardRuntime(opts: OnboardRuntimeOptions): Promise<Onboa
     bootstrap: opts.bootstrap,
     env,
     warn: opts.warn,
+    verifySignatures: opts.verifySignatures,
   })
   return { install, deploy }
 }

@@ -34,6 +34,7 @@
     "src",
     "bin",
     "docs",
+    "scripts/proof-install-signature.ts",
     "CHANGELOG.md",
     "tsconfig.json",
     "!src/**/*.test.ts",
@@ -45,7 +46,8 @@
     "./storage": "./src/storage/index.ts",
     "./identity": "./src/identity/index.ts",
     "./registry": "./src/registry/index.ts",
-    "./codec": "./src/codec/index.ts"
+    "./codec": "./src/codec/index.ts",
+    "./install-signature": "./src/install/signature.ts"
   },
   "scripts": {
     "test": "IAPEER_TEST_SANDBOX=1 bun test",

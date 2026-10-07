@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **macOS executable signatures are checked before activation.** Runtime packages
+  must strictly verify compiled and copied staged binaries, repair invalid trusted
+  build artifacts with ad-hoc signing, and re-verify before binary/manifest publication.
+  A lightweight `@agfpd/iapeer/install-signature` helper implements the gate. Foundation
+  install and rollback now sign/verify the staged inode before replacing the binary;
+  runtime install/update also verify installed launchers before provisioning/restart,
+  even when the package/version is already current. Foundation update also verifies
+  its installed binary before activation, including same-version stale-daemon healing.
+  Valid signatures are preserved;
+  failed repair never licenses activation of invalid code.
+
 - **IAP attachments now transfer ownership instead of forwarding fragile source paths.**
   Every `send_to_peer`, `iapeer send`, and Fleet API send copies regular-file sources
   into the target peer's durable, content-addressed foundation inbox before an

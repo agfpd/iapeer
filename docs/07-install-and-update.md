@@ -60,7 +60,7 @@ On a fresh macOS host the first install → onboard → peer launch surfaces a h
 **Three things you do (these cannot be automated):**
 
 1. **Log in to the runtimes — before onboard.** Sign in to Claude Code and Codex first. Their login screen is a browser OAuth flow that no headless peer can drive, so iapeer deliberately does **not** auto-answer it; a runtime that is installed but not signed in makes a peer fail its first wake loudly. `iapeer onboard` warns when it finds an unauthenticated runtime.
-2. **Login keychain password — once, during install.** The install code-signs the binary with a stable local identity so Full Disk Access survives updates; macOS asks for your login keychain password the one time that identity is created. It is expected (the installer announces it). If declined, the binary still works — TCC prompts would just recur on updates.
+2. **Login keychain password — once, during install.** The install code-signs the staged binary with a stable local identity so Full Disk Access survives updates; macOS asks for your login keychain password the one time that identity is created. It is expected (the installer announces it). If declined, install may use a verified ad-hoc signature (TCC prompts may recur). Signature verification itself is mandatory: an unrepairable build aborts before replacing the installed binary.
 3. **Full Disk Access — a manual grant, no prompt.** macOS TCC cannot be set by any flag, env var, or script. Without it, a peer reading or writing a TCC-protected path (an iCloud Obsidian vault, Desktop, Documents, Downloads) silently fails with EPERM — no prompt, no hang. Grant it in **System Settings → Privacy & Security → Full Disk Access** (`~/.iapeer` itself is under `$HOME` and needs nothing); onboard prints the reminder.
 
 Gatekeeper does not gate the locally-built CLI run from a terminal (no quarantine attribute). Verified live on a truly-virgin Claude config (claude 2.1.183): the theme picker, folder-trust, the bypass-permissions accept (cursor stepped to "Yes"), and the project MCP-server approval all auto-clear in sequence, the peer reaches its input prompt, and a second launch on the same config is dialog-free; the Codex folder-trust / update auto-clearing likewise (an owner's clean-machine install + an isolated first-boot test).
@@ -78,7 +78,7 @@ A bare `iapeer update` updates the **whole host stack** in one command — the c
 
 **1. Core (foundation)** — and it ABORTS the cascade on a hard failure (never update runtimes onto a broken core):
 
-1. Learns the target version from npm. If the installed one already matches and there's no `--force` — it does nothing.
+1. Learns the target version from npm. If the installed one already matches and there's no `--force`, it verifies the installed executable signature without repairing it; a valid, version-consistent daemon needs no restart. An invalid binary is refused, including before recovery of a stale live daemon.
 2. Downloads and builds the new binary via `npm pack`, not `npx` (the binary doesn't rebuild itself).
 3. Restarts the daemon onto the new binary.
 4. Restarts the infrastructure launchd jobs the core owns (`com.iapeer.*` — the `timer`, `watcher`, Telegram routers), moving them onto the just-replaced binary. It's the JOBS that restart, not the runtimes' package code — that's the next step. If the daemon didn't come up in step 3, this is skipped.
@@ -90,7 +90,7 @@ A bare `iapeer update` updates the **whole host stack** in one command — the c
 
 Runtimes and memory are **best-effort**: a component failure is reported and the rest still run; the command exits non-zero if anything failed. Agentic peers (Claude/Codex) pick up new core doctrine lazily on their next wake.
 
-`iapeer update --foundation-only` does just step 1 (the narrow case). A pinned `iapeer update <version>` is **core-only** by design — a version pin is core-specific (downgrade, or pin a proven version, deeper than one rollback step).
+`iapeer update --foundation-only` does just the foundation leg, including infrastructure-job re-registration when the binary/daemon changes; it narrows package updates, not process restarts. A pinned `iapeer update <version>` has the same **core-only** scope — a version pin is core-specific (downgrade, or pin a proven version, deeper than one rollback step).
 
 > **Upgrading from before the cascade (< 0.4.2).** The cascade is driven by the *installed* binary, so the very first `iapeer update` from a pre-cascade version runs the OLD (foundation-only) logic: it upgrades the core to the cascade-capable binary but does not yet cascade runtimes + memory. Run `iapeer update` once more — now the new binary cascades the rest. This is a one-time bootstrap; from 0.4.2 onward it is a single command. (A fresh install lands on a cascade-capable binary directly, so it never needs the double run.)
 

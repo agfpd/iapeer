@@ -36,7 +36,8 @@ import { join } from 'path'
 import { isInfraRuntime } from '../core/constants.ts'
 import { IapError } from '../core/errors.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
-import { stampBinaryHealthy } from '../install/index.ts'
+import { iapeerBinPath, stampBinaryHealthy } from '../install/index.ts'
+import { ensureExecutableSignature } from '../install/signature.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import {
   cycleDaemon,
@@ -71,6 +72,9 @@ export interface UpdateDeps {
   /** Pull + rebuild the binary for `version` (default: npm pack → extract → source install).
    *  Returns true on success. */
   runInstall?: (version: string, env: NodeJS.ProcessEnv) => boolean
+  /** Verify-only installed-binary gate, including same-version stale-daemon heal.
+   *  Never repair a live binary. The package installer owns staged repair. */
+  verifyInstalledSignature?: (env: NodeJS.ProcessEnv) => void
   /** Restart the daemon onto the new binary (default: cycleDaemon — bootout+bootstrap, the LWCR-safe cycle). */
   restartDaemon?: (env: NodeJS.ProcessEnv) => DaemonRestartResult
   /** Re-register loaded foundation-owned infra launchd jobs whose plists run the
@@ -345,7 +349,20 @@ export async function updateIapeer(deps: UpdateDeps = {}): Promise<UpdateResult>
         : `could not resolve the latest ${IAPEER_PACKAGE} version from npm (offline / registry error)`,
     }
   }
+  const verifyInstalled = (): string | undefined => {
+    try {
+      if (deps.verifyInstalledSignature) deps.verifyInstalledSignature(env)
+      else ensureExecutableSignature(iapeerBinPath(env), { env, repair: false })
+      return undefined
+    } catch (e) {
+      return `installed foundation signature is invalid; no restart attempted: ${e instanceof Error ? e.message : String(e)}`
+    }
+  }
   if (desired === from && !deps.force) {
+    // Same-version heal is an activation path too: a valid running inode/version
+    // does not prove the current on-disk binary is safe to restart.
+    const signatureFailure = verifyInstalled()
+    if (signatureFailure) return { status: 'failed', from, latest: desired, reason: signatureFailure }
     // В53 — the binary is at the target, but is the LIVE daemon running it? A prior
     // update that swapped the binary and then died before/inside cycleDaemon leaves
     // the fleet on the old core FOREVER while every retry says "already-latest".
@@ -383,6 +400,9 @@ export async function updateIapeer(deps: UpdateDeps = {}): Promise<UpdateResult>
         `if just published, the registry tarball may still be propagating; retry in ~1 min`,
     }
   }
+
+  const signatureFailure = verifyInstalled()
+  if (signatureFailure) return { status: 'failed', from, latest: desired, reason: signatureFailure }
 
   const d = (deps.restartDaemon ?? cycleDaemon)(env)
   const settled = await settleDaemon(d, env, deps)

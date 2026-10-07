@@ -16,9 +16,9 @@
 // bytes. Trust of the cert chain is NOT needed: codesign signs with an untrusted
 // (CSSMERR_TP_NOT_TRUSTED) identity fine, and TCC matches the requirement.
 //
-// Failure policy: SOFT. The binary works ad-hoc-signed exactly as before; a
-// signing hiccup must never break install/update. It is reported loud (the
-// operator learns TCC prompts will re-appear) but the install succeeds.
+// Stable-identity failure policy: SOFT. Executable signature validity is a
+// separate HARD gate (signature.ts) before activation; invalid Bun linker
+// signatures cannot be assumed runnable after a stable-signing failure.
 
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -63,7 +63,7 @@ export interface SigningOutcome {
     | 'signed' // re-signed with the existing identity
     | 'signed-new-identity' // identity created this run (the ONE install-time event), then signed
     | 'skipped-sandbox' // tests never touch the real keychain
-    | 'failed-soft' // signing failed — binary stays ad-hoc (works; TCC prompts return)
+    | 'failed-soft' // stable signing failed; the activation gate still decides executability
   detail?: string
 }
 
@@ -113,7 +113,7 @@ function createIdentity(run: SigningRunner): { ok: boolean; detail?: string } {
 
 /**
  * Re-sign the installed binary with the stable local identity (creating the
- * identity on first use). Called by installIapeer after the atomic rename —
+ * identity on first use). Called by installIapeer BEFORE the atomic rename —
  * i.e. on EVERY install/update path, so the designated requirement (and with it
  * every TCC grant) stays constant while the bytes change.
  */
@@ -131,7 +131,7 @@ export function signInstalledBinary(
   if (!identityPresent(run)) {
     const c = createIdentity(run)
     if (!c.ok) {
-      return { state: 'failed-soft', detail: `${c.detail} — binary stays ad-hoc-signed (works, but TCC prompts will re-appear after updates)` }
+      return { state: 'failed-soft', detail: `${c.detail} — stable TCC signing unavailable; executable signature must pass the activation gate (TCC prompts may re-appear after updates)` }
     }
     created = true
   }
@@ -139,7 +139,7 @@ export function signInstalledBinary(
   if (sign.status !== 0) {
     return {
       state: 'failed-soft',
-      detail: `codesign failed: ${sign.stderr.trim().split('\n')[0] ?? `exit ${sign.status}`} — binary stays ad-hoc-signed (works, but TCC prompts will re-appear after updates)`,
+      detail: `codesign failed: ${sign.stderr.trim().split('\n')[0] ?? `exit ${sign.status}`} — stable TCC signing unavailable; executable signature must pass the activation gate (TCC prompts may re-appear after updates)`,
     }
   }
   return created ? { state: 'signed-new-identity' } : { state: 'signed' }

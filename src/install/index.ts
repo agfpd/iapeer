@@ -20,6 +20,9 @@ import { basename, join, relative, sep } from 'path'
 import { spawnSync } from 'child_process'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { signInstalledBinary, type SigningOutcome } from './signing.ts'
+import { ensureExecutableSignature } from './signature.ts'
+export { ensureExecutableSignature } from './signature.ts'
+export type { ExecutableSignatureOptions, ExecutableSignatureOutcome, SignatureRunner } from './signature.ts'
 
 /** The stable host-wide install path of the `iapeer` binary. Standard user-bin (no
  *  admin, not tied to a node/bun version), ON $PATH. The launchd plists reference
@@ -42,8 +45,8 @@ export interface InstallResult {
   prevKept?: { reason: string }
   /** Bytes of the installed binary. */
   size?: number
-  /** Stable-identity re-sign outcome (TCC grants survive updates). Soft: a signing
-   *  hiccup never fails the install — the binary works ad-hoc-signed. */
+  /** Stable-identity re-sign outcome (TCC grants survive updates). Soft failure
+   *  is allowed only when the separate executable-signature gate succeeds. */
   signing?: SigningOutcome
 }
 
@@ -132,16 +135,38 @@ function assertInstallSandboxIsolated(binPath: string, env: NodeJS.ProcessEnv): 
   }
 }
 
-export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = process.env): InstallResult {
+/** Hermetic install seams. Paths remain resolved from the caller's env. */
+export interface InstallIapeerDeps {
+  build?: (entry: string, tmp: string) => void
+  signStable?: typeof signInstalledBinary
+  verifySignature?: typeof ensureExecutableSignature
+}
+
+export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = process.env, deps: InstallIapeerDeps = {}): InstallResult {
   const binPath = iapeerBinPath(env)
   assertInstallSandboxIsolated(binPath, env)
   mkdirSync(join(binPath, '..'), { recursive: true })
   const tmp = `${binPath}.tmp`
-  const build = spawnSync('bun', ['build', '--compile', cliEntrypoint, '--outfile', tmp], {
-    encoding: 'utf8',
-  })
-  if (build.status !== 0 || !existsSync(tmp)) {
-    throw new Error(`iapeer build failed: ${(build.stderr ?? '').trim() || `exit ${build.status}`}`)
+  let signing: SigningOutcome
+  try {
+    if (deps.build) {
+      deps.build(cliEntrypoint, tmp)
+    } else {
+      const build = spawnSync('bun', ['build', '--compile', cliEntrypoint, '--outfile', tmp], {
+        encoding: 'utf8',
+      })
+      if (build.status !== 0 || !existsSync(tmp)) {
+        throw new Error(`iapeer build failed: ${(build.stderr ?? '').trim() || `exit ${build.status}`}`)
+      }
+    }
+    // Sign the STAGED inode, then verify before ANY activation/.prev/stamp change.
+    // Stable TCC signing remains soft; invalid executable signatures are hard.
+    signing = (deps.signStable ?? signInstalledBinary)(tmp, env)
+    const verifySignature = deps.verifySignature ?? ensureExecutableSignature
+    verifySignature(tmp, { env })
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    throw e
   }
   let prevPath: string | undefined
   let prevKept: InstallResult['prevKept']
@@ -168,9 +193,7 @@ export function installIapeer(cliEntrypoint: string, env: NodeJS.ProcessEnv = pr
   } catch {
     /* absent — fine */
   }
-  // Stable-identity re-sign (TCC grants survive updates). AFTER the rename: the
-  // signature belongs to the final inode at the final path. Soft-fail by design.
-  const signing = signInstalledBinary(binPath, env)
+  // rename preserves the already-verified inode and its stable requirement.
   let size: number | undefined
   try {
     size = statSync(binPath).size
@@ -257,7 +280,7 @@ export interface RollbackResult {
  * rename over the binary), so the binary is never absent. The CALLER restarts the
  * daemon afterwards (cycleDaemon) — rollback only swaps the bytes. Sandbox-guarded.
  */
-export function rollbackIapeer(env: NodeJS.ProcessEnv = process.env): RollbackResult {
+export function rollbackIapeer(env: NodeJS.ProcessEnv = process.env, deps: Pick<InstallIapeerDeps, 'signStable' | 'verifySignature'> = {}): RollbackResult {
   const binPath = iapeerBinPath(env)
   assertInstallSandboxIsolated(binPath, env)
   const prev = iapeerPrevBinPath(env)
@@ -267,13 +290,15 @@ export function rollbackIapeer(env: NodeJS.ProcessEnv = process.env): RollbackRe
   const tmp = `${binPath}.rollback.tmp`
   try {
     copyFileSync(prev, tmp)
+    // Same staged gate as install: never publish an invalid rollback target.
+    const signStable = deps.signStable ?? signInstalledBinary
+    const verifySignature = deps.verifySignature ?? ensureExecutableSignature
+    signStable(tmp, env)
+    verifySignature(tmp, { env })
     renameSync(tmp, binPath)
-    // Keep the stable requirement on the restored bytes too (a .prev taken before
-    // the signing era is ad-hoc — re-signing it heals that). Soft by design.
-    signInstalledBinary(binPath, env)
   } catch (e) {
     try {
-      if (existsSync(tmp)) renameSync(tmp, `${tmp}.discard`) // never leave a half-written tmp on the path
+      rmSync(tmp, { force: true })
     } catch {
       /* best-effort */
     }

@@ -10,8 +10,8 @@
 //   version with a new blurb/self-doc leaves stale descriptions) → restart the
 //   runtime's infra peers via the REGULAR stop/start verbs.
 //
-// The core's own `iapeer update` deliberately does NOT touch runtimes (foundation-
-// only — the standing contract; the symmetry is conscious).
+// The CLI's bare `iapeer update` invokes this runtime updater in its cascade;
+// --foundation-only and a foundation version pin omit the runtime leg.
 //
 // Version-gate honesty: the installed version comes from the manifest's `version`
 // stamp (the owners' self-install obligation, telegram 10.06). A manifest WITHOUT
@@ -24,6 +24,7 @@ import { isRuntime, type Runtime } from '../core/constants.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { readRuntimeManifest } from './index.ts'
+import { verifyRuntimeSignatures, type RuntimeSignatureVerifier } from './signature.ts'
 import {
   deployRuntime,
   installRuntimePackage,
@@ -71,6 +72,7 @@ export interface UpdateRuntimeOptions {
   force?: boolean
   env?: NodeJS.ProcessEnv
   runNpx?: NpxRunner
+  verifySignatures?: RuntimeSignatureVerifier
   npmVersion?: NpmVersionFn
   /** Injectable restart (tests). Default: the regular stop→start verbs, strictly
    *  sequential per peer. */
@@ -124,12 +126,17 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
   }
   const installed = manifest.version
   if (installed && installed === latest && !opts.force) {
+    try {
+      (opts.verifySignatures ?? verifyRuntimeSignatures)(runtime, env)
+    } catch (e) {
+      return { runtime, package: pkg, state: 'install-failed', from: installed, to: latest, peers: [], restarted: [], detail: e instanceof Error ? e.message : String(e) }
+    }
     return { runtime, package: pkg, state: 'already-latest', from: installed, to: latest, peers: [], restarted: [] }
   }
 
   // Re-install, PINNED to the version the gate resolved (В51 — an unpinned npx can
   // serve a stale cached/propagating build while we report "updated → latest").
-  const install = installRuntimePackage({ runtime, package: manifest.package, version: latest, force: true, env, runNpx: opts.runNpx })
+  const install = installRuntimePackage({ runtime, package: manifest.package, version: latest, force: true, env, runNpx: opts.runNpx, verifySignatures: opts.verifySignatures })
   if (install.state !== 'ran') {
     return { runtime, package: pkg, state: 'install-failed', from: installed, to: latest, peers: [], restarted: [], detail: install.detail ?? install.state }
   }
@@ -157,7 +164,7 @@ export async function updateRuntime(opts: UpdateRuntimeOptions): Promise<UpdateR
   // peers — the deploy is an empty pass, by design.
   let peers: DeployedPeer[]
   try {
-    const d = await deployRuntime({ runtime, env, warn: opts.warn })
+    const d = await deployRuntime({ runtime, env, warn: opts.warn, verifySignatures: opts.verifySignatures })
     peers = d.peers
   } catch (e) {
     return { runtime, package: pkg, state: 'deploy-failed', from: installed, to: latest, peers: [], restarted: [], detail: e instanceof Error ? e.message : String(e) }

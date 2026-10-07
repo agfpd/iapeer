@@ -1935,8 +1935,8 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
       case 'update-runtime': {
         // §(г) runtime-package update: version-gate (npm vs the manifest stamp) →
         // forced re-npx → idempotent re-provision (same path as install-runtime) →
-        // restart the runtime's peers via the regular stop/start. The core's own
-        // `update` stays foundation-only — this is the runtimes' counterpart.
+        // restart the runtime's peers via the regular stop/start. A bare `update`
+        // calls the same updater as its runtime cascade leg.
         const all = flags.all === true
         if (!all && !positionals[0]) return argErr(errOut, 'update-runtime needs a runtime or --all — usage: iapeer update-runtime <runtime> | --all')
         const { updateRuntime, updateAllRuntimes } = await import('../runtime/update.ts')

@@ -71,7 +71,7 @@ describe('signInstalledBinary (stable identity → TCC grants survive updates)',
     const h = harness({ identityExists: false, failAt: 'import' })
     const r = withSandboxOff(() => signInstalledBinary('/x/iapeer', {} as NodeJS.ProcessEnv, h.run))
     expect(r.state).toBe('failed-soft')
-    expect(r.detail).toContain('TCC prompts will re-appear')
+    expect(r.detail).toContain('TCC prompts may re-appear')
     expect(h.calls.some(c => c.cmd === 'codesign')).toBe(false)
   })
 
