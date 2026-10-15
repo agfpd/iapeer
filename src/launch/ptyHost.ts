@@ -45,7 +45,7 @@ export function hostSessionAlive(identity: string, env: NodeJS.ProcessEnv = proc
   return hostDaemonAlive(hostRunDir(env), identity)
 }
 
-/** Reap a hosted session: SIGTERM the supervisor daemon (its shutdown SIGKILLs the child + cleans up).
+/** Reap a hosted session: SIGTERM the supervisor daemon (hard-kills its PTY-owned tree + cleans up).
  *  env sandboxes the run-dir: a test with an injected root must NEVER SIGTERM a real fleet peer. */
 export function killPtyHost(identity: string, env: NodeJS.ProcessEnv = process.env): void {
   killSupervisorSession(hostRunDir(env), identity)

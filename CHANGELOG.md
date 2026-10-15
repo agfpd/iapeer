@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hosted hard teardown reclaims PTY-owned subprocesses, not only the runtime root.**
+  `self-fresh`, stop and reap snapshot ancestry before killing the runtime, including stdio MCP
+  launchers in separate process groups. Start-token and controlling-terminal checks exclude reused
+  PIDs, unrelated processes and detached/shared daemon branches. An isolated real-Codex proof and
+  hermetic regressions cover old-tree exit, fresh MCP calls and sentinel survival. Already-orphaned
+  processes and shared-backend thread shutdown remain outside this bounded cleanup.
+
 - **macOS executable signatures are checked before activation.** Runtime packages
   must strictly verify compiled and copied staged binaries, repair invalid trusted
   build artifacts with ad-hoc signing, and re-verify before binary/manifest publication.

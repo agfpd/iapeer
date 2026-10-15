@@ -98,4 +98,15 @@ So `stop`, `start`, `new` refuse to touch foreign launchd peers — for those th
 - **`iapeer interrupt`** — interrupt the current turn (Escape) without losing context.
 - **`iapeer self-fresh` / `self-done`** — an agent's self-calls: mark itself for a fresh restart, or quietly finish (for ephemeral workers).
 
+### Process ownership at teardown
+
+Closing a hosted session is a **hard teardown**, not the MCP client's graceful stdin/EOF shutdown.
+Before killing the runtime, the supervisor snapshots its descendants and kills those still attached
+to its controlling PTY, including stdio MCP launchers in separate process groups. Each PID's start
+token and terminal are re-checked before signalling; unrelated processes and detached daemon branches
+are excluded. This also applies to `self-fresh`: finish work and persist the handoff before calling it.
+Processes already orphaned before the snapshot, a concurrent fork/exit race, an unreadable process
+table, and shared-backend threads outside the PTY are not covered by this cleanup. A shared runtime
+daemon needs its own per-thread shutdown protocol; ancestry alone does not authorize killing it.
+
 Behavior by runtime class — [08 — Peer management](08-peer-management.md); ephemeral workers — [10 — Messaging](10-messaging.md).

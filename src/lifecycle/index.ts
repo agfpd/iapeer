@@ -1257,7 +1257,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function killSession(_sock: string, identity: string, env: NodeJS.ProcessEnv = process.env): void {
-  // pty-only: SIGTERM the supervisor daemon — its shutdown SIGKILLs the child and removes the
+  // pty-only: SIGTERM the supervisor daemon — its shutdown kills the PTY-owned tree and removes the
   // sock/pid/serve-spec/markers. Idempotent if the session is already gone. (`_sock` retained for
   // call-site compatibility; no tmux sockets exist.) env sandboxes the run-dir — a test with an
   // injected root must NEVER SIGTERM a real fleet peer's supervisor.

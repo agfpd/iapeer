@@ -26,13 +26,14 @@ import {
   stripQueries,
 } from './protocol.ts'
 import { formatEventLine } from '../storage/rotatelog.ts'
-import { attachedPath, geometryPath, pidPath, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
+import { attachedPath, geometryPath, pidPath, pidStartToken, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
 import { newStabilityGate, nagSignature, nextBootAction, nextNagAction, signatureStable, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
 import { claudeAdapter } from '../launch/adapters/claude.ts'
 import { approvalModeOf, readPeerProfile, type ApprovalMode } from '../identity/index.ts'
 import { routeCircuitBreaker } from './approvalRoute.ts'
+import { killPtyDescendants } from './processTree.ts'
 
 /** Resolve a runtime launcher from the host AT CALL TIME — env override (IAPEER_<RT>_BIN, the same
  *  knob the rest of the foundation uses) → PATH lookup — never a baked machine-specific path. Returns
@@ -110,6 +111,7 @@ const SIGWINCH_REDRAW_WAIT_MS = 300
 
 // Bun-native PTY (Bun ≥1.3.5) is not yet in @types/bun — type the slice we use.
 interface PtyChild {
+  pid: number
   terminal: { write(d: Uint8Array | string): void; resize(cols: number, rows: number): void }
   kill(sig?: number | string): void
 }
@@ -385,6 +387,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       },
     },
   } as unknown as Parameters<typeof Bun.spawn>[1]) as unknown as PtyChild
+  const childToken = pidStartToken(child.pid)
   xterm.onData(resp => child.terminal.write(resp)) // @xterm auto-answers DA1/DSR → back to child
 
   /** Catch up a (re)attaching client to the current screen + history ONCE by sending a SNAPSHOT of the
@@ -602,6 +605,14 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
       } catch {
         /* */
       }
+    try {
+      // self-fresh/stop/reap owns the PTY's descendants, not just its TUI root. Snapshot BEFORE
+      // killing the runtime; exclude detached/shared daemons even if they are descendants.
+      const cleaned = killPtyDescendants(child.pid, childToken)
+      if (cleaned.killed || cleaned.skipped) appendExitEvent({ ev: 'session-tree', identity: session, ...cleaned })
+    } catch (e) {
+      appendExitEvent({ ev: 'session-tree', identity: session, error: (e as Error).message })
+    }
     try {
       child.kill('SIGKILL')
     } catch {

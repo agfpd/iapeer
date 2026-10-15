@@ -162,7 +162,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
     interrupt = null
   }
   // Signal-initiated stop (bootout / shutdown / kickstart -k) tears the session down WITH this watcher —
-  // kill the supervisor daemon (killPtyHost: SIGTERM → it SIGKILLs the child + cleans up sock/pid/serve)
+  // kill the supervisor daemon (SIGTERM → hard teardown of its PTY-owned tree + sock/pid/serve cleanup)
   // so the detached child does not outlive bootout holding stale in-memory state. A NATURAL death
   // (stop=false) skips this: nothing to tear down, exit 0 → KeepAlive respawns a fresh bring-up.
   if (stop) killPtyHost(identity, env)
