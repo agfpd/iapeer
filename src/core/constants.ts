@@ -11,7 +11,7 @@ export const RUNTIME_RE_SOURCE = '^[a-z][a-z0-9]{0,31}$'
 
 export type Runtime = string
 export type TmuxRuntime = Runtime
-export const SUPPORTED_LOCAL_RUNTIMES = ['claude', 'codex'] as const
+export const SUPPORTED_LOCAL_RUNTIMES = ['claude', 'codex', 'opencode'] as const
 export type SupportedLocalRuntime = (typeof SUPPORTED_LOCAL_RUNTIMES)[number]
 
 export const PEERS_SCHEMA_VERSION = 2

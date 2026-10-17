@@ -248,9 +248,25 @@ interrupt; unsupported control refused; the TUI renders the core session;
 teardown → `runtime.stopped`; contiguous `seq`; resume on the same session with
 `resumed=true`, the new doctrine replacing the old, history kept.
 
-Still not proved here: fleet wake/reap through lifecycle, MCP to a live daemon,
+`scripts/opencode-wake-harness.ts` goes through the fleet lifecycle with a
+registered peer (`initPeer --runtime opencode`). Run of 2026-10-17: 9/9 — cold
+wake by a message (READY in 2.6 s, task delivered as the first message); the
+composed doctrine (identity YAML + local `IAPEER.md`) is the system prompt; a
+wake on a live session is idempotent; the supervise tick idle-reaps from the
+plugin state; the next message on the same topic resumes the same native session
+with the re-composed doctrine and earlier history. A topicless message after an
+idle-reap wakes fresh — core executor policy, identical for every runtime.
+
+Still not proved here: MCP to a live daemon,
 approval routing, memory slot, two simultaneous runtimes of one personality.
-OpenCode is not yet in `SUPPORTED_LOCAL_RUNTIMES` / discovery.
+Since the commit after this proof, `opencode` is a supported local agent runtime:
+listed in `host.agent_runtimes` (docs/15), accepted by `add-runtime`/`create
+--runtime opencode`, gated to artificial peers, refreshed by `refresh`, and
+included in the memory provider's provision/unprovision runs and in capability
+applicability (docs/21). `create` does NOT auto-add it as a secondary runtime
+(an endpoint without a provider/model configuration would be dead) — it is an
+explicit opt-in. The binary resolves from `IAPEER_OPENCODE_BIN`, else
+`~/.opencode/bin/opencode`, else `opencode` on PATH.
 
 ## Delivery gate
 

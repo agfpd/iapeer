@@ -371,13 +371,19 @@ export function ensureGlobalDoctrineTemplate(env: NodeJS.ProcessEnv = process.en
  */
 export function isRuntimeInstalled(runtime: Runtime, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1') return true
-  const override = runtime === 'claude' ? env.IAPEER_CLAUDE_BIN : runtime === 'codex' ? env.IAPEER_CODEX_BIN : undefined
+  const override =
+    runtime === 'claude' ? env.IAPEER_CLAUDE_BIN
+    : runtime === 'codex' ? env.IAPEER_CODEX_BIN
+    : runtime === 'opencode' ? env.IAPEER_OPENCODE_BIN
+    : undefined
   if (override?.trim()) return true
   const home = env.HOME?.trim() || homedir()
   if (runtime === 'claude' && existsSync(join(home, '.local', 'bin', 'claude'))) return true
   if (Bun.which(runtime)) return true
   if (runtime === 'claude' && existsSync(join(home, '.claude'))) return true
   if (runtime === 'codex' && existsSync(join(home, '.codex'))) return true
+  // OpenCode's official installer puts the binary in ~/.opencode/bin (not on a launchd PATH).
+  if (runtime === 'opencode' && existsSync(join(home, '.opencode', 'bin', 'opencode'))) return true
   return false
 }
 

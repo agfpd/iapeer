@@ -39,7 +39,7 @@ The full fleet state. The peer rows are produced by the **same in-process functi
     "memory": { "provider": "iapeer-memory", "version": "1.2.3", "heartbeatAgeSecs": 12 },
     "voice":  { "provider": "voice-connect", "version": "0.3.1", "heartbeatAgeSecs": null },
     "fda": true,
-    "agent_runtimes": ["claude", "codex"]
+    "agent_runtimes": ["claude", "codex", "opencode"]
   },
   "peers": [
     {

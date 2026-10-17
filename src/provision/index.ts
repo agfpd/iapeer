@@ -141,7 +141,7 @@ export async function provisionPeer(opts: ProvisionPeerOptions): Promise<Provisi
         const { runProvisionCommand } = await import('../enable/provisionCommand.ts')
         const { appendLifecycleEvent } = await import('../lifecycle/eventlog.ts')
         const { pluginLogsDir } = await import('../storage/index.ts')
-        const agentic = profile.runtimes.filter((r): r is 'claude' | 'codex' => r === 'claude' || r === 'codex')
+        const agentic = profile.runtimes.filter(r => r === 'claude' || r === 'codex' || r === 'opencode')
         for (const rt of agentic) {
           const o = runProvisionCommand({
             block: slot.provision,

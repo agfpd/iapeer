@@ -367,7 +367,7 @@ export interface RefreshOutcome {
 
 /** Runtimes that consume the layered system prompt (doctrine/fragments) — the only ones a soft-reload
  *  affects. Routers (notifier/telegram) and absent runtimes carry no doctrine. */
-const AGENTIC_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex'])
+const AGENTIC_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode'])
 
 /**
  * refresh <peer> [runtime] (or --all): arm a LAZY soft-reload. Each agentic (claude/codex) runtime of the
@@ -1018,7 +1018,7 @@ export async function removePeerCli(
     const slot = readMemoryProvider(env)
     if (slot?.unprovision) {
       const { runProvisionCommand } = await import('../enable/provisionCommand.ts')
-      const agentic = peer.runtimes.filter((r): r is 'claude' | 'codex' => r === 'claude' || r === 'codex')
+      const agentic = peer.runtimes.filter(r => r === 'claude' || r === 'codex' || r === 'opencode')
       for (const rt of agentic) {
         const o = runProvisionCommand({
           block: slot.unprovision,

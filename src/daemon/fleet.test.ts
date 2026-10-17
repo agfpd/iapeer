@@ -140,7 +140,7 @@ describe('GET /fleet/v1/snapshot', () => {
   // ── activity (docs/15 §Activity) — additive, live-only, separate from liveness ──────────
   test('agent-endpoint discovery: host.agent_runtimes + runtimes[].agent (declared ∩ hostable)', () => {
     const s = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
-    expect(s.host.agent_runtimes).toEqual(['claude', 'codex'])
+    expect(s.host.agent_runtimes).toEqual(['claude', 'codex', 'opencode'])
     const boris = s.peers.find(p => p.personality === 'boris')!
     expect(boris.runtimes.map(r => [r.runtime, r.agent])).toEqual([['claude', true], ['codex', true]])
     const nova = s.peers.find(p => p.personality === 'nova')!

@@ -215,7 +215,7 @@ export function discoverPeerRuntimes(cwd: string, currentRuntime: Runtime): Runt
 
 /** Agentic runtimes only an ARTIFICIAL peer can drive. A natural (human) or absent
  *  (no mind) peer has nobody to sit in a claude/codex session under its identity. */
-const AGENTIC_GATED_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex'])
+const AGENTIC_GATED_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode'])
 
 /**
  * DISCOVERY GATE (хвост-2, boris 15.07): drop agentic runtimes a NON-artificial peer

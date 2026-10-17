@@ -111,7 +111,8 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
   return {
     claudeBin: env.IAPEER_CLAUDE_BIN ?? join(home, '.local', 'bin', 'claude'),
     codexBin: env.IAPEER_CODEX_BIN ?? 'codex',
-    opencodeBin: env.IAPEER_OPENCODE_BIN ?? 'opencode',
+    // The official installer's location is not on launchd's PATH; prefer it over a bare name.
+    opencodeBin: env.IAPEER_OPENCODE_BIN ?? (existsSync(join(home, '.opencode', 'bin', 'opencode')) ? join(home, '.opencode', 'bin', 'opencode') : 'opencode'),
     sockDir: resolveSockDir(env),
     stateDir: join(root, STATE_DIR, 'lifecycle'),
     logDir: join(root, LOGS_DIR, 'lifecycle'),
