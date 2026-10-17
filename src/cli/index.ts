@@ -450,7 +450,7 @@ export async function addRuntime(
   delete cleanEnv.PEER_PERSONALITY
   delete cleanEnv.PEER_RUNTIME
   delete cleanEnv.PEER_IDENTITY
-  const { initPeer } = await import('../init/index.ts')
+  const { initPeer, hasClaudeMcpWiring } = await import('../init/index.ts')
   const out: AddRuntimeOutcome[] = []
   for (const p of targets) {
     // Skip an infra-DEFAULT peer only when the runtime being added is AGENTIC: giving a
@@ -467,9 +467,12 @@ export async function addRuntime(
     // Short-circuiting on the declaration alone would report "already" while the channel
     // does not exist — so for infra, converge: a missing plist means there IS work to do.
     // initPeer is idempotent, so the repair costs nothing when everything is in place.
+    // Same for claude: declared on a codex-born peer ≠ its `.mcp.json` wiring exists.
     const realized = isInfraRuntime(runtime)
       ? existsSync(resolveAlwaysOnTarget(p.personality, runtime as Runtime, env).path)
-      : true
+      : runtime === 'claude'
+        ? hasClaudeMcpWiring(p.cwd)
+        : true
     if (p.runtimes.includes(runtime as Runtime) && realized) {
       out.push({ personality: p.personality, action: 'already' })
       continue
@@ -481,7 +484,10 @@ export async function addRuntime(
       out.push({
         personality: p.personality,
         action: 'added',
-        detail: [repair ? 'declared but no plist — channel re-provisioned' : undefined, ...warns].filter(Boolean).join(' | ') || undefined,
+        detail:
+          [repair ? (isInfraRuntime(runtime) ? 'declared but no plist — channel re-provisioned' : 'declared but not wired — runtime re-provisioned') : undefined, ...warns]
+            .filter(Boolean)
+            .join(' | ') || undefined,
       })
     } catch (e) {
       out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })

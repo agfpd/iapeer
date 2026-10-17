@@ -855,6 +855,28 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     expect((await addRuntime('codex', { peer: 'aud1', env: e }))[0].action).toBe('already')
   })
 
+  test('add-runtime claude WIRES a codex-born peer that only DECLARES claude (no .mcp.json) — live 2026-10-17', async () => {
+    const e = env()
+    const cwd = join(root, 'peers', 'aud4')
+    mkdirSync(cwd, { recursive: true })
+    await upsertPeer({ personality: 'aud4', runtime: 'codex', cwd, intelligence: 'artificial' }, { rootDir: root })
+    const { initPeer, hasClaudeMcpWiring } = await import('../init/index.ts')
+    await initPeer({ cwd, runtime: 'codex', env: e })
+    await addRuntime('codex', { peer: 'aud4', env: e })
+    const { readPeerProfile, writePeerProfileAtomic } = await import('../identity/index.ts')
+    const prof = readPeerProfile(cwd)!
+    writePeerProfileAtomic(cwd, { ...prof, runtimes: [...prof.runtimes, 'claude'] }) // declared, never wired
+    const { reindexFromLocals } = await import('../identity/profileStandard.ts')
+    await reindexFromLocals({ env: e }) // registry declares claude too, as on the live host
+    expect(hasClaudeMcpWiring(cwd)).toBe(false)
+    const outcome = (await addRuntime('claude', { peer: 'aud4', env: e }))[0]
+    expect(outcome.action).toBe('added')
+    expect(outcome.detail).toContain('declared but not wired')
+    expect(hasClaudeMcpWiring(cwd)).toBe(true)
+    expect(readPeerProfile(cwd)!.runtime).toBe('codex') // routing untouched
+    expect((await addRuntime('claude', { peer: 'aud4', env: e }))[0].action).toBe('already')
+  })
+
   test('add-runtime works from INSIDE another peer session (poisoned PEER_* env) — live-caught 12.06', async () => {
     const e = env()
     e.PEER_PERSONALITY = 'iapeer' // the caller's own identity must not poison the target's init

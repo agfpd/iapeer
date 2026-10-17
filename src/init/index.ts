@@ -599,6 +599,18 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
 function hasClaudeMarker(cwd: string): boolean {
   return existsSync(join(cwd, '.claude'))
 }
+/** Claude side REALIZED: the cwd's `.mcp.json` carries the foundation daemon server.
+ *  A peer born codex-primary declares claude but never got this wiring (init wires
+ *  claude only for a claude primary / `.claude` marker) → a claude session without
+ *  send_to_peer (live, fleet switch 2026-10-17). */
+export function hasClaudeMcpWiring(cwd: string): boolean {
+  try {
+    const doc = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8')) as { mcpServers?: Record<string, unknown> }
+    return Boolean(doc.mcpServers?.[IAPEER_MCP_SERVER_NAME])
+  } catch {
+    return false
+  }
+}
 function hasCodexMarker(cwd: string): boolean {
   return existsSync(join(cwd, '.codex'))
 }
