@@ -42,8 +42,10 @@ as a silent no-op.
   peer cwd is `<root>/peers/<p>`). Moved there from `<root>/peers/<p>/opencode/` on
   2026-10-17, before any release (no producer ever wrote the old path; it is not
   read or migrated).
-  Provider and capability commands receive it from the core as `{privateDir}` and
-  `IAPEER_PRIVATE_DIR` (docs/21); they never compute it.
+  Every consumer gets it from the core and never computes it: provider and
+  capability commands as `{privateDir}` / `IAPEER_PRIVATE_DIR` (docs/21); observers
+  the core does not launch (console, collectors, sweeps) from the fleet snapshot
+  `runtimes[].private_dir` (docs/15) or `iapeer private-dir <p> [--runtime opencode]`.
   Memory owns `iapeer-memory.json` and `iapeer-memory-plugin.mjs` there. The core
   reads the JSON fragment on each launch and merges its `mcp` and `plugin` fields
   into runtime overrides. Missing means no memory surfaces; malformed/present

@@ -37,6 +37,7 @@ import type { IncomingMessage, ServerResponse } from 'http'
 import { closeSync, openSync, readSync, statSync } from 'fs'
 import { isSupportedLocalRuntime, SUPPORTED_LOCAL_RUNTIMES } from '../core/constants.ts'
 import { buildProcessAddress } from '../core/socket.ts'
+import { endpointPrivateDir } from '../storage/index.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
 import {
   ephemeralQueueDepth,
@@ -85,6 +86,9 @@ export interface FleetRuntimeStatus {
    *  `agent:true` runtimes of a personality — never a consumer-side hardcode or `Bun.which`.
    *  A declared runtime the running core cannot host (newer peer, older core) is `false`. */
   agent: boolean
+  /** Core-owned private directory of this endpoint (docs/20: opencode journal/state). Absent when the
+   *  runtime has none. Observers read it from here; they never derive the layout. */
+  private_dir?: string
   /** Present (true) iff a HUMAN operator is attached to this live hosted session. */
   attached?: boolean
   /** Whether this runtime is IN A TURN right now — a SEPARATE concept from `status`, which
@@ -236,6 +240,10 @@ export function buildFleetSnapshot(
    *  never emitted, which is exactly its "no claim" semantics. */
   activityOf?: (personality: string, runtime: string) => TurnActivity | undefined,
 ): FleetSnapshot {
+  const privateDirOf = (runtime: string, personality: string): { private_dir?: string } => {
+    const d = endpointPrivateDir(runtime, personality, { env })
+    return d ? { private_dir: d } : {}
+  }
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {
       const attached =
@@ -247,6 +255,7 @@ export function buildFleetSnapshot(
         runtime: s.runtime,
         status: s.status,
         agent: isSupportedLocalRuntime(s.runtime),
+        ...(privateDirOf(s.runtime, r.personality)),
         ...(attached ? { attached: true } : {}),
         ...(activity ? { activity } : {}),
       }

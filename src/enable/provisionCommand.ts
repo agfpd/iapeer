@@ -18,8 +18,7 @@
 
 import { spawnSync } from 'child_process'
 import { accessSync, constants as FS } from 'fs'
-import { isValidName } from '../core/constants.ts'
-import { opencodePrivateDir } from '../storage/index.ts'
+import { endpointPrivateDir } from '../storage/index.ts'
 import type { MemoryProviderProvision } from '../status/index.ts'
 
 /** The agreed occasion vocabulary (финален). */
@@ -50,16 +49,6 @@ export interface ProvisionCommandOutcome {
   argv: string[]
 }
 
-/**
- * The core-owned private directory of a (personality, runtime) endpoint, handed to provider and
- * capability commands so no plugin computes the core's layout itself (docs/20, docs/21). Only
- * runtimes with a private directory have one (today: opencode → <root>/state/opencode/<p>).
- */
-export function endpointPrivateDir(runtime: string, personality: string, env: NodeJS.ProcessEnv): string | undefined {
-  if (runtime !== 'opencode' || !isValidName(personality)) return undefined
-  return opencodePrivateDir(personality, { env })
-}
-
 function substitute(arg: string, s: ProvisionCommandSpec, privateDir: string | undefined): string {
   return arg
     .replaceAll('{privateDir}', privateDir ?? '{privateDir}')
@@ -84,7 +73,7 @@ function tail(text: string, max = 400): string | undefined {
  */
 export function runProvisionCommand(spec: ProvisionCommandSpec): ProvisionCommandOutcome {
   const baseEnv = spec.env ?? process.env
-  const privateDir = endpointPrivateDir(spec.runtime, spec.personality, baseEnv)
+  const privateDir = endpointPrivateDir(spec.runtime, spec.personality, { env: baseEnv })
   const argv = [spec.block.command, ...spec.block.args.map(a => substitute(a, spec, privateDir))]
   const started = Date.now()
   // {privateDir} for a runtime that has none is a declaration error — refuse loudly rather than run

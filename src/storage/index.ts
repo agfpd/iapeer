@@ -29,6 +29,7 @@ import {
   STATE_DIR,
   SUPPORTED_LOCAL_RUNTIMES,
   isRuntime,
+  isValidName,
   type Runtime,
   type SupportedLocalRuntime,
 } from '../core/constants.ts'
@@ -384,4 +385,15 @@ export function resolveDaemonMcpUrl(options: StorageOptions = {}): string {
  */
 export function opencodePrivateDir(personality: string, options: StorageOptions = {}): string {
   return join(options.rootDir ?? resolveGlobalRoot(options.env), STATE_DIR, 'opencode', personality)
+}
+
+/**
+ * The core-owned private directory of an endpoint (personality × runtime), or undefined when that
+ * runtime has none (today only opencode has one). The ONE answer every consumer gets — the launch
+ * adapter, provider/capability commands ({privateDir} / IAPEER_PRIVATE_DIR), the fleet snapshot
+ * (`runtimes[].private_dir`) and `iapeer private-dir`. Consumers never derive it themselves.
+ */
+export function endpointPrivateDir(runtime: string, personality: string, options: StorageOptions = {}): string | undefined {
+  if (runtime !== 'opencode' || !isValidName(personality)) return undefined
+  return opencodePrivateDir(personality, options)
 }

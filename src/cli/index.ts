@@ -1597,6 +1597,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|approve <id>|deny <id> [reason]|status',
     desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; renders the approval queue (badge + Allow/Deny), install activates it (installs SwiftBar when absent). See docs/16.',
   },
+  { sig: 'private-dir <peer> [--runtime r]', desc: 'print the core-owned private directory of a peer endpoint (docs/20: opencode journal/state/fragments). The ONLY way a process not launched by the core gets the path — never derive the layout. Without --runtime: the single declared runtime that has one. Exit 1 when none' },
   { sig: 'approval-mode <peer> [gated|yolo]', desc: 'read/flip a peer\'s human-approval mode (docs/17): yolo=current bypass; gated=blocking runtime approvals routed to a human. Persists + brings runtime surfaces to the mode; applies on next fresh session' },
   { sig: 'approvals [--json]', desc: 'list pending human-approval requests (verbatim action content); the host answer channel to the daemon broker' },
   { sig: 'approve <id>', desc: 'approve a pending request — the decision clears it in every channel' },
@@ -2274,6 +2275,32 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const outcomes = await addRuntime(rt, { peer: peerName, all: flags.all === true, env })
         for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
         return outcomes.some(o => o.action === 'failed') ? 1 : 0
+      }
+      case 'private-dir': {
+        const name = positionals[0]
+        if (!name) return argErr(errOut, 'private-dir needs a peer — usage: iapeer private-dir <peer> [--runtime r]')
+        const peer = findPeer(readPeersIndex({ env }), name)
+        if (!peer) {
+          errOut(`peer "${name}" is not registered\n`)
+          return 1
+        }
+        const { endpointPrivateDir } = await import('../storage/index.ts')
+        const wanted = typeof flags.runtime === 'string' ? flags.runtime : undefined
+        if (wanted && !peer.runtimes.includes(wanted)) {
+          errOut(`peer "${name}" does not declare runtime "${wanted}" (declared: ${peer.runtimes.join(', ')})\n`)
+          return 1
+        }
+        const candidates = (wanted ? [wanted] : peer.runtimes).filter(rt => endpointPrivateDir(rt, name, { env }))
+        if (candidates.length !== 1) {
+          errOut(
+            candidates.length === 0
+              ? `no private directory for "${name}"${wanted ? ` (${wanted})` : ''} — only opencode endpoints have one\n`
+              : `"${name}" has several endpoints with a private directory (${candidates.join(', ')}) — pass --runtime\n`,
+          )
+          return 1
+        }
+        out(`${endpointPrivateDir(candidates[0]!, name, { env })}\n`)
+        return 0
       }
       case 'default-runtime': {
         // The PRIMARY flip (routing/wake default) — the fleet-switch moment itself.

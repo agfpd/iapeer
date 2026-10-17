@@ -147,6 +147,17 @@ describe('GET /fleet/v1/snapshot', () => {
     expect(nova.runtimes.map(r => r.agent)).toEqual([false]) // a channel is never an agent endpoint
   })
 
+  test('runtimes[].private_dir: emitted only for an endpoint that has one (opencode), from the core root', () => {
+    const ops = {
+      ...FAKE_OPS,
+      listPeers: (o: { env?: NodeJS.ProcessEnv }) =>
+        FAKE_OPS.listPeers(o).map(p => (p.personality === 'boris' ? { ...p, runtimes: [...p.runtimes, { runtime: 'opencode', status: 'asleep' }] } : p)),
+    } as typeof FAKE_OPS
+    const e = { ...process.env, IAPEER_ROOT: '/x/root' }
+    const boris = buildFleetSnapshot(e, cfg, ops, Date.now()).peers.find(p => p.personality === 'boris')!
+    expect(boris.runtimes.map(r => [r.runtime, r.private_dir])).toEqual([['claude', undefined], ['codex', undefined], ['opencode', '/x/root/state/opencode/boris']])
+  })
+
   test('activity: absent entirely when no lookup is injected (existing clients unaffected)', () => {
     const s = buildFleetSnapshot(process.env, cfg, FAKE_OPS, Date.now())
     for (const p of s.peers) for (const r of p.runtimes) expect(r.activity).toBeUndefined()

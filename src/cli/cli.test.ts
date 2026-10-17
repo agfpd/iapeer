@@ -334,6 +334,26 @@ describe('remove (registry record via the locked writer)', () => {
     expect(existsSync(attachmentInboxDir('retired', e))).toBe(false)
   })
 
+  test('private-dir: the core answers the path; refuses when ambiguous/none/undeclared', async () => {
+    await register('ocpd', 'opencode')
+    await register('clonly', 'claude')
+    const e = env()
+    const outs: string[] = []
+    const orig = process.stdout.write.bind(process.stdout)
+    ;(process.stdout as { write: unknown }).write = (c: string) => (outs.push(String(c)), true)
+    let code: number
+    try {
+      code = await runCli(['private-dir', 'ocpd'], e)
+    } finally {
+      ;(process.stdout as { write: unknown }).write = orig
+    }
+    expect(code).toBe(0)
+    expect(outs.join('').trim()).toBe(join(e.IAPEER_ROOT!, 'state', 'opencode', 'ocpd'))
+    expect(await runCli(['private-dir', 'clonly'], e)).toBe(1)
+    expect(await runCli(['private-dir', 'ocpd', '--runtime', 'codex'], e)).toBe(1)
+    expect(await runCli(['private-dir', 'ghost'], e)).toBe(1)
+  })
+
   test('remove purges the OpenCode private state dir (outside the cwd)', async () => {
     await register('ocgone')
     const e = env()
