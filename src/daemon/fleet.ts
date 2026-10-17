@@ -35,9 +35,11 @@
 
 import type { IncomingMessage, ServerResponse } from 'http'
 import { closeSync, openSync, readSync, statSync } from 'fs'
+import { join } from 'path'
 import { isSupportedLocalRuntime, SUPPORTED_LOCAL_RUNTIMES } from '../core/constants.ts'
 import { buildProcessAddress } from '../core/socket.ts'
 import { endpointPrivateDir } from '../storage/index.ts'
+import { readOpencodeState } from '../opencode/journal.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
 import {
   ephemeralQueueDepth,
@@ -89,6 +91,9 @@ export interface FleetRuntimeStatus {
   /** Core-owned private directory of this endpoint (docs/20: opencode journal/state). Absent when the
    *  runtime has none. Observers read it from here; they never derive the layout. */
   private_dir?: string
+  /** The model the runtime ACTUALLY used last (`provider/model`, from the endpoint's own state; docs/20
+   *  §Provider pinning). Absent until a first assistant turn, or for runtimes that do not report it. */
+  model?: string
   /** Present (true) iff a HUMAN operator is attached to this live hosted session. */
   attached?: boolean
   /** Whether this runtime is IN A TURN right now — a SEPARATE concept from `status`, which
@@ -240,9 +245,11 @@ export function buildFleetSnapshot(
    *  never emitted, which is exactly its "no claim" semantics. */
   activityOf?: (personality: string, runtime: string) => TurnActivity | undefined,
 ): FleetSnapshot {
-  const privateDirOf = (runtime: string, personality: string): { private_dir?: string } => {
+  const privateDirOf = (runtime: string, personality: string): { private_dir?: string; model?: string } => {
     const d = endpointPrivateDir(runtime, personality, { env })
-    return d ? { private_dir: d } : {}
+    if (!d) return {}
+    const model = (readOpencodeState(join(d, 'state.json')) as { model?: unknown } | null)?.model
+    return { private_dir: d, ...(typeof model === 'string' && model ? { model } : {}) }
   }
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {

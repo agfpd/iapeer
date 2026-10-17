@@ -61,6 +61,43 @@ export function readOpencodeExtension(path: string): JsonObject {
   return fragment
 }
 
+/** Is the peer's provider explicit (`model` = `<provider>/<model>`)? */
+export function hasExplicitModel(config: JsonObject): boolean {
+  return typeof config.model === 'string' && /^[^/\s]+\/\S+$/.test(config.model)
+}
+
+/**
+ * Provider pinning (docs/20 §Provider pinning, OC04). Without an explicit model OpenCode falls back to
+ * its own hosted default (`opencode/big-pickle`) and the whole composed doctrine goes there. Owner
+ * policy (18.10): allowed, but NEVER silently — an implicit provider passes through unchanged and the
+ * launch records a warning (see the adapter) while the actual model is reported in the fleet snapshot.
+ * An EXPLICIT model is pinned: `small_model` defaults to `model` (titles never drift to another
+ * provider) and `enabled_providers` is exactly those providers; an explicit list that excludes them
+ * is a misconfiguration and refuses loudly.
+ */
+export function pinProvider(config: JsonObject, configPath: string): JsonObject {
+  const hint =
+    `configure the peer's provider in ${configPath} (or OPENCODE_CONFIG_CONTENT in the peer's launch.env): ` +
+    `"model": "<provider>/<model>" plus that provider's "provider" block; see docs/20 §Provider pinning`
+  const providerOf = (v: unknown, field: string): string => {
+    if (typeof v !== 'string' || !/^[^/\s]+\/\S+$/.test(v)) {
+      throw new Error(`opencode: no explicit ${field} — refusing to launch on OpenCode's implicit default provider. ${hint}`)
+    }
+    return v.slice(0, v.indexOf('/'))
+  }
+  if (!hasExplicitModel(config)) return config
+  const model = providerOf(config.model, 'model')
+  const smallModel = config.small_model === undefined ? config.model : config.small_model
+  const small = providerOf(smallModel, 'small_model')
+  const needed = [...new Set([model, small])]
+  let enabled = config.enabled_providers
+  if (enabled === undefined) enabled = needed
+  else if (!Array.isArray(enabled) || !needed.every(p => (enabled as unknown[]).includes(p))) {
+    throw new Error(`opencode: enabled_providers ${JSON.stringify(enabled)} must include ${JSON.stringify(needed)} (the model providers). ${hint}`)
+  }
+  return { ...config, small_model: smallModel, enabled_providers: enabled }
+}
+
 export interface ComposeOpencodeConfigInput {
   personality: string
   doctrine: string
@@ -90,6 +127,7 @@ export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options
     const path = join(paths.dir, `${stem}.json`)
     if (existsSync(path)) result = mergeOpencodeConfig(result, readOpencodeExtension(path))
   }
+  result = pinProvider(result, paths.config)
   // Last writer for required fields; foreign MCP servers, agents, plugins and
   // provider settings survive. Effective managed overrides still need a live gate.
   return mergeOpencodeConfig(result, {

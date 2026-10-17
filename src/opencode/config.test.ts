@@ -8,11 +8,31 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function setup() {
   const rootDir = mkdtempSync('/tmp/iapeer-oc-config-'); roots.push(rootDir)
   const paths = opencodePaths('probe', { rootDir }); mkdirSync(paths.dir, { recursive: true })
+  writeFileSync(paths.config, JSON.stringify({ model: 'syn/m' })) // an explicit provider is mandatory (pinProvider)
   return { rootDir, paths }
 }
 const input = { personality: 'probe', doctrine: 'Synthetic doctrine', daemonUrl: 'http://127.0.0.1:1234/mcp' }
 
 describe('OpenCode private config contract', () => {
+  test('no implicit provider: missing model refuses with a hint; small_model and enabled_providers are pinned', () => {
+    const { rootDir, paths } = setup()
+    writeFileSync(paths.config, JSON.stringify({ provider: { x: {} } }))
+    const implicit = composeOpencodeConfig(input, { rootDir }) // allowed (owner policy), never pinned
+    expect(implicit.model).toBeUndefined()
+    expect(implicit.enabled_providers).toBeUndefined()
+    writeFileSync(paths.config, JSON.stringify({ model: 'nvidia/nemo' }))
+    const pinned = composeOpencodeConfig(input, { rootDir })
+    expect(pinned.small_model).toBe('nvidia/nemo')
+    expect(pinned.enabled_providers).toEqual(['nvidia'])
+    writeFileSync(paths.config, JSON.stringify({ model: 'nvidia/nemo', small_model: 'ollama/g' }))
+    expect(composeOpencodeConfig(input, { rootDir }).enabled_providers).toEqual(['nvidia', 'ollama'])
+    writeFileSync(paths.config, JSON.stringify({ model: 'nvidia/nemo', enabled_providers: ['opencode'] }))
+    expect(() => composeOpencodeConfig(input, { rootDir })).toThrow(/must include/)
+    // the inline env config is an equally explicit source
+    writeFileSync(paths.config, '{}')
+    expect(composeOpencodeConfig({ ...input, inline: JSON.stringify({ model: 'ollama/g' }) }, { rootDir }).enabled_providers).toEqual(['ollama'])
+  })
+
   test('personality scopes are distinct even for a shared cwd; rootDir wins over env', () => {
     const a = opencodePaths('one', { rootDir: '/isolated', env: { IAPEER_ROOT: '/wrong' } })
     const b = opencodePaths('two', { rootDir: '/isolated' })
@@ -22,7 +42,7 @@ describe('OpenCode private config contract', () => {
   })
   test('core fields win without clobbering foreign providers/agents/MCP/plugins', () => {
     const { rootDir, paths } = setup()
-    writeFileSync(paths.config, JSON.stringify({ provider: { nvidia: { options: { apiKey: '{env:NVIDIA_API_KEY}' } } }, mcp: { foreign: { type: 'remote', url: 'http://localhost/foreign' } } }))
+    writeFileSync(paths.config, JSON.stringify({ model: 'nvidia/x', provider: { nvidia: { options: { apiKey: '{env:NVIDIA_API_KEY}' } } }, mcp: { foreign: { type: 'remote', url: 'http://localhost/foreign' } } }))
     writeFileSync(join(paths.dir, 'iapeer-memory.json'), JSON.stringify({ mcp: { 'iapeer-memory': { type: 'remote', url: 'http://localhost/memory' } }, plugin: ['file:///memory.mjs'] }))
     const result = composeOpencodeConfig({ ...input, inline: JSON.stringify({ default_agent: 'wrong', agent: { foreign: { prompt: 'keep' }, iapeer: { prompt: 'stale' } }, plugin: ['file:///foreign.mjs', 'file:///memory.mjs'] }) }, { rootDir })
     expect(result.default_agent).toBe('iapeer')

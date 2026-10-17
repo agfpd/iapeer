@@ -151,6 +151,7 @@ async function server(input) {
   function noteModel(info) {
     if (info && info.role === 'assistant' && typeof info.providerID === 'string' && typeof info.modelID === 'string') {
       lastModel = { providerID: info.providerID, modelID: info.modelID }
+      state.model = info.providerID + '/' + info.modelID // the ACTUAL model, for operators (fleet snapshot)
     }
   }
 

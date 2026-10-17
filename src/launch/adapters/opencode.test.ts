@@ -23,6 +23,10 @@ afterEach(() => {
 })
 
 function spec(over: Partial<LaunchSpec> = {}): LaunchSpec {
+  // an explicit provider is mandatory for every launch (pinProvider)
+  const pp = opencodePaths(over.personality ?? 'alice', { env })
+  mkdirSync(pp.dir, { recursive: true })
+  if (!existsSync(pp.config)) writeFileSync(pp.config, JSON.stringify({ model: 'syn/m' }))
   const prompt = join(root, 'prompt.md')
   writeFileSync(prompt, 'DOCTRINE-X')
   return { personality: 'alice', runtime: 'opencode', cwd: root, identity: 'opencode-alice', socketPath: '/tmp/x.sock', systemPromptFile: prompt, ...over }
@@ -85,6 +89,14 @@ describe('opencode adapter — prepareLaunch', () => {
     expect(JSON.parse(y.env.OPENCODE_CONFIG_CONTENT!).agent.iapeer.permission).toEqual({ bash: 'allow' }) // foreign kept on yolo
     const g2 = opencodeAdapter.prepareLaunch!(spec({ approvalMode: 'gated' }), { OPENCODE_CONFIG_CONTENT: '{"agent":{"iapeer":{"permission":{"bash":"allow"}}}}' }, { claudeBin: 'c', codexBin: 'x', env })
     expect(JSON.parse(g2.env.OPENCODE_CONFIG_CONTENT!).agent.iapeer.permission.bash).toBe('ask') // gated is last writer
+  })
+  test('no provider configured → launches, but never silently (warning for lifecycle.log)', () => {
+    const s = spec()
+    writeFileSync(opencodePaths('alice', { env }).config, '{}')
+    const p = opencodeAdapter.prepareLaunch!(s, {}, { claudeBin: 'c', codexBin: 'x', env })
+    expect(p.warnings?.[0]).toMatch(/opencode-implicit-provider/)
+    writeFileSync(opencodePaths('alice', { env }).config, JSON.stringify({ model: 'syn/m' }))
+    expect(opencodeAdapter.prepareLaunch!(s, {}, { claudeBin: 'c', codexBin: 'x', env }).warnings).toEqual([])
   })
   test('missing composed prompt fails loud', () => {
     expect(() => opencodeAdapter.prepareLaunch!(spec({ systemPromptFile: join(root, 'nope.md') }), {}, { claudeBin: 'c', codexBin: 'x', env })).toThrow(/system prompt missing/)

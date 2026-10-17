@@ -10,7 +10,7 @@
 //   • the bearer gate covers /fleet the same as MCP.
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { loadLifecycleConfig, type LifecycleConfig } from '../lifecycle/index.ts'
@@ -156,6 +156,21 @@ describe('GET /fleet/v1/snapshot', () => {
     const e = { ...process.env, IAPEER_ROOT: '/x/root' }
     const boris = buildFleetSnapshot(e, cfg, ops, Date.now()).peers.find(p => p.personality === 'boris')!
     expect(boris.runtimes.map(r => [r.runtime, r.private_dir])).toEqual([['claude', undefined], ['codex', undefined], ['opencode', '/x/root/state/opencode/boris']])
+  })
+
+  test('runtimes[].model: the ACTUAL model from the endpoint state (implicit provider is visible)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-model-'))
+    const dir = join(root, 'state', 'opencode', 'boris')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ schema: 1, launchID: 'l', status: 'idle', model: 'opencode/big-pickle' }))
+    const ops = {
+      ...FAKE_OPS,
+      listPeers: (o: { env?: NodeJS.ProcessEnv }) =>
+        FAKE_OPS.listPeers(o).map(p => (p.personality === 'boris' ? { ...p, runtimes: [...p.runtimes, { runtime: 'opencode', status: 'live' }] } : p)),
+    } as typeof FAKE_OPS
+    const boris = buildFleetSnapshot({ ...process.env, IAPEER_ROOT: root }, cfg, ops, Date.now()).peers.find(p => p.personality === 'boris')!
+    expect(boris.runtimes.find(r => r.runtime === 'opencode')!.model).toBe('opencode/big-pickle')
+    rmSync(root, { recursive: true, force: true })
   })
 
   test('activity: absent entirely when no lookup is injected (existing clients unaffected)', () => {

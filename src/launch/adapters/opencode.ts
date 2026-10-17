@@ -19,7 +19,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { composeOpencodeConfig, OPENCODE_AGENT, OPENCODE_PLUGIN_SOURCE, opencodePaths, writeOpencodePlugin } from '../../opencode/config.ts'
+import { composeOpencodeConfig, hasExplicitModel, OPENCODE_AGENT, OPENCODE_PLUGIN_SOURCE, opencodePaths, writeOpencodePlugin } from '../../opencode/config.ts'
 import { opencodeControl } from '../../opencode/control.ts'
 import { fileMtimeMs, readJournalFrom, readOpencodeState } from '../../opencode/journal.ts'
 import { resolveDaemonMcpUrl } from '../../storage/index.ts'
@@ -105,7 +105,10 @@ export const opencodeAdapter: RuntimeAdapter = {
       IAPEER_FLEET_URL: resolveFleetBase(env),
     }
     if (spec.resume && spec.resumeRef) out.IAPEER_OPENCODE_SESSION = spec.resumeRef
-    return { env: out, readyToken: launchID }
+    const warnings = hasExplicitModel(config)
+      ? []
+      : [`opencode-implicit-provider: no explicit "model" in ${p.config} — OpenCode's own default provider receives the doctrine and messages`]
+    return { env: out, readyToken: launchID, warnings }
   },
 
   async structuralReady(spec, launchID, deadlineMs, alive, env) {

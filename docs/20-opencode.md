@@ -123,6 +123,22 @@ Open core contracts this ABI depends on:
   provision/unprovision per peer and runtime, like the memory slot. Until it
   exists, a manual install is not reported as final.
 
+## Provider pinning
+
+Without an explicit `model`, native OpenCode uses its own hosted default
+(`opencode/big-pickle`), and the composed doctrine, registry and messages go
+there. Owner policy (2026-10-18): this is allowed, but never silent.
+- No explicit `model` (`<provider>/<model>` in the peer's `opencode.json` or the
+  inline `OPENCODE_CONFIG_CONTENT`): the launch proceeds, `lifecycle.log` records
+  `ev=launch-warning warning="opencode-implicit-provider: …"`, and
+  `add-runtime`/`create` warn with the file to fill.
+- An explicit `model` is pinned: `small_model` defaults to `model` (titles and
+  summaries never drift to another provider), `enabled_providers` defaults to
+  exactly the providers of those two; an explicit list that excludes them refuses
+  the launch.
+- The model actually used is reported by the plugin (`state.json` `model`) and
+  appears as the fleet snapshot field `runtimes[].model` (docs/15).
+
 ## Acceptance matrix
 
 `OPEN` includes implementation and/or missing live proof. Unit tests, config-file

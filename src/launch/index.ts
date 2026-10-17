@@ -200,6 +200,7 @@ export const launch: LaunchFn = async (
         const { PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY } = invocation.env
         invocation.env = { ...invocation.env, ...prepared.env, PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY }
         readyToken = prepared.readyToken
+        for (const w of prepared.warnings ?? []) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
       } catch (e) {
         return fail(identity, `launch preparation failed: ${e instanceof Error ? e.message : String(e)}`)
       }

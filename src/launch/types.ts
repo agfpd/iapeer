@@ -449,6 +449,8 @@ export interface ObserveContext {
 export interface PreparedLaunch {
   env: Record<string, string>
   readyToken?: string
+  /** Non-fatal launch facts the primitive records in lifecycle.log (ev=launch-warning). */
+  warnings?: string[]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

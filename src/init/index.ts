@@ -554,6 +554,26 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
 
   const doctrine = ensureDoctrineTemplate(provisioned.cwd)
 
+  // OpenCode never launches on an implicit provider (pinProvider). Say so at attach time, with the
+  // exact file to fill, instead of letting the first wake be the first signal.
+  if (provisioned.runtime === 'opencode') {
+    const { opencodePaths } = await import('../opencode/config.ts')
+    const cfgPath = opencodePaths(provisioned.personality, { env }).config
+    let model: unknown
+    try {
+      model = (JSON.parse(readFileSync(cfgPath, 'utf8')) as { model?: unknown }).model
+    } catch {
+      model = undefined
+    }
+    if (typeof model !== 'string' || !model.includes('/')) {
+      opts.warn?.(
+        `opencode provider not configured for "${provisioned.personality}": it will run on OpenCode's own default ` +
+          `provider (doctrine and messages go there) until ${cfgPath} names "model": "<provider>/<model>" ` +
+          `and that provider (docs/20 §Provider pinning)`,
+      )
+    }
+  }
+
   // INFRA peer: per-peer runtime self-config, THEN auto-bootstrap. For an agentic
   // (warm-on-demand) runtime neither applies — it is daemon-woken, never launchd-held,
   // and gets its MCP wiring above instead.

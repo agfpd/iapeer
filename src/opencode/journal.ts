@@ -17,6 +17,8 @@ export interface OpencodeState {
   lastActivityMs: number
   status: OpencodeStatus
   error?: string
+  /** Actual `provider/model` of the last assistant turn (plugin-reported). */
+  model?: string
 }
 
 export interface OpencodeJournalLine {
