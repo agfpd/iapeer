@@ -151,6 +151,46 @@ describe('implicit runtime routing — default_runtime overrides live non-defaul
     }
   })
 
+  test('BOTH runtimes live: omitted runtime delivers to default_runtime, never the other live session', async () => {
+    markLive('claude')
+    markLive('codex')
+    let wakeCalled = false
+    const targets: string[] = []
+    try {
+      const r = await routeSend(
+        caller,
+        { personality: MULTI_TARGET, message: 'two-live implicit probe' },
+        {
+          wake: async () => {
+            wakeCalled = true
+            return { status: 'FAILED', woke: false, reason: 'must not wake — default is live' }
+          },
+          composerQueue: {
+            tryEnqueue: async args => {
+              targets.push(args.target.runtime)
+              return ok({
+                ok: true as const,
+                delivered_to: { personality: args.target.personality, runtime: args.target.runtime },
+                woke: false,
+                queued: true,
+                queuedBy: 'composer' as const,
+                queueDepth: 1,
+                ts: args.sentAt ?? 'missing',
+              })
+            },
+          },
+        },
+      )
+      expect(r.ok).toBe(true)
+      if (r.ok) expect(r.value.delivered_to.runtime).toBe('codex') // MULTI_TARGET default_runtime
+      expect(targets).toEqual(['codex'])
+      expect(wakeCalled).toBe(false)
+    } finally {
+      clear('claude')
+      clear('codex')
+    }
+  })
+
   test('explicit runtime still targets the requested live non-default surface', async () => {
     markLive('claude')
     clear('codex')

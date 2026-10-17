@@ -72,6 +72,13 @@ native OpenCode SQLite DB or a second SDK client:
   - Core events: `runtime.ready` `{session:<native session info>, resumed:boolean}`;
     `runtime.stopped` `{reason, exitCode?:number, signal?:string}`. A resume emits
     `runtime.ready` with the existing session; it never fabricates `session.created`.
+    **Every process launch that reaches readiness writes exactly one `runtime.ready`**
+    with a new `launchID`, including resume, so the main session is recoverable from
+    the journal alone. A launch that fails before readiness writes `runtime.error`
+    `{error}` under its `launchID` instead.
+  - Consumers: web-runtime, telegram-runtime, statusline-injector and iapeer-memory's
+    weekly collector (it relies on the path, `time`, unchanged `type`/`properties` and
+    no rotation). Changing any of these requires notifying all four.
   - Native bootstrap snapshots can repeat part ids, so consumers must **upsert parts by id**.
 - `<IAPEER_ROOT>/peers/<p>/opencode/state.json`, written atomically:
   `{schema:1, identity, cwd, sessionID, launchID, startedAt, lastEventSeq,
@@ -161,6 +168,54 @@ Official references (checked against native 1.19.3, not assumed from latest docs
 [NVIDIA](https://opencode.ai/docs/providers/#nvidia),
 [native prompt selection](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/session/llm/request.ts),
 [native permission lifecycle](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/permission/index.ts).
+
+## Core plugin and native harness — 2026-10-17
+
+`src/opencode/iapeer-plugin.mjs` is the core-owned plugin. It is embedded in the
+binary as text and written to `<dir>/iapeer-plugin.mjs` before every launch. Its
+launch environment is `IAPEER_OPENCODE_DIR`, `PEER_IDENTITY`,
+`IAPEER_OPENCODE_LAUNCH_ID` and, for resume, `IAPEER_OPENCODE_SESSION`. It produces
+the observability ABI above and serves `<dir>/control.sock`
+(`src/opencode/control.ts`). The socket takes one JSON line per connection:
+- `ping` returns the identity, session and status;
+- `deliver {text}` acknowledges `{messageID}` only after the native
+  `message.updated` for that exact core-chosen ID is observed;
+- `interrupt` runs the native abort;
+- `select` publishes `tui.session.select`.
+
+Readiness runs after plugin init returns, because calling the in-process client
+during plugin loading would wait on the instance being built.
+
+`scripts/opencode-native-harness.ts` runs the real binary (`opencode serve`) with a
+synthetic provider and an isolated HOME and root. Run of 2026-10-17 on native 1.19.3:
+16/16 checks passed.
+- Readiness and ping.
+- Idle delivery acknowledged after persistence; doctrine on the wire.
+- A delivery during a running slow turn was acknowledged in 8 ms and processed after
+  that turn. The native queue is durable.
+- Interrupt.
+- Contiguous `seq` and the state fence.
+- Full process restart with `--session`: same session, `resumed=true`, `seq`
+  continues, the new doctrine replaces the old one, native `AGENTS.md` and earlier
+  history are kept.
+
+This proves the producer and plugin mechanics under `serve`. It does not prove the
+TUI-under-supervisor adapter, matrix rows or acceptance cycles.
+
+Native findings that bind the adapter:
+- **Cold config dir means npm on the critical path.** Before loading any external
+  plugin, OpenCode runs `npm install @opencode-ai/plugin@<version>` in each config
+  dir that lacks it (`Config.waitForDependencies`). On 17.10 this took about 60 s
+  on one run and hung for over 4 min on others: a single npm https connection
+  stalled. The adapter must install and verify this dependency at
+  `install-runtime`/update time, not on the wake path. The harness uses
+  `--seed-config` for offline determinism.
+- **`serve` builds the directory instance lazily** (on the first request); the TUI
+  does it at startup.
+- **A SIGTERM during startup can leave the process running.** It killed the npm
+  child, then initialization continued. Stop must escalate TERM → KILL. The plugin's
+  `dispose` does not run on a signal, so `runtime.stopped` for a signal death is the
+  supervisor's job.
 
 ## Delivery gate
 

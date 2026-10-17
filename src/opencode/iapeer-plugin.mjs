@@ -1,0 +1,283 @@
+// iapeer core plugin for OpenCode — the core writes this file before every launch
+// (src/opencode/iapeer-plugin.mjs in @agfpd/iapeer). Do not edit the installed copy.
+//
+// Responsibilities (docs/20-opencode.md):
+//   • the single PRODUCER of the observability ABI: events.jsonl (append-only,
+//     seq monotonic across restarts) + state.json (atomic; lastEventSeq is a fence);
+//   • the structural control surface: a unix socket the core uses for readiness,
+//     message delivery (acknowledged only once THIS message is persisted natively),
+//     interrupt and TUI session selection.
+// Plain ESM, no dependencies: it runs inside OpenCode's own server worker.
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { join } from 'node:path'
+
+const SCHEMA = 1
+const DELIVER_ACK_MS = 15000
+// Native events forwarded into the journal unchanged (type + properties).
+const JOURNALED = new Set([
+  'message.updated',
+  'message.removed',
+  'message.part.updated',
+  'message.part.removed',
+  'message.part.delta',
+  'session.status',
+  'session.idle',
+  'session.error',
+  'session.created',
+  'session.updated',
+  'session.compacted',
+  'permission.asked',
+  'permission.replied',
+])
+
+// Same layout as OpenCode's own ascending identifiers, so a core-chosen messageID
+// sorts correctly in the native history.
+const ID_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+let idLast = 0
+let idCounter = 0
+function ascendingId(prefix) {
+  const now = Date.now()
+  if (now !== idLast) {
+    idLast = now
+    idCounter = 0
+  }
+  idCounter++
+  const value = BigInt(now) * 0x1000n + BigInt(idCounter)
+  let time = ''
+  for (let i = 0; i < 6; i++) time += Number((value >> BigInt(40 - 8 * i)) & 0xffn).toString(16).padStart(2, '0')
+  const bytes = crypto.getRandomValues(new Uint8Array(14))
+  return prefix + '_' + time + Array.from(bytes, b => ID_CHARS[b % 62]).join('')
+}
+
+function sessionOf(type, p) {
+  if (!p || typeof p !== 'object') return null
+  if (typeof p.sessionID === 'string') return p.sessionID
+  if (p.info && typeof p.info.sessionID === 'string') return p.info.sessionID
+  if (p.part && typeof p.part.sessionID === 'string') return p.part.sessionID
+  if (type.startsWith('session.') && p.info && typeof p.info.id === 'string') return p.info.id
+  return null
+}
+
+/** Last `seq` in an existing journal: read only the tail (the journal never shrinks). */
+function lastSeq(path) {
+  if (!existsSync(path)) return 0
+  const fd = openSync(path, 'r')
+  try {
+    const size = fstatSync(fd).size
+    let span = 4096
+    while (true) {
+      const start = Math.max(0, size - span)
+      const buf = Buffer.alloc(size - start)
+      readSync(fd, buf, 0, buf.length, start)
+      const lines = buf.toString('utf8').split('\n').filter(Boolean)
+      // the first line may be cut unless we read from 0
+      for (let i = lines.length - 1; i >= (start === 0 ? 0 : 1); i--) {
+        try {
+          const seq = JSON.parse(lines[i]).seq
+          if (Number.isInteger(seq)) return seq
+        } catch {}
+      }
+      if (start === 0) return 0
+      span *= 4
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+async function server(input) {
+  const env = process.env
+  const dir = env.IAPEER_OPENCODE_DIR
+  const identity = env.PEER_IDENTITY
+  // Not launched by iapeer (or by an incompatible core): stay inert rather than guess.
+  if (!dir || !identity) return {}
+  const client = input.client
+  const launchID = env.IAPEER_OPENCODE_LAUNCH_ID || ascendingId('lch')
+  const paths = {
+    events: join(dir, 'events.jsonl'),
+    state: join(dir, 'state.json'),
+    socket: join(dir, 'control.sock'),
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+
+  let seq = lastSeq(paths.events)
+  const state = {
+    schema: SCHEMA,
+    identity,
+    cwd: input.directory,
+    sessionID: env.IAPEER_OPENCODE_SESSION || null,
+    launchID,
+    startedAt: Date.now(),
+    lastEventSeq: seq,
+    lastActivityMs: Date.now(),
+    status: 'starting',
+  }
+  function writeState() {
+    const tmp = paths.state + '.' + process.pid + '.tmp'
+    writeFileSync(tmp, JSON.stringify(state) + '\n', { mode: 0o600 })
+    renameSync(tmp, paths.state)
+  }
+  function journal(type, properties, nativeID, sessionID) {
+    seq++
+    const line = { schema: SCHEMA, seq, time: Date.now(), identity, launchID, sessionID: sessionID ?? null, type, properties, nativeID: nativeID ?? null }
+    appendFileSync(paths.events, JSON.stringify(line) + '\n', { mode: 0o600 })
+    state.lastEventSeq = seq // fence: the line above is on disk before the state write below
+    state.lastActivityMs = line.time
+  }
+
+  // ── session: exactly one per identity ──────────────────────────────────────
+  let ensuring
+  async function ensureSession() {
+    if (state.sessionID) return state.sessionID
+    ensuring ??= (async () => {
+      const res = await client.session.create({ body: { title: identity } })
+      if (!res.data || typeof res.data.id !== 'string') throw new Error('session.create failed: ' + JSON.stringify(res.error ?? null))
+      state.sessionID = res.data.id
+      return state.sessionID
+    })().finally(() => {
+      ensuring = undefined
+    })
+    return ensuring
+  }
+  async function selectInTui() {
+    if (!state.sessionID) return
+    await client.tui.publish({ body: { type: 'tui.session.select', properties: { sessionID: state.sessionID } } }).catch(() => {})
+  }
+
+  // ── message acknowledgements: resolved by the native persist event ──────────
+  const waiters = new Map()
+  function awaitPersisted(messageID) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        waiters.delete(messageID)
+        reject(new Error('message ' + messageID + ' not persisted within ' + DELIVER_ACK_MS + 'ms'))
+      }, DELIVER_ACK_MS)
+      waiters.set(messageID, () => {
+        clearTimeout(timer)
+        waiters.delete(messageID)
+        resolve()
+      })
+    })
+  }
+
+  async function handle(req) {
+    switch (req && req.op) {
+      case 'ping':
+        return { ok: true, identity, launchID, sessionID: state.sessionID, status: state.status, lastEventSeq: state.lastEventSeq }
+      case 'deliver': {
+        if (typeof req.text !== 'string' || !req.text) return { ok: false, error: 'deliver: empty text' }
+        const sessionID = await ensureSession()
+        const messageID = ascendingId('msg')
+        const persisted = awaitPersisted(messageID)
+        const res = await client.session.promptAsync({
+          path: { id: sessionID },
+          body: { messageID, agent: 'iapeer', parts: [{ type: 'text', text: req.text }] },
+        })
+        if (res.error) {
+          waiters.delete(messageID)
+          persisted.catch(() => {})
+          return { ok: false, error: 'prompt_async: ' + JSON.stringify(res.error) }
+        }
+        await persisted
+        return { ok: true, sessionID, messageID }
+      }
+      case 'interrupt': {
+        if (!state.sessionID) return { ok: false, error: 'no session' }
+        const res = await client.session.abort({ path: { id: state.sessionID } })
+        return res.error ? { ok: false, error: JSON.stringify(res.error) } : { ok: true }
+      }
+      case 'select':
+        await selectInTui()
+        return { ok: true, sessionID: state.sessionID }
+      default:
+        return { ok: false, error: 'unknown op ' + JSON.stringify(req && req.op) }
+    }
+  }
+
+  // ── control socket ──────────────────────────────────────────────────────────
+  rmSync(paths.socket, { force: true })
+  const control = createServer(conn => {
+    let buf = ''
+    conn.setEncoding('utf8')
+    conn.on('data', chunk => {
+      buf += chunk
+      const nl = buf.indexOf('\n')
+      if (nl < 0) return
+      const line = buf.slice(0, nl)
+      buf = ''
+      let req
+      try {
+        req = JSON.parse(line)
+      } catch {
+        conn.end(JSON.stringify({ ok: false, error: 'bad request' }) + '\n')
+        return
+      }
+      handle(req).then(
+        r => conn.end(JSON.stringify(r) + '\n'),
+        e => conn.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }) + '\n'),
+      )
+    })
+    conn.on('error', () => {})
+  })
+  await new Promise((resolve, reject) => {
+    control.once('error', reject)
+    control.listen(paths.socket, () => resolve())
+  })
+
+  // Readiness runs AFTER init returns: calling the in-process client while OpenCode is
+  // still loading this plugin would wait on the very instance state being built.
+  // The socket is up and the session is known (fresh: created now) → runtime.ready —
+  // the core's readiness signal, never a screen glyph.
+  setTimeout(async () => {
+    const resumed = Boolean(state.sessionID)
+    try {
+      const sessionID = await ensureSession()
+      const got = await client.session.get({ path: { id: sessionID } })
+      if (!got.data) throw new Error('session ' + sessionID + ' not found: ' + JSON.stringify(got.error ?? null))
+      if (state.status === 'starting') state.status = 'idle'
+      journal('runtime.ready', { session: got.data, resumed }, null, sessionID)
+    } catch (e) {
+      state.status = 'error'
+      state.error = e instanceof Error ? e.message : String(e)
+      journal('runtime.error', { error: state.error }, null, state.sessionID)
+    }
+    writeState()
+    // The TUI may not be subscribed yet; the core re-selects on demand via op:select.
+    setTimeout(() => void selectInTui(), 500)
+  }, 0)
+  writeState()
+
+  return {
+    event: async ({ event }) => {
+      const type = event && event.type
+      if (!JOURNALED.has(type)) return
+      const p = event.properties
+      const sessionID = sessionOf(type, p)
+      if (type === 'message.updated' && p && p.info && waiters.has(p.info.id)) waiters.get(p.info.id)()
+      if (sessionID && sessionID === state.sessionID) {
+        if (type === 'session.status' && p.status) {
+          state.status = p.status.type === 'busy' || p.status.type === 'retry' ? 'busy' : p.status.type === 'idle' ? 'idle' : state.status
+          delete state.error
+        } else if (type === 'session.idle') state.status = 'idle'
+        else if (type === 'permission.asked') state.status = 'approval'
+        else if (type === 'permission.replied' && state.status === 'approval') state.status = 'busy'
+        else if (type === 'session.error') {
+          state.status = 'error'
+          state.error = JSON.stringify(p.error ?? null)
+        }
+      }
+      journal(type, p, event.id ?? null, sessionID)
+      writeState()
+    },
+    dispose: async () => {
+      state.status = 'stopped'
+      journal('runtime.stopped', { reason: 'dispose' }, null, state.sessionID)
+      writeState()
+      await new Promise(resolve => control.close(() => resolve()))
+      rmSync(paths.socket, { force: true })
+    },
+  }
+}
+
+export default { id: 'iapeer', server }

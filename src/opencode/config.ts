@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isValidName } from '../core/constants.ts'
 import { resolveGlobalRoot, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
+import pluginSource from './iapeer-plugin.mjs' with { type: 'text' }
 
 export const OPENCODE_AGENT = 'iapeer'
 export const OPENCODE_EXTENSION_FRAGMENTS = ['iapeer-memory', 'statusline-injector'] as const
@@ -96,3 +97,6 @@ export function writeOpencodePlugin(personality: string, source: string, options
   writeFileAtomic(paths.plugin, source, 0o600)
   return paths.plugin
 }
+
+/** The core-owned plugin source shipped with this package (embedded in the compiled binary). */
+export const OPENCODE_PLUGIN_SOURCE: string = pluginSource
