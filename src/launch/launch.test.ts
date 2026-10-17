@@ -404,6 +404,16 @@ describe('claudeAdapter', () => {
     expect(claudeAdapter.bootDialogKeys('❯ ready')).toBeNull()
   })
 
+  test('bootDialogKeys: folder-trust with default on "No, exit" → Down, then Enter once on Yes', () => {
+    // claude 2.1.302 layout: a bare Enter here exits the peer.
+    const onNo = 'Quick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+    const onYes = 'Quick safety check: Is this a project you created or one you trust?\n  No, exit\n❯ Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+    expect(claudeAdapter.bootDialogKeys(onNo)).toEqual(['Down'])
+    expect(claudeAdapter.bootDialogKeys(onYes)).toEqual(['Enter'])
+    // legacy numbered layout with the default already on Yes → straight Enter
+    expect(claudeAdapter.bootDialogKeys('Do you trust this folder?\n❯ 1. Yes, proceed\n  2. No, exit')).toEqual(['Enter'])
+  })
+
   test('bootDialogKeys + isInputReady: clean-host theme picker is a boot dialog cleared by Enter', () => {
     // Verified live (claude 2.1.181, pty): a fresh-config host shows
     // "Let's get started. Choose the text style…" BEFORE the input prompt. Any theme

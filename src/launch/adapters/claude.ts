@@ -366,6 +366,13 @@ export const claudeAdapter: RuntimeAdapter = {
     if (pane.includes('Resume from summary') || pane.includes('Bypass Permissions mode')) {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
     }
+    // Folder-trust: older claude defaulted the cursor to "1. Yes, proceed", but 2.1.30x
+    // renders "❯ No, exit" / "Yes, I trust this folder" with the DEFAULT on exit — a bare
+    // Enter cleanly exits the peer (live: claude-boris child-exit 5s after first wake,
+    // 2026-10-17). Same discipline as Bypass: Enter only once the cursor is SEEN on Yes.
+    if (pane.includes('trust this folder') && /No,\s*exit/.test(pane)) {
+      return /❯\s*(?:\d\.\s*)?Yes\b/.test(pane) ? ['Enter'] : ['Down']
+    }
     if (
       pane.includes('trust this folder') ||
       pane.includes('Allow external CLAUDE.md file imports?') ||
