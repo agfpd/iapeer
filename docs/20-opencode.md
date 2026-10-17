@@ -221,6 +221,37 @@ Native findings that bind the adapter:
   `dispose` does not run on a signal, so `runtime.stopped` for a signal death is the
   supervisor's job.
 
+## Adapter under the pty supervisor — 2026-10-17
+
+`src/launch/adapters/opencode.ts` implements the structural adapter hooks
+(`RuntimeAdapter.prepareLaunch / structuralReady / deliver / control`,
+`deliveryConfirm: 'structural'`). Nothing reads the screen:
+- `prepareLaunch` writes the plugin, re-composes `OPENCODE_CONFIG_CONTENT` from
+  the freshly composed doctrine on every launch (resume included) and sets the
+  plugin env with a new `launchID`;
+- readiness is the `runtime.ready` line of **that** `launchID` written after the
+  prepare-time journal offset, plus a control ping answering the same `launchID`;
+- the first and every warm message go through `deliver`, whose ack means the
+  message is persisted natively; there is no composer hold and no pty paste;
+- `interrupt` is native abort; other control commands fail loud;
+- resume reads `state.json` `sessionID`; idle accounting reads
+  `state.lastActivityMs` (busy/approval count as activity now);
+- the supervisor records `runtime.stopped` + `status:stopped` on child exit and on
+  teardown (idempotent with a graceful dispose). Teardown SIGKILLs the child.
+
+`scripts/opencode-supervised-harness.ts` drives the real `launch()` with the
+native TUI hosted by the supervisor (isolated HOME/root, synthetic provider).
+Run of 2026-10-17 on native 1.19.3: 16/16 — cold READY in 3.5 s with the
+first message delivered; doctrine and native `AGENTS.md` on the wire; transport
+warm delivery idle and busy (busy acked in 6 ms, processed after the slow turn);
+interrupt; unsupported control refused; the TUI renders the core session;
+teardown → `runtime.stopped`; contiguous `seq`; resume on the same session with
+`resumed=true`, the new doctrine replacing the old, history kept.
+
+Still not proved here: fleet wake/reap through lifecycle, MCP to a live daemon,
+approval routing, memory slot, two simultaneous runtimes of one personality.
+OpenCode is not yet in `SUPPORTED_LOCAL_RUNTIMES` / discovery.
+
 ## Delivery gate
 
 Source changes and isolated native artifacts are allowed. npm publication and host
