@@ -14,6 +14,7 @@ import {
   daemonPlistPath,
   ensureDaemonStarted,
   installDaemonPlist,
+  plistEnvPath,
   makeArmEphemeralOnDelivered,
   makeEphemeralRouteDeps,
   makeNoteLiveTopic,
@@ -131,6 +132,21 @@ describe('buildDaemonPlistSpec / installDaemonPlist (com.agfpd.iapeer)', () => {
     // a CHANGED spec (different port → different rendered plist) DOES rewrite
     const third = installDaemonPlist({ env, port: 9999, throttleIntervalSecs: 10 })
     expect(third.changed).toBe(true)
+  })
+
+  test('PATH stable across deploys from DIFFERENT shells: second update is byte-identical (no BTM); explicit path still wins', () => {
+    const root = mkTmp()
+    const base = { IAPEER_LAUNCHAGENTS_DIR: join(root, 'LaunchAgents'), IAPEER_ROOT: join(root, 'iapeer'), HOME: root }
+    const first = installDaemonPlist({ env: { ...base, PATH: '/a/bin:/usr/bin:/bin' } as NodeJS.ProcessEnv, port: 8765, throttleIntervalSecs: 10 })
+    expect(first.changed).toBe(true)
+    const mtime1 = statSync(first.path).mtimeMs
+    const second = installDaemonPlist({ env: { ...base, PATH: '/other/shell/bin:/usr/bin' } as NodeJS.ProcessEnv, port: 8765, throttleIntervalSecs: 10 })
+    expect(second.changed).toBe(false)
+    expect(statSync(second.path).mtimeMs).toBe(mtime1)
+    expect(plistEnvPath(readFileSync(first.path, 'utf8'))).toBe('/a/bin:/usr/bin:/bin')
+    const forced = installDaemonPlist({ env: base as NodeJS.ProcessEnv, path: '/x&y/bin', port: 8765, throttleIntervalSecs: 10 })
+    expect(forced.changed).toBe(true)
+    expect(plistEnvPath(readFileSync(first.path, 'utf8'))).toBe('/x&y/bin') // XML-escaped round-trip
   })
 
   test('REFUSES to overwrite a foreign com.agfpd.iapeer.plist (collision guard)', () => {

@@ -2735,7 +2735,10 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             `  docs: ${docs.copied ? docs.dest : `skipped (${docs.reason})`}\n` +
             trayLine +
             `  daemon plist ${plistChanged ? 'written' : 'unchanged (byte-identical — no write, no BTM notification)'}: ${plist}\n` +
-            `  (NOT loaded — a live daemon migration is a separate step: launchctl bootstrap gui/$(id -u) ${plist})\n`,
+            (plistChanged
+              ? `  (install does not load it: \`iapeer update\` re-registers the daemon itself (bootout → bootstrap) right after this step; ` +
+                `a standalone install loads it with \`iapeer onboard\` or launchctl bootstrap gui/$(id -u) ${plist})\n`
+              : ''),
         )
         return 0
       }

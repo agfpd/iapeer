@@ -605,6 +605,14 @@ export interface InstallDaemonPlistResult {
  * com.agfpd.* is the foundation-exclusive daemon namespace, so this never
  * touches the com.iapeer.* persistent-peer fleet.
  */
+/** The EnvironmentVariables.PATH value of a rendered plist (XML-unescaped), or undefined. */
+export function plistEnvPath(xml: string): string | undefined {
+  const m = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(xml)
+  const v = m ? /<key>PATH<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(m[1]!) : null
+  if (!v) return undefined
+  return v[1]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+}
+
 export function installDaemonPlist(opts: InstallDaemonPlistOptions = {}): InstallDaemonPlistResult {
   const env = opts.env ?? process.env
   const path = daemonPlistPath(env)
@@ -614,7 +622,19 @@ export function installDaemonPlist(opts: InstallDaemonPlistOptions = {}): Instal
         `(no ownership sentinel) — another manager owns it`,
     )
   }
-  const rendered = renderLaunchdPlist(buildDaemonPlistSpec(opts))
+  // PATH STABILITY: buildDaemonPlistSpec defaults PATH to the INVOKING process's env.PATH, so every
+  // `iapeer update` run from a different shell rewrote the plist (a BTM notification each time, and a
+  // daemon PATH that silently followed whoever deployed last). The first install fixes the PATH; later
+  // installs keep the one on disk unless a caller passes `path` explicitly.
+  let keepPath: string | undefined
+  if (opts.path === undefined) {
+    try {
+      keepPath = plistEnvPath(readFileSync(path, 'utf8'))
+    } catch {
+      keepPath = undefined
+    }
+  }
+  const rendered = renderLaunchdPlist(buildDaemonPlistSpec(keepPath !== undefined ? { ...opts, path: keepPath } : opts))
   mkdirSync(launchAgentsDir(env), { recursive: true })
   mkdirSync(pluginLogsDir('iapeer', { env }), { recursive: true, mode: 0o700 })
   // Write-if-changed: a byte-identical rewrite is a pure no-op for the daemon but
