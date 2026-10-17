@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isValidName } from '../core/constants.ts'
-import { resolveGlobalRoot, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
+import { opencodePrivateDir, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
 import pluginSource from './iapeer-plugin.mjs' with { type: 'text' }
 import { listCapabilities } from '../capability/index.ts'
 
@@ -15,7 +15,7 @@ type JsonObject = Record<string, unknown>
 
 export function opencodePaths(personality: string, options: StorageOptions = {}) {
   if (!isValidName(personality)) throw new Error(`invalid OpenCode personality: ${personality}`)
-  const dir = join(options.rootDir ?? resolveGlobalRoot(options.env), 'peers', personality, 'opencode')
+  const dir = opencodePrivateDir(personality, options)
   return {
     dir,
     plugin: join(dir, 'iapeer-plugin.mjs'),

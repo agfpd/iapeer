@@ -440,7 +440,7 @@ export interface RuntimeAdapter {
 }
 
 /** Optional per-peer observation context for adapters whose state is personality-scoped (opencode keeps
- *  it under <root>/peers/<p>/opencode, not per-cwd). cwd-keyed runtimes ignore it. */
+ *  it under <root>/state/opencode/<p>, not per-cwd). cwd-keyed runtimes ignore it. */
 export interface ObserveContext {
   personality: string
   env?: NodeJS.ProcessEnv

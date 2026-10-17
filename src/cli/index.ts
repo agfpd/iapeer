@@ -928,6 +928,8 @@ export interface RemoveOutcome {
   /** Recipient-owned IAP attachment inbox cleanup. Completed attachment copies
    *  are state for the peer lifetime, so explicit peer removal owns their purge. */
   attachmentInbox?: string
+  /** OpenCode private state dir (<root>/state/opencode/<p>) removed with the peer. */
+  opencodeState?: string
 }
 
 /**
@@ -1041,11 +1043,11 @@ export async function removePeerCli(
           },
           { env },
         )
-        unprovisionOutcomes.push(`${rt}:${o.state}${o.state !== 'ok' && o.detail ? ` (${o.detail})` : ''}`)
+        unprovisionOutcomes.push(`memory/${rt}:${o.state}${o.state !== 'ok' && o.detail ? ` (${o.detail})` : ''}`)
       }
     }
   } catch (e) {
-    unprovisionOutcomes.push(`failed: ${e instanceof Error ? e.message : String(e)}`)
+    unprovisionOutcomes.push(`memory failed: ${e instanceof Error ? e.message : String(e)}`)
   }
   // Capability-plugin unprovision (docs/21) — same joint, same best-effort contract.
   try {
@@ -1101,12 +1103,27 @@ export async function removePeerCli(
   } catch (e) {
     attachmentInbox = `FAILED: ${e instanceof Error ? e.message : String(e)}`
   }
+  // OpenCode private state (journal, state, plugin, control socket, provider fragments) lives under
+  // <root>/state/opencode/<p>, outside the cwd — it must not outlive the peer and ambush a namesake.
+  // After unprovision above, so the memory/capability owners removed their own files first.
+  let opencodeState: string | undefined
+  try {
+    const { opencodePaths } = await import('../opencode/config.ts')
+    const dir = opencodePaths(personality, { env }).dir
+    if (existsSync(dir)) {
+      rmSync(dir, { recursive: true, force: true })
+      opencodeState = `removed ${dir}`
+    }
+  } catch (e) {
+    opencodeState = `FAILED: ${e instanceof Error ? e.message : String(e)}`
+  }
   return {
     personality,
     action: 'removed',
     cwd: peer.cwd,
     purgedState,
     ...(attachmentInbox ? { attachmentInbox } : {}),
+    ...(opencodeState ? { opencodeState } : {}),
     ...(plistTeardown ? { plistTeardown } : {}),
     ...(unprovisionOutcomes.length ? { unprovision: unprovisionOutcomes } : {}),
     ...(trustCleaned ? { codexTrust: trustCleaned } : {}),
@@ -2334,7 +2351,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           }
           // v1.2: the provider unwound its surfaces (occasion=remove) — say how it went.
           if (o.unprovision?.length) {
-            out(`memory unprovision: ${o.unprovision.join(', ')}\n`)
+            out(`unprovision: ${o.unprovision.join(', ')}\n`)
           }
           // Codex pre-trust cleanup — the cwd's trust entry must die with the peer.
           if (o.codexTrust) {
@@ -2349,6 +2366,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           if (o.purgedState?.length) {
             out(`lifecycle state purged: ${o.purgedState.join(', ')}\n`)
           }
+          if (o.opencodeState) out(`opencode state: ${o.opencodeState}\n`)
           if (o.attachmentInbox) {
             out(`attachment inbox: ${o.attachmentInbox}\n`)
           }

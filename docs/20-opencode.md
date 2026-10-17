@@ -37,7 +37,13 @@ as a silent no-op.
 - Existing slot `provision-peer --personality <p> --runtime opencode --cwd <cwd>`.
 - Canonical child ABI: `PEER_PERSONALITY`, `PEER_RUNTIME=opencode`,
   `PEER_IDENTITY=opencode-<p>`; `IAPEER_IDENTITY` is an alias set by the core.
-- Private directory: `<IAPEER_ROOT>/peers/<p>/opencode/` (default root `~/.iapeer`).
+- Private directory: `<IAPEER_ROOT>/state/opencode/<p>/` (default root `~/.iapeer`).
+  It lives under the core's `state/`, never in the agent's working tree (the default
+  peer cwd is `<root>/peers/<p>`). Moved there from `<root>/peers/<p>/opencode/` on
+  2026-10-17, before any release (no producer ever wrote the old path; it is not
+  read or migrated).
+  Provider and capability commands receive it from the core as `{privateDir}` and
+  `IAPEER_PRIVATE_DIR` (docs/21); they never compute it.
   Memory owns `iapeer-memory.json` and `iapeer-memory-plugin.mjs` there. The core
   reads the JSON fragment on each launch and merges its `mcp` and `plugin` fields
   into runtime overrides. Missing means no memory surfaces; malformed/present
@@ -58,7 +64,7 @@ a synthetic fixture as proof of the producer; the core ships a native source har
 The core is the **single producer**. Consumers read only these files, never the
 native OpenCode SQLite DB or a second SDK client:
 
-- `<IAPEER_ROOT>/peers/<p>/opencode/events.jsonl` — append-only journal, one JSON
+- `<IAPEER_ROOT>/state/opencode/<p>/events.jsonl` — append-only journal, one JSON
   object per line:
   `{schema:1, seq, time:<epoch ms>, identity:"opencode-<p>", launchID,
   sessionID:<native ses_…|null>, type, properties, nativeID:<event.id|null>}`.
@@ -84,7 +90,7 @@ native OpenCode SQLite DB or a second SDK client:
   - Per-peer plugin fragments merged into the launch config are the memory provider's
     plus those of every registered capability (docs/21). No plugin list is hardcoded.
   - Native bootstrap snapshots can repeat part ids, so consumers must **upsert parts by id**.
-- `<IAPEER_ROOT>/peers/<p>/opencode/state.json`, written atomically:
+- `<IAPEER_ROOT>/state/opencode/<p>/state.json`, written atomically:
   `{schema:1, identity, cwd, sessionID, launchID, startedAt, lastEventSeq,
   lastActivityMs, status:"starting|idle|busy|approval|error|stopped", error?}`.
   - `lastEventSeq` is a fence: every journal line with `seq ≤ lastEventSeq` is

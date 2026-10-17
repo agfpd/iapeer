@@ -6,7 +6,7 @@
 // attach surface), but the core never pastes into it.
 //
 // Per-launch preparation (prepareLaunch):
-//   • write the plugin source into <root>/peers/<p>/opencode/ (re-written every launch — the
+//   • write the plugin source into <root>/state/opencode/<p>/ (re-written every launch — the
 //     installed copy is never trusted to be current);
 //   • compose OPENCODE_CONFIG_CONTENT: the operator's opencode.json + inline env config, the memory
 //     and capability fragments, then the core-required fields (agent.iapeer.prompt = the freshly

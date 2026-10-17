@@ -95,7 +95,7 @@ describe('remove with a v1.2 provision slot', () => {
     await register('beta')
     const o = await removePeerCli('beta', { env: env() })
     expect(o.action).toBe('removed')
-    expect(o.unprovision).toEqual(['claude:ok'])
+    expect(o.unprovision).toEqual(['memory/claude:ok'])
     const { readFileSync } = await import('fs')
     const j = readFileSync(journal, 'utf8')
     expect(j).toContain('unprovision-peer')
@@ -332,6 +332,19 @@ describe('remove (registry record via the locked writer)', () => {
     expect(o.action).toBe('removed')
     expect(o.attachmentInbox).toContain('removed ')
     expect(existsSync(attachmentInboxDir('retired', e))).toBe(false)
+  })
+
+  test('remove purges the OpenCode private state dir (outside the cwd)', async () => {
+    await register('ocgone')
+    const e = env()
+    const { opencodePaths } = await import('../opencode/config.ts')
+    const p = opencodePaths('ocgone', { env: e })
+    expect(p.dir.startsWith(join(e.IAPEER_ROOT!, 'state', 'opencode'))).toBe(true)
+    mkdirSync(p.dir, { recursive: true })
+    writeFileSync(p.events, '{}\n')
+    const o = await removePeerCli('ocgone', { env: e })
+    expect(o.opencodeState).toContain('removed ')
+    expect(existsSync(p.dir)).toBe(false)
   })
 
   // PLIST TEARDOWN (boris 22.06): removing an always-on peer WITHOUT booting out + rm-ing

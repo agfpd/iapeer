@@ -31,6 +31,12 @@ reported loudly and never skipped silently.
 - `command` is an **absolute** path, because launchd's minimal PATH resolves nothing.
 - `args` is an argv tail. `{personality}`, `{runtime}`, `{cwd}` and `{occasion}` are
   substituted per argument, and **no shell** is involved.
+- `{privateDir}` is the core-owned private directory of the endpoint (OpenCode:
+  `<root>/state/opencode/<p>/`). It is also exported as `IAPEER_PRIVATE_DIR` to the
+  command for every runtime that has one. Plugins take the directory from the core
+  and never compute the layout themselves. `{privateDir}` on a runtime without one
+  is refused (`failed`) before spawn. A command that spans runtimes reads the env
+  variable instead.
 - Both commands must carry `{personality}`. Several personalities can share one cwd,
   and a command that cannot tell them apart would touch another peer's surfaces.
 
@@ -62,7 +68,7 @@ Failure handling:
 - **Idempotent** by construction. The core may repeat `birth`/`sweep-on` for an
   already-provisioned endpoint, for example on add-runtime repair or `sync`.
 - Surfaces are scoped by **personality and runtime**, not by cwd alone. For opencode
-  they live in the peer's private directory `<root>/peers/<p>/opencode/`, and the core
+  they live in the peer's private directory `<root>/state/opencode/<p>/`, and the core
   merges `<name>.json` fragments from there (docs/20).
 - Exit 0 only when the surfaces are in place. stderr is the failure detail the operator
   sees.

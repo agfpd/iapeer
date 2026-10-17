@@ -26,6 +26,25 @@ function fakeProvider(name: string, body?: string): string {
 }
 
 describe('runProvisionCommand (v1.2 executor)', () => {
+  test('{privateDir} + IAPEER_PRIVATE_DIR: the core-owned opencode dir, from the injected root', () => {
+    const cmd = fakeProvider('pd.sh', `printf '%s\\n' "$@" "$IAPEER_PRIVATE_DIR" > '${dir}/journal.txt'`)
+    const env = { PATH: process.env.PATH, IAPEER_ROOT: join(dir, 'root') }
+    const o = runProvisionCommand({ block: { command: cmd, args: ['--private-dir', '{privateDir}'] }, cwd: '/c', runtime: 'opencode', personality: 'alpha', occasion: 'birth', env })
+    expect(o.state).toBe('ok')
+    const want = join(dir, 'root', 'state', 'opencode', 'alpha')
+    expect(readFileSync(join(dir, 'journal.txt'), 'utf8').split('\n').slice(0, 3)).toEqual(['--private-dir', want, want])
+  })
+
+  test('{privateDir} on a runtime without one fails loud before spawn; env var absent there', () => {
+    const cmd = fakeProvider('pd2.sh', `printf '[%s]\\n' "$IAPEER_PRIVATE_DIR" > '${dir}/journal.txt'`)
+    const refused = runProvisionCommand({ block: { command: cmd, args: ['{privateDir}'] }, cwd: '/c', runtime: 'claude', personality: 'alpha', occasion: 'birth' })
+    expect(refused.state).toBe('failed')
+    expect(refused.detail).toMatch(/undefined for runtime "claude"/)
+    const plain = runProvisionCommand({ block: { command: cmd, args: [] }, cwd: '/c', runtime: 'claude', personality: 'alpha', occasion: 'birth', env: { PATH: process.env.PATH } })
+    expect(plain.state).toBe('ok')
+    expect(readFileSync(join(dir, 'journal.txt'), 'utf8').trim()).toBe('[]')
+  })
+
   test('per-arg substitution of {cwd}/{runtime}/{personality}/{occasion}, argv passed verbatim (no shell)', () => {
     const cmd = fakeProvider('prov.sh')
     const o = runProvisionCommand({

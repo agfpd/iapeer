@@ -16,7 +16,7 @@ describe('OpenCode private config contract', () => {
   test('personality scopes are distinct even for a shared cwd; rootDir wins over env', () => {
     const a = opencodePaths('one', { rootDir: '/isolated', env: { IAPEER_ROOT: '/wrong' } })
     const b = opencodePaths('two', { rootDir: '/isolated' })
-    expect(a.dir).toBe('/isolated/peers/one/opencode')
+    expect(a.dir).toBe('/isolated/state/opencode/one')
     expect(b.dir).not.toBe(a.dir)
     expect(() => opencodePaths('../escape')).toThrow()
   })

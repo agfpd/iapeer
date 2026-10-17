@@ -375,3 +375,13 @@ export function resolveDaemonMcpUrl(options: StorageOptions = {}): string {
   const port = env.IAPEER_PORT?.trim() || String(DEFAULT_DAEMON_MCP_PORT)
   return `http://127.0.0.1:${port}/mcp`
 }
+
+/**
+ * The core-owned private directory of an OpenCode endpoint: <root>/state/opencode/<personality>.
+ * The SINGLE layout authority — opencodePaths and the provider/capability command placeholder
+ * {privateDir} both resolve through it. Runtime state of the core lives under state/, never in the
+ * agent's working tree (the default peer cwd is <root>/peers/<p>).
+ */
+export function opencodePrivateDir(personality: string, options: StorageOptions = {}): string {
+  return join(options.rootDir ?? resolveGlobalRoot(options.env), STATE_DIR, 'opencode', personality)
+}
