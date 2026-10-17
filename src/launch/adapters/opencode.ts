@@ -87,6 +87,9 @@ export const opencodeAdapter: RuntimeAdapter = {
       IAPEER_OPENCODE_DIR: p.dir,
       IAPEER_OPENCODE_LAUNCH_ID: launchID,
       IAPEER_IDENTITY: spec.identity,
+      // A fleet peer never self-updates (config autoupdate:false says the same; the flag also covers
+      // native paths that read only the env). Updates are an operator action.
+      OPENCODE_DISABLE_AUTOUPDATE: '1',
     }
     if (spec.resume && spec.resumeRef) out.IAPEER_OPENCODE_SESSION = spec.resumeRef
     return { env: out, readyToken: launchID }

@@ -42,6 +42,8 @@ const env: NodeJS.ProcessEnv = {
   XDG_STATE_HOME: join(home, 'state'),
   OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true',
   OPENCODE_DISABLE_MODELS_FETCH: 'true',
+  // a fresh HOME makes any native `brew` probe auto-update over the network
+  HOMEBREW_NO_AUTO_UPDATE: '1',
 }
 for (const k of Object.keys(process.env)) delete process.env[k]
 Object.assign(process.env, env)

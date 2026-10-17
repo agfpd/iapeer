@@ -269,7 +269,23 @@ plugin-dependency no-op in every OpenCode config dir (`src/opencode/deps.ts`:
 `opencode --version`). A failure aborts before the runtime is registered. Real
 npm, isolated HOME: installed in 11 s, the repeat is `present` with no network.
 
-Still not proved here: MCP to a live daemon,
+`scripts/opencode-mcp-harness.ts` runs a sandboxed daemon in-process with two
+registered opencode peers. Run of 2026-10-17: 10/10. The core MCP is imported
+(`iapeer_send_to_peer` offered next to native `bash`); the model's native `bash`
+call runs; its `send_to_peer` call reaches the daemon with OpenCode's identity
+header, wakes the receiver on miss and delivers through the structural path. The
+receiver sees `<iap from="ocsend" runtime="opencode" …>`, the tool result is
+`ok` with `delivered_to.runtime: opencode`, the sender's journal has completed
+tool parts, and `delivery.log` records the send.
+
+Observation (not closed): on startup the native TUI may detect its install method
+by probing package managers (`npm/yarn/pnpm/bun list -g`, `brew list`) unless
+the binary lives in `~/.opencode/bin` or `~/.local/bin`. With a fresh HOME a
+`brew` probe auto-updates over the network. The adapter sets
+`OPENCODE_DISABLE_AUTOUPDATE=1`; the official installer location avoids the
+probes entirely.
+
+Still not proved here: a live daemon on the host,
 approval routing, memory slot, two simultaneous runtimes of one personality.
 Since the commit after this proof, `opencode` is a supported local agent runtime:
 listed in `host.agent_runtimes` (docs/15), accepted by `add-runtime`/`create
