@@ -278,12 +278,28 @@ receiver sees `<iap from="ocsend" runtime="opencode" …>`, the tool result is
 `ok` with `delivered_to.runtime: opencode`, the sender's journal has completed
 tool parts, and `delivery.log` records the send.
 
+Gated approval (OC10). Native 1.19.3 declares but never calls the
+`permission.ask` plugin hook, so the bridge rides the `permission.asked` event.
+Under `approval_mode: gated` the launch omits `--auto`, sets agent-level ask
+rules (`bash`, `edit`, `webfetch`, `external_directory`, `doom_loop` — reads,
+search and the core MCP stay allowed, as on gated claude; agent-level so an
+operator `permission: {"*":"allow"}` cannot undo them), and the plugin POSTs
+each native ask to `/fleet/v1/approvals` (`runtime: opencode`, `tool` = native
+permission, summary = permission + patterns), then answers natively
+(`once`/`reject`). Every failure direction rejects. A human who answers the
+native TUI prompt first wins: `permission.replied` aborts the broker request and
+the card is withdrawn from every face. `approval-mode` reports a launch-time
+surface only (nothing persistent). `scripts/opencode-gated-harness.ts`, run of
+2026-10-17: 13/13 — allow runs the command, deny does not and the model sees the
+rejection, broker timeout default-denies and clears the card, a TUI answer
+withdraws the card with exactly one native reply, `approvals.log` audits each.
+
 Observation (not closed): on startup the native TUI may detect its install method
 by probing package managers (`npm/yarn/pnpm/bun list -g`, `brew list`) unless
 the binary lives in `~/.opencode/bin` or `~/.local/bin`. With a fresh HOME a
 `brew` probe auto-updates over the network. The adapter sets
-`OPENCODE_DISABLE_AUTOUPDATE=1`; the official installer location avoids the
-probes entirely.
+`OPENCODE_DISABLE_AUTOUPDATE=1`. **Install OpenCode only with the official
+installer** (binary in `~/.opencode/bin`): that location skips the probes.
 
 Still not proved here: a live daemon on the host,
 approval routing, memory slot, two simultaneous runtimes of one personality.

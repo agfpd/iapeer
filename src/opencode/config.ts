@@ -67,7 +67,15 @@ export interface ComposeOpencodeConfigInput {
   daemonUrl: string
   /** Existing OPENCODE_CONFIG_CONTENT. It is merged, never discarded. */
   inline?: string
+  /** docs/17. gated → the iapeer agent ASKS before exec/mutation/web (bash, edit, webfetch), and the
+   *  plugin bridges each native ask to the human broker. yolo (default) adds nothing (`--auto`). */
+  approvalMode?: 'yolo' | 'gated'
 }
+
+/** Gated ask rules — the claude/codex «ask before acting» set mapped onto OpenCode permissions.
+ *  Agent-level, so an operator's top-level `permission: {"*":"allow"}` cannot silently undo it. Reads,
+ *  search and the core MCP stay allowed (as on gated claude). */
+export const OPENCODE_GATED_PERMISSION = { bash: 'ask', edit: 'ask', webfetch: 'ask', external_directory: 'ask', doom_loop: 'ask' } as const
 
 /** No writes and no env resolution except through injected StorageOptions. */
 export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options: StorageOptions = {}): JsonObject {
@@ -88,7 +96,13 @@ export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options
     autoupdate: false,
     share: 'disabled',
     default_agent: OPENCODE_AGENT,
-    agent: { [OPENCODE_AGENT]: { mode: 'primary', prompt: input.doctrine } },
+    agent: {
+      [OPENCODE_AGENT]: {
+        mode: 'primary',
+        prompt: input.doctrine,
+        ...(input.approvalMode === 'gated' ? { permission: { ...OPENCODE_GATED_PERMISSION } } : {}),
+      },
+    },
     mcp: { iapeer: { type: 'remote', url: input.daemonUrl, enabled: true, oauth: false, headers: { 'X-IAPeer-Identity': '{env:PEER_IDENTITY}' } } },
     plugin: [pathToFileURL(paths.plugin).href],
   })

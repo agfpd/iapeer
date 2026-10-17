@@ -195,6 +195,54 @@ async function server(input) {
     }
   }
 
+  // ── human approval (gated, docs/17 + docs/20 OC10) ───────────────────────────
+  // Native 1.19.3 never calls the `permission.ask` plugin hook, so the bridge rides the
+  // `permission.asked` event: a blocking broker request per native permission, answered back
+  // through the native reply route. Every failure direction is reject (fail-safe). A human who
+  // answers the native TUI prompt first wins: `permission.replied` aborts the broker request,
+  // the daemon sees the transport close and clears the card from every face.
+  const gated = env.IAPEER_APPROVAL_MODE === 'gated'
+  const fleetUrl = env.IAPEER_FLEET_URL
+  const approvals = new Map()
+  const clip = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s)
+  function approvalCard(p) {
+    const patterns = Array.isArray(p.patterns) ? p.patterns.map(String) : []
+    const meta = p.metadata && typeof p.metadata === 'object' ? p.metadata : {}
+    const head = patterns.join('\n') || String(p.permission)
+    const extra = Object.keys(meta).length ? '\n\n' + clip(JSON.stringify(meta, null, 2), 6000) : ''
+    return { tool: String(p.permission), content: clip(head, 2000) + extra, summary: clip(`${p.permission}: ${patterns.join(' ') || '?'}`, 200) }
+  }
+  async function replyNative(p, response) {
+    await client
+      .postSessionIdPermissionsPermissionId({ path: { id: p.sessionID, permissionID: p.id }, body: { response } })
+      .catch(() => {}) // already answered (human in the TUI) → native NotFound; nothing to do
+  }
+  async function brokerApproval(p) {
+    const controller = new AbortController()
+    approvals.set(p.id, controller)
+    let response = 'reject'
+    try {
+      if (!fleetUrl) throw new Error('no IAPEER_FLEET_URL')
+      const headers = { 'content-type': 'application/json' }
+      if (env.IAPEER_BEARER_TOKEN) headers.authorization = 'Bearer ' + env.IAPEER_BEARER_TOKEN
+      const card = approvalCard(p)
+      const res = await fetch(fleetUrl + '/fleet/v1/approvals', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ personality: env.PEER_PERSONALITY, runtime: 'opencode', kind: 'tool', ...card }),
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error('broker ' + res.status)
+      const d = await res.json()
+      if (d && d.decision === 'allow') response = 'once'
+    } catch (e) {
+      if (controller.signal.aborted) return // the human answered natively; never double-reply
+    } finally {
+      approvals.delete(p.id)
+    }
+    await replyNative(p, response)
+  }
+
   // ── control socket ──────────────────────────────────────────────────────────
   rmSync(paths.socket, { force: true })
   const control = createServer(conn => {
@@ -255,6 +303,8 @@ async function server(input) {
       const p = event.properties
       const sessionID = sessionOf(type, p)
       if (type === 'message.updated' && p && p.info && waiters.has(p.info.id)) waiters.get(p.info.id)()
+      if (gated && type === 'permission.asked' && p && typeof p.id === 'string' && !approvals.has(p.id)) void brokerApproval(p)
+      if (type === 'permission.replied' && p && approvals.has(p.requestID)) approvals.get(p.requestID).abort()
       if (sessionID && sessionID === state.sessionID) {
         if (type === 'session.status' && p.status) {
           state.status = p.status.type === 'busy' || p.status.type === 'retry' ? 'busy' : p.status.type === 'idle' ? 'idle' : state.status
@@ -271,6 +321,7 @@ async function server(input) {
       writeState()
     },
     dispose: async () => {
+      for (const c of approvals.values()) c.abort()
       state.status = 'stopped'
       journal('runtime.stopped', { reason: 'dispose' }, null, state.sessionID)
       writeState()

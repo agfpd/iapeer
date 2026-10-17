@@ -203,6 +203,14 @@ export function setApprovalMode(cwd: string, mode: ApprovalMode, env: NodeJS.Pro
           ? `codex: native modal + supervisor proxy, no broker hook${removed ? ' (cleared prior hook)' : ''}`
           : `codex: ${removed ? 'hooks.json + trust removed' : 'trust cleared (no hooks.json)'}`,
       )
+    } else if (rt === 'opencode') {
+      // No persistent surface: argv (--auto), the agent's ask rules and the plugin's broker bridge are
+      // all composed at launch from this profile field (docs/20 OC10).
+      surfaces.push(
+        mode === 'gated'
+          ? 'opencode: launch-time ask rules + plugin broker bridge (no persistent surface)'
+          : 'opencode: launch-time --auto (no persistent surface)',
+      )
     }
   }
   return { mode, surfaces }

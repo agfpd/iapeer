@@ -75,6 +75,17 @@ describe('opencode adapter — prepareLaunch', () => {
     expect(a.env.IAPEER_OPENCODE_SESSION).toBeUndefined()
     expect(a.readyToken).not.toBe(b.readyToken)
   })
+  test('gated: agent ask rules + broker bridge env; yolo: none', () => {
+    const g = opencodeAdapter.prepareLaunch!(spec({ approvalMode: 'gated' }), {}, { claudeBin: 'c', codexBin: 'x', env })
+    expect(g.env.IAPEER_APPROVAL_MODE).toBe('gated')
+    expect(g.env.IAPEER_FLEET_URL).toBe('http://127.0.0.1:9911')
+    expect(JSON.parse(g.env.OPENCODE_CONFIG_CONTENT!).agent.iapeer.permission).toMatchObject({ bash: 'ask', edit: 'ask', webfetch: 'ask' })
+    const y = opencodeAdapter.prepareLaunch!(spec(), { OPENCODE_CONFIG_CONTENT: '{"agent":{"iapeer":{"permission":{"bash":"allow"}}}}' }, { claudeBin: 'c', codexBin: 'x', env })
+    expect(y.env.IAPEER_APPROVAL_MODE).toBe('yolo')
+    expect(JSON.parse(y.env.OPENCODE_CONFIG_CONTENT!).agent.iapeer.permission).toEqual({ bash: 'allow' }) // foreign kept on yolo
+    const g2 = opencodeAdapter.prepareLaunch!(spec({ approvalMode: 'gated' }), { OPENCODE_CONFIG_CONTENT: '{"agent":{"iapeer":{"permission":{"bash":"allow"}}}}' }, { claudeBin: 'c', codexBin: 'x', env })
+    expect(JSON.parse(g2.env.OPENCODE_CONFIG_CONTENT!).agent.iapeer.permission.bash).toBe('ask') // gated is last writer
+  })
   test('missing composed prompt fails loud', () => {
     expect(() => opencodeAdapter.prepareLaunch!(spec({ systemPromptFile: join(root, 'nope.md') }), {}, { claudeBin: 'c', codexBin: 'x', env })).toThrow(/system prompt missing/)
   })

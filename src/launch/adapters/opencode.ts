@@ -23,6 +23,7 @@ import { composeOpencodeConfig, OPENCODE_AGENT, OPENCODE_PLUGIN_SOURCE, opencode
 import { opencodeControl } from '../../opencode/control.ts'
 import { fileMtimeMs, readJournalFrom, readOpencodeState } from '../../opencode/journal.ts'
 import { resolveDaemonMcpUrl } from '../../storage/index.ts'
+import { resolveFleetBase } from '../../approval/brokerClient.ts'
 import type {
   ApprovalMode,
   ControlCommand,
@@ -77,7 +78,13 @@ export const opencodeAdapter: RuntimeAdapter = {
     const p = paths(spec.personality, env)
     writeOpencodePlugin(spec.personality, OPENCODE_PLUGIN_SOURCE, { env })
     const config = composeOpencodeConfig(
-      { personality: spec.personality, doctrine, daemonUrl: resolveDaemonMcpUrl({ env }), inline: baseEnv.OPENCODE_CONFIG_CONTENT },
+      {
+        personality: spec.personality,
+        doctrine,
+        daemonUrl: resolveDaemonMcpUrl({ env }),
+        inline: baseEnv.OPENCODE_CONFIG_CONTENT,
+        approvalMode: spec.approvalMode ?? 'yolo',
+      },
       { env },
     )
     const launchID = newLaunchID()
@@ -90,6 +97,9 @@ export const opencodeAdapter: RuntimeAdapter = {
       // A fleet peer never self-updates (config autoupdate:false says the same; the flag also covers
       // native paths that read only the env). Updates are an operator action.
       OPENCODE_DISABLE_AUTOUPDATE: '1',
+      // docs/17: the plugin bridges native permission asks to the daemon broker only when gated.
+      IAPEER_APPROVAL_MODE: spec.approvalMode ?? 'yolo',
+      IAPEER_FLEET_URL: resolveFleetBase(env),
     }
     if (spec.resume && spec.resumeRef) out.IAPEER_OPENCODE_SESSION = spec.resumeRef
     return { env: out, readyToken: launchID }
