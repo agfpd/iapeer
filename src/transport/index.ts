@@ -331,7 +331,16 @@ export async function deliverWarm(
   // receives the WIRE form its parser expects. Rendered BEFORE deliverViaHost so
   // the transcript-confirm matches the text actually delivered. fail-open inside
   // the renderer: a render problem degrades to the wire form, never to a loss.
-  const payload = isSupportedLocalRuntime(target.runtime) ? renderEnvelopeForAgent(envelope) : envelope
+  // Agent = a model reads the text: every TUI-kind adapter (claude/codex/opencode), not the local
+  // support list (an adapter can exist before its runtime is advertised for discovery).
+  const agentTarget = (() => {
+    try {
+      return getAdapter(target.runtime).kind === 'tui'
+    } catch {
+      return isSupportedLocalRuntime(target.runtime)
+    }
+  })()
+  const payload = agentTarget ? renderEnvelopeForAgent(envelope) : envelope
   const address = target.address
   const prev = deliverTails.get(address) ?? Promise.resolve()
   // run AFTER prev settles (success or failure) — a prior delivery's error must not stall the chain
@@ -357,6 +366,16 @@ async function deliverViaHost(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Result<void>> {
   const adapter = getAdapter(target.runtime)
+  // STRUCTURAL runtime (opencode): no pty paste at all — the adapter's deliver acknowledges only once
+  // THIS message is persisted natively (docs/20), so its ack IS the message-specific landed-confirm.
+  if (adapter.deliveryConfirm === 'structural') {
+    if (!adapter.deliver) return err(`runtime "${target.runtime}" declares structural delivery without a deliver hook`)
+    const r = await adapter.deliver({ personality: target.personality, identity: target.address }, envelope, env)
+    if (!r.ok) {
+      return err(`peer "${target.personality}" (${target.runtime}) deliver failed: ${r.error ?? 'unknown error'}; message NOT delivered`)
+    }
+    return ok(undefined)
+  }
   // Baseline the transcript/session-jsonl file SIZES BEFORE delivery (per-runtime candidate files).
   // The landed-confirm reads ONLY the bytes appended past this baseline, so a record carrying our
   // envelope can only be one written in RESPONSE to this delivery — never a pre-existing copy.
@@ -923,7 +942,13 @@ export async function executeControlOnTarget(
   command: ControlCommand,
   seam: ControlHostSeam = {},
 ): Promise<Result<void>> {
-  const plan = getAdapter(target.runtime).executeControl(command)
+  const adapter = getAdapter(target.runtime)
+  // Structural runtime (opencode): control goes through the runtime's native channel, never pty keys.
+  if (adapter.control) {
+    const r = await adapter.control({ personality: target.personality, identity: target.address }, command, process.env)
+    return r.ok ? ok(undefined) : err(`control "${command.name}" failed for "${target.personality}" (${target.runtime}): ${r.error ?? 'unknown error'}`)
+  }
+  const plan = adapter.executeControl(command)
   if (!plan) {
     return err(`runtime "${target.runtime}" does not support control command "${command.name}"`)
   }
@@ -1203,6 +1228,8 @@ function delay(ms: number): Promise<void> {
  *  held. No pane-log dir / unreadable model → don't hold (deliver, never stall). */
 async function shouldQueueForComposer(target: DeliveryTarget, logDir: string | undefined): Promise<boolean> {
   if (!isSupportedLocalRuntime(target.runtime) || !hasAttachedSupervisorClient(target.address)) return false
+  // A structural runtime never shares the human's composer (delivery bypasses the pty) → never hold.
+  if (getAdapter(target.runtime).deliveryConfirm === 'structural') return false
   if (!logDir) return false // no pane-log dir → cannot read occupancy → don't hold (deliver, never stall)
   return paneLogComposerOccupied(`${logDir}/${target.address}.log`, hostGeometry(target.address).cols, hostGeometry(target.address).rows, target.runtime)
 }

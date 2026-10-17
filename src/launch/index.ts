@@ -25,6 +25,7 @@ import { telegramAdapter } from './adapters/telegram.ts'
 import { notifierAdapter } from './adapters/notifier.ts'
 import { voicetalkAdapter } from './adapters/voicetalk.ts'
 import { webAdapter } from './adapters/web.ts'
+import { opencodeAdapter } from './adapters/opencode.ts'
 import type {
   LaunchConfig,
   LaunchFn,
@@ -97,6 +98,7 @@ export function getAdapter(runtime: Runtime): RuntimeAdapter {
   if (runtime === 'notifier') return notifierAdapter
   if (runtime === 'voicetalk') return voicetalkAdapter
   if (runtime === 'web') return webAdapter
+  if (runtime === 'opencode') return opencodeAdapter
   throw new Error(`no launch adapter for runtime "${runtime}"`)
 }
 
@@ -189,6 +191,19 @@ export const launch: LaunchFn = async (
   // loads here, default-on — and the router branch never reaches it).
   if (adapter.kind === 'tui' || adapter.kind === 'router') {
     const invocation = buildLaunchInvocation(spec, adapter, cfg)
+    // Structural runtimes (opencode) prepare launch artifacts + extra env BEFORE spawn. The identity
+    // ABI stays authoritative: prepared env never overrides PEER_PERSONALITY/RUNTIME/IDENTITY.
+    let readyToken: string | undefined
+    if (adapter.prepareLaunch) {
+      try {
+        const prepared = adapter.prepareLaunch(spec, invocation.env, cfg)
+        const { PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY } = invocation.env
+        invocation.env = { ...invocation.env, ...prepared.env, PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY }
+        readyToken = prepared.readyToken
+      } catch (e) {
+        return fail(identity, `launch preparation failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
     mkdirSync(cfg.logDir, { recursive: true, mode: 0o700 }) // the supervisor writes the pane-log here
     const paneLogPath = `${cfg.logDir}/${identity}.log`
     // SESSION-START BOUNDARY (premature-ready fix): the pane-log is a SHARED append-only file across a
@@ -219,6 +234,18 @@ export const launch: LaunchFn = async (
         if (hostSessionAlive(identity, env)) return ready(identity)
         return fail(identity, 'hosted router session not alive immediately after bringup')
       }
+      // STRUCTURAL runtime (opencode): readiness = the runtime's own ready record for THIS launch, and
+      // the first message goes through the adapter's deliver, whose ack means THIS message is persisted
+      // natively (a durable native queue) — so there is no pane gate and no activity ready-gate.
+      if (adapter.structuralReady && readyToken) {
+        const r = await adapter.structuralReady(spec, readyToken, Date.now() + cfg.bootDeadlineSecs * 1000, () => hostSessionAlive(identity, env), env)
+        if (!r.ok) return fail(identity, `never-became-ready (structural: ${r.reason ?? 'unknown'})`)
+        if (firstMessage.trim().length === 0) return ready(identity)
+        if (!adapter.deliver) return fail(identity, 'structural runtime has no deliver hook')
+        const d = await adapter.deliver({ personality: spec.personality, identity }, firstMessage, env)
+        if (!d.ok) return fail(identity, `structural deliver failed: ${d.error}`)
+        return ready(identity)
+      }
       // BOOT: the supervisor's boot-driver dismisses startup dialogs internally; wait for the input
       // surface via the pane-log model, then deliver over the socket + ready-gate on a model turn —
       // the SAME shape as the tmux boot/deliver/ready-gate below, with host equivalents.
@@ -234,7 +261,7 @@ export const launch: LaunchFn = async (
       // alone push mtime past the baseline, so the gate below fires on the boot write — NOT on the
       // model PROCESSING firstMessage — returning ready/taskDelivered while the message is unseen
       // (silent loss). Snapped here — post-boot, pre-deliver — only the model's own turn advances it.
-      const baselineMtime = adapter.newestActivityMtime(cwd) ?? 0
+      const baselineMtime = adapter.newestActivityMtime(cwd, { personality: spec.personality, env }) ?? 0
       // INSTRUMENTATION (premature-ready diagnosis): record the session-start boundary and how much THIS
       // session had written into the shared pane-log by the time the ready-gate fired. On a recurrence,
       // paneLogBytes ≈ paneLogStartByte (ready seen though the new session wrote ~nothing) localizes a
@@ -255,7 +282,7 @@ export const launch: LaunchFn = async (
       while (Date.now() < readyDeadline) {
         await sleep(2000)
         if (!hostSessionAlive(identity, env)) return fail(identity, 'hosted session vanished during ready-gate')
-        if ((adapter.newestActivityMtime(cwd) ?? 0) > baselineMtime) return ready(identity)
+        if ((adapter.newestActivityMtime(cwd, { personality: spec.personality, env }) ?? 0) > baselineMtime) return ready(identity)
       }
       return fail(identity, 'model-did-not-process-task (hosted: no activity advance after delivery)')
     }

@@ -154,7 +154,7 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
     let bestMt = -1
     for (const rt of peer.runtimes) {
       try {
-        const mt = getAdapter(rt).newestActivityMtime(peer.cwd)
+        const mt = getAdapter(rt).newestActivityMtime(peer.cwd, { personality: peer.personality, env })
         if (mt !== null && mt > bestMt) {
           bestMt = mt
           lastActive = rt

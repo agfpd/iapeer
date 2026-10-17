@@ -143,6 +143,8 @@ export interface LaunchAdapterConfig {
   voicetalkBin?: string
   /** web-runtime launch binary (router runtime, infra/always-on — the owner's browser fleet-console). */
   webBin?: string
+  /** OpenCode native TUI binary (agent runtime, docs/20). Absent → `opencode` on PATH. */
+  opencodeBin?: string
 }
 
 export interface LaunchSpec {
@@ -283,8 +285,11 @@ export interface RuntimeAdapter {
    *     transcript grace here only ever FALSE-FAILs a message that WILL be processed,
    *     wrongly escalating to a fallback peer. A genuinely dead session still fails
    *     at the socket-ack (no socket / stalled flush) → really-dead still escalates.
+   *   - 'structural' (opencode): the runtime has NO pty submit surface at all — delivery goes through
+   *     the adapter's own `deliver` hook (a native control channel) whose acknowledgement already means
+   *     THIS message was persisted natively. deliverViaHost calls `deliver` instead of the pty paste.
    */
-  deliveryConfirm?: 'transcript' | 'socket-ack'
+  deliveryConfirm?: 'transcript' | 'socket-ack' | 'structural'
 
   /**
    * If set, launch REFUSES unless the peer's intelligence is IN this set (fail-loud —
@@ -381,13 +386,13 @@ export interface RuntimeAdapter {
   /** Newest activity-proxy FILE mtime — used by the READY-GATE (it waits for ANY transcript write past
    *  baseline = "the model produced its first turn"). NOT for idle accounting: a live session re-saves
    *  this file without a new entry, so it is falsely fresh at idle. null for a router (no proxy). */
-  newestActivityMtime(cwd: string): number | null
+  newestActivityMtime(cwd: string, ctx?: ObserveContext): number | null
 
   /** Content-timestamp (epoch ms) of the LAST meaningful transcript ENTRY — the reliable IDLE-accounting
    *  signal. Unlike newestActivityMtime (file mtime, re-touched at idle) and the pane-log mtime (a
    *  statusline re-render ticks it at idle), the entry stream only advances on real turn activity.
    *  superviseTick uses THIS for idle/quiet age. null for a router (no transcript). */
-  lastTurnMtime(cwd: string): number | null
+  lastTurnMtime(cwd: string, ctx?: ObserveContext): number | null
 
   /** В58 — newest FILE mtime among the session's CHILD workflow/subagent transcripts (a running workflow
    *  writes them continuously). A peer that launched a long workflow (>1h) makes NO turns of its own, so
@@ -398,7 +403,7 @@ export interface RuntimeAdapter {
 
   /** Resume preflight — validate a resume request fail-loud (never silent fresh).
    *  Returns the resolved ref (claude uuid) or ok:false with a reason. */
-  resolveResume(cwd: string): { ok: boolean; ref?: string; reason?: string }
+  resolveResume(cwd: string, ctx?: ObserveContext): { ok: boolean; ref?: string; reason?: string }
 
   /**
    * Map an abstract in-session control command to this runtime's mechanism (a tmux
@@ -411,6 +416,39 @@ export interface RuntimeAdapter {
    * interrupt / drive a possibly-stuck session, exactly when normal delivery wouldn't.
    */
   executeControl(command: ControlCommand): ControlPlan | null
+
+  // ── Structural runtime hooks (docs/20 — OpenCode). All optional; a pty-glyph runtime (claude/codex)
+  // omits every one and launch/transport stay byte-identical for it. ─────────────────────────────────
+
+  /** Pre-spawn preparation (writes runtime-owned launch artifacts, e.g. the core plugin) → extra child
+   *  env merged into the composed invocation BEFORE the identity ABI. `baseEnv` is the composed child env
+   *  (base + launch.env) so an operator inline config is merged, not discarded. `readyToken` identifies
+   *  THIS process launch for structuralReady (e.g. a launchID). Throws → launch FAILS loud. */
+  prepareLaunch?(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv, cfg: LaunchAdapterConfig & { env?: NodeJS.ProcessEnv }): PreparedLaunch
+
+  /** Structural readiness replacing the pane-glyph gate: resolves when the runtime itself reported
+   *  readiness for `readyToken` (fail on deadline / reported error / `alive()` false). */
+  structuralReady?(spec: LaunchSpec, readyToken: string, deadlineMs: number, alive: () => boolean, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; reason?: string }>
+
+  /** Structural delivery (deliveryConfirm 'structural'): resolves ok only when THIS message is accepted
+   *  and persisted by the runtime. */
+  deliver?(target: { personality: string; identity: string }, text: string, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; error?: string; messageID?: string }>
+
+  /** Structural in-session control (interrupt, …). A runtime that declares it is controlled through
+   *  THIS, not executeControl's pty key plan. Unsupported command → ok:false with an explicit reason. */
+  control?(target: { personality: string; identity: string }, command: ControlCommand, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; error?: string }>
+}
+
+/** Optional per-peer observation context for adapters whose state is personality-scoped (opencode keeps
+ *  it under <root>/peers/<p>/opencode, not per-cwd). cwd-keyed runtimes ignore it. */
+export interface ObserveContext {
+  personality: string
+  env?: NodeJS.ProcessEnv
+}
+
+export interface PreparedLaunch {
+  env: Record<string, string>
+  readyToken?: string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

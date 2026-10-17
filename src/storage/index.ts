@@ -347,3 +347,31 @@ export function writeFileAtomic(path: string, data: string, mode: number = FILE_
   // The durability core (fsync-before-rename + looped writeSync) lives in ONE place — see atomicWrite.ts.
   writeFileAtomicRaw(path, data, mode)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Daemon URL resolution (router.json published by the daemon, else the default)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Fallback HTTP-MCP daemon port when no router.json is published yet (the daemon
+ *  binds this stable loopback port by default; init before daemon-start uses it). */
+export const DEFAULT_DAEMON_MCP_PORT = 8765
+
+/**
+ * Resolve the daemon HTTP-MCP URL to write into a peer's `.mcp.json`. Primary: the
+ * `tcp` field of the daemon's discovery file `~/.iapeer/state/iapeer/router.json`
+ * (published live by the daemon). Fallback: the well-known default loopback URL —
+ * so `iapeer init` works even before the daemon is started (the daemon binds the
+ * same stable port; IAPEER_PORT overrides it at the daemon, not here).
+ */
+export function resolveDaemonMcpUrl(options: StorageOptions = {}): string {
+  const routerJson = join(pluginStateDir('iapeer', options), 'router.json')
+  try {
+    const parsed = JSON.parse(readFileSync(routerJson, 'utf8')) as { tcp?: unknown }
+    if (typeof parsed.tcp === 'string' && parsed.tcp) return parsed.tcp
+  } catch {
+    /* no router.json (daemon not started) → the well-known default below */
+  }
+  const env = options.env ?? process.env
+  const port = env.IAPEER_PORT?.trim() || String(DEFAULT_DAEMON_MCP_PORT)
+  return `http://127.0.0.1:${port}/mcp`
+}

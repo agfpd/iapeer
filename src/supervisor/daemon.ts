@@ -13,7 +13,7 @@
 import { Terminal } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   BackpressureWriter,
   FRAME_DATA,
@@ -34,6 +34,7 @@ import { claudeAdapter } from '../launch/adapters/claude.ts'
 import { approvalModeOf, readPeerProfile, type ApprovalMode } from '../identity/index.ts'
 import { routeCircuitBreaker } from './approvalRoute.ts'
 import { killPtyDescendants } from './processTree.ts'
+import { recordOpencodeStopped } from '../opencode/journal.ts'
 
 /** Resolve a runtime launcher from the host AT CALL TIME — env override (IAPEER_<RT>_BIN, the same
  *  knob the rest of the foundation uses) → PATH lookup — never a baked machine-specific path. Returns
@@ -323,6 +324,25 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     }
   }
 
+  // OpenCode (docs/20): the in-process plugin cannot record its own death on a signal (dispose does
+  // not run), so the host records `runtime.stopped` + state=stopped once the child is gone. Idempotent
+  // with a graceful dispose (state already stopped → no second record). Best-effort, never blocks.
+  let structuralStopRecorded = false
+  const recordStructuralStop = (reason: string, exitCode?: number, signal?: number | string): void => {
+    if (structuralStopRecorded || runtime !== 'opencode') return
+    structuralStopRecorded = true
+    const dir = (env as Record<string, string | undefined>).IAPEER_OPENCODE_DIR
+    if (!dir) return
+    try {
+      recordOpencodeStopped(
+        { state: join(dir, 'state.json'), events: join(dir, 'events.jsonl') },
+        { reason, ...(exitCode !== undefined ? { exitCode } : {}), ...(signal !== undefined ? { signal: String(signal) } : {}) },
+      )
+    } catch (e) {
+      appendExitEvent({ ev: 'opencode-stop-record-failed', identity: session, reason: (e as Error).message })
+    }
+  }
+
   const child = Bun.spawn(CMD, {
     cwd: opts.cwd ?? runDir,
     env,
@@ -375,6 +395,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         const status = exitCode ?? c.exitCode
         const signal = signalCode ?? c.signalCode
         exitLogged = true // this IS the death record — shutdown below must not write a second one
+        recordStructuralStop('child-exit', status ?? undefined, signal ?? undefined)
         appendExitEvent({
           ev: 'session-exit',
           identity: session,
@@ -618,6 +639,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     } catch {
       /* */
     }
+    recordStructuralStop(cause)
     try {
       server.stop(true)
     } catch {

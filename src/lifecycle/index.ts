@@ -60,6 +60,8 @@ import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 export interface LifecycleConfig {
   claudeBin: string
   codexBin: string
+  /** OpenCode native binary (docs/20). Optional so hand-built test configs stay valid. */
+  opencodeBin?: string
   sockDir: string
   stateDir: string // ~/.iapeer/state/lifecycle
   logDir: string // ~/.iapeer/logs/lifecycle
@@ -109,6 +111,7 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
   return {
     claudeBin: env.IAPEER_CLAUDE_BIN ?? join(home, '.local', 'bin', 'claude'),
     codexBin: env.IAPEER_CODEX_BIN ?? 'codex',
+    opencodeBin: env.IAPEER_OPENCODE_BIN ?? 'opencode',
     sockDir: resolveSockDir(env),
     stateDir: join(root, STATE_DIR, 'lifecycle'),
     logDir: join(root, LOGS_DIR, 'lifecycle'),
@@ -1103,7 +1106,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // by the death cause (.idle-reaped marker) + peer-type/topic. An EXPLICIT resume
     // that finds nothing to resume fails loud. incomingTopic (args.topic) is the
     // executor discriminator.
-    const mode = resolveWakeMode(cfg, identity, cwd, args.resume, c => adapter.resolveResume(c), args.topic)
+    const mode = resolveWakeMode(cfg, identity, cwd, args.resume, c => adapter.resolveResume(c, { personality: args.personality, env }), args.topic)
     // The bring-up decision is the durable trace — log it BEFORE launch (the decision
     // stands regardless of whether the subsequent launch succeeds). resolveWakeMode has
     // already consumed any .idle-reaped marker, so `cause` is now its only record.
@@ -1158,6 +1161,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     const launchCfg: LaunchConfig = {
       claudeBin: cfg.claudeBin,
       codexBin: cfg.codexBin,
+      ...(cfg.opencodeBin ? { opencodeBin: cfg.opencodeBin } : {}),
       sockDir: cfg.sockDir,
       bootDeadlineSecs: cfg.bootDeadlineSecs,
       readyGateSecs: cfg.readyGateSecs,
@@ -1295,7 +1299,7 @@ export interface SuperviseDeps {
    *  transcript entry). This is the RELIABLE idle signal — NOT the transcript FILE mtime (re-saved at
    *  idle) and NOT the pane-log mtime (a statusline re-render ticks it at idle); both falsely keep an
    *  idle session young. Tests inject a controlled value to exercise the idle/quiet age hermetically. */
-  lastTurnMtime?: (runtime: string, cwd: string) => number | null
+  lastTurnMtime?: (runtime: string, cwd: string, personality?: string) => number | null
   /** В58 — child workflow/subagent activity seam (default: the adapter's childActivityMtime). Folded into
    *  the idle proxy so a peer driving a long workflow (no turns of its own) is not reaped mid-work. */
   childActivityMtime?: (runtime: string, cwd: string) => number | null
@@ -1312,7 +1316,7 @@ interface SuperviseCtx {
   cfg: LifecycleConfig
   env: NodeJS.ProcessEnv
   nowMs: number
-  lastTurnMt: (runtime: string, cwd: string) => number | null
+  lastTurnMt: (runtime: string, cwd: string, personality?: string) => number | null
   childActivityMt: (runtime: string, cwd: string) => number | null
   isAlive: (sock: string, identity: string) => boolean
   kill: (sock: string, identity: string) => void
@@ -1425,7 +1429,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // governs (an old wokeAt = woken-long-ago = idle → reaped; a recent wokeAt = just-woken → protected).
   const ephemeral = isEphemeralPeer(s.cwd)
   let lt = 0
-  try { lt = lastTurnMt(s.runtime, s.cwd) ?? 0 } catch { /* unreadable → wokeAt floor */ }
+  try { lt = lastTurnMt(s.runtime, s.cwd, s.personality) ?? 0 } catch { /* unreadable → wokeAt floor */ }
   // В58 — fold in CHILD workflow/subagent activity. A peer driving a long (>1h) workflow makes NO turns
   // of its own, so lt is stale; without this the busy-with-workflow session is idle-reaped mid-work (live
   // incident: iapeer-memory cut mid-audit). A running workflow writes its subagent transcripts
@@ -1507,7 +1511,9 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
   const env = deps.env ?? process.env
   const nowMs = deps.nowMs ?? Date.now()
-  const lastTurnMt = deps.lastTurnMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).lastTurnMtime(c))
+  const lastTurnMt =
+    deps.lastTurnMtime ??
+    ((rt: string, c: string, p?: string) => getAdapter(rt as Runtime).lastTurnMtime(c, p ? { personality: p, env } : undefined))
   const childActivityMt =
     deps.childActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).childActivityMtime?.(c) ?? null)
   // Default seams bind the injected env so a sandboxed tick never reads/kills the real fleet.
@@ -1799,7 +1805,7 @@ export function lastActiveRuntime(peer: PeerRecord, cfg: LifecycleConfig): Runti
   let bestMt = -1
   for (const rt of peer.runtimes) {
     try {
-      const mt = getAdapter(rt).newestActivityMtime(peer.cwd)
+      const mt = getAdapter(rt).newestActivityMtime(peer.cwd, { personality: peer.personality })
       if (mt !== null && mt > bestMt) {
         bestMt = mt
         best = rt
