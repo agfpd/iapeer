@@ -6,9 +6,11 @@ import { pathToFileURL } from 'node:url'
 import { isValidName } from '../core/constants.ts'
 import { resolveGlobalRoot, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
 import pluginSource from './iapeer-plugin.mjs' with { type: 'text' }
+import { listCapabilities } from '../capability/index.ts'
 
 export const OPENCODE_AGENT = 'iapeer'
-export const OPENCODE_EXTENSION_FRAGMENTS = ['iapeer-memory', 'statusline-injector'] as const
+/** The memory provider's private fragment stem (docs/20 §Memory-provider ABI). */
+export const OPENCODE_MEMORY_FRAGMENT = 'iapeer-memory'
 type JsonObject = Record<string, unknown>
 
 export function opencodePaths(personality: string, options: StorageOptions = {}) {
@@ -73,7 +75,10 @@ export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options
   const paths = opencodePaths(input.personality, options)
   let result: JsonObject = existsSync(paths.config) ? object(JSON.parse(readFileSync(paths.config, 'utf8')), paths.config) : {}
   if (input.inline !== undefined) result = mergeOpencodeConfig(result, object(JSON.parse(input.inline), 'OPENCODE_CONFIG_CONTENT'))
-  for (const stem of OPENCODE_EXTENSION_FRAGMENTS) {
+  // Fragment owners: the memory provider + every REGISTERED capability (docs/21) — never a
+  // hardcoded plugin list. An unregistered plugin's leftover fragment is not merged.
+  const stems = [OPENCODE_MEMORY_FRAGMENT, ...listCapabilities(options).declarations.map(d => d.capability)]
+  for (const stem of stems) {
     const path = join(paths.dir, `${stem}.json`)
     if (existsSync(path)) result = mergeOpencodeConfig(result, readOpencodeExtension(path))
   }

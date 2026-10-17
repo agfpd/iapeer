@@ -1047,6 +1047,21 @@ export async function removePeerCli(
   } catch (e) {
     unprovisionOutcomes.push(`failed: ${e instanceof Error ? e.message : String(e)}`)
   }
+  // Capability-plugin unprovision (docs/21) — same joint, same best-effort contract.
+  try {
+    const { runCapabilityLifecycle } = await import('../capability/index.ts')
+    for (const run of runCapabilityLifecycle({ kind: 'unprovision', personality, cwd: peer.cwd, runtimes: peer.runtimes, occasion: 'remove', env })) {
+      const o = run.outcome
+      appendLifecycleEvent(
+        pluginLogsDir('iapeer', { env }),
+        { ev: 'capability-provision', capability: run.capability, identity: `${run.runtime}-${personality}`, occasion: 'remove', state: o.state, exit: o.exitCode ?? undefined, ms: o.durationMs, detail: o.detail },
+        { env },
+      )
+      unprovisionOutcomes.push(`${run.capability}/${run.runtime}:${o.state}${o.state !== 'ok' && o.detail ? ` (${o.detail})` : ''}`)
+    }
+  } catch (e) {
+    unprovisionOutcomes.push(`capabilities failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
   // Codex pre-trust cleanup (reap-side counterpart of the birth-time
   // preTrustCodexCwd): a removed codex peer must
   // not leave its cwd trusted in the host ~/.codex/config.toml forever. After
@@ -1554,6 +1569,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
   { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
   { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
+  { sig: 'capability <list | register <decl.json> | sync <name> | unregister <name>>', desc: 'capability-plugin lifecycle: per-peer provision/unprovision on every agent endpoint (docs/21)' },
   { sig: 'native-memory <off|on> (--peer <p> | --all)', desc: "gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)" },
   { sig: 'trust-hooks <hooks.json> [--check]', desc: 'pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report' },
   {
@@ -1838,6 +1854,11 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const tcc = tccFullDiskAccessNote({ fda: probeFullDiskAccess(env), binPath: iapeerBinPath(env) })
         if (tcc) out(tcc)
         return daemonFailed || r.marketplaces.some(m => m.state === 'failed') || infraFailed ? 1 : 0
+      }
+      case 'capability': {
+        // Capability-plugin lifecycle (docs/21): register / sync / unregister / list.
+        const { capabilityCli } = await import('../capability/cli.ts')
+        return capabilityCli(positionals, env, out, errOut)
       }
       case 'native-memory': {
         // The canonized runtime-memory lever (контракт «Слот памяти» §Native-память):

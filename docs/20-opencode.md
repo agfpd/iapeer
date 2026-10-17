@@ -76,9 +76,13 @@ native OpenCode SQLite DB or a second SDK client:
     with a new `launchID`, including resume, so the main session is recoverable from
     the journal alone. A launch that fails before readiness writes `runtime.error`
     `{error}` under its `launchID` instead.
-  - Consumers: web-runtime, telegram-runtime, statusline-injector and iapeer-memory's
-    weekly collector (it relies on the path, `time`, unchanged `type`/`properties` and
-    no rotation). Changing any of these requires notifying all four.
+  - Consumers: web-runtime, telegram-runtime and iapeer-memory's weekly collector (it
+    relies on the path, `time`, unchanged `type`/`properties` and no rotation).
+    statusline-injector reads in-process (its own plugin hook, which also receives the
+    context window), so the journal is optional for it. Any ABI change is announced
+    to all four.
+  - Per-peer plugin fragments merged into the launch config are the memory provider's
+    plus those of every registered capability (docs/21). No plugin list is hardcoded.
   - Native bootstrap snapshots can repeat part ids, so consumers must **upsert parts by id**.
 - `<IAPEER_ROOT>/peers/<p>/opencode/state.json`, written atomically:
   `{schema:1, identity, cwd, sessionID, launchID, startedAt, lastEventSeq,

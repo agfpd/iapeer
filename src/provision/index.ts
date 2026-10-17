@@ -182,6 +182,36 @@ export async function provisionPeer(opts: ProvisionPeerOptions): Promise<Provisi
     opts.warn?.(`memory birth-time hook failed: ${e instanceof Error ? e.message : String(e)}`)
   }
 
+  // Capability-plugin lifecycle (docs/21): every registered capability provisions its
+  // surfaces for every agent endpoint the peer declares (occasion=birth). This joint
+  // also runs for add-runtime / default-runtime convergence (they call initPeer →
+  // here), so a new endpoint is never left without the host's capabilities.
+  // Idempotency is the plugin's obligation; a failure is LOUD but never kills a birth.
+  try {
+    const { runCapabilityLifecycle, listCapabilities } = await import('../capability/index.ts')
+    const { appendLifecycleEvent } = await import('../lifecycle/eventlog.ts')
+    const { pluginLogsDir } = await import('../storage/index.ts')
+    for (const bad of listCapabilities({ env }).invalid) {
+      opts.warn?.(`capability declaration ${bad.file} is INVALID (${bad.error}) — not provisioned for "${profile.personality}"`)
+    }
+    for (const run of runCapabilityLifecycle({ kind: 'provision', personality: profile.personality, cwd, runtimes: profile.runtimes, occasion: 'birth', env })) {
+      const o = run.outcome
+      appendLifecycleEvent(
+        pluginLogsDir('iapeer', { env }),
+        { ev: 'capability-provision', capability: run.capability, identity: `${run.runtime}-${profile.personality}`, occasion: 'birth', state: o.state, exit: o.exitCode ?? undefined, ms: o.durationMs, detail: o.detail },
+        { env },
+      )
+      if (o.state !== 'ok') {
+        opts.warn?.(
+          `capability ${run.capability} provision (${run.runtime}) ${o.state.toUpperCase()} for "${profile.personality}"` +
+            `${o.detail ? `: ${o.detail}` : ''} — repair: iapeer capability sync ${run.capability}`,
+        )
+      }
+    }
+  } catch (e) {
+    opts.warn?.(`capability birth-time hook failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
   // wake_policy:"ephemeral" sanity (M2 edge cases — warn, don't refuse: the policy
   // lives in the hand-editable local profile, provision just surfaces the mismatch):
   //   • + interfaces.telegram: ephemeral WINS in resolveWakeMode (explicit policy
