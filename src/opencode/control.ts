@@ -8,6 +8,7 @@ export type OpencodeControlRequest =
   | { op: 'deliver'; text: string }
   | { op: 'interrupt' }
   | { op: 'select' }
+  | { op: 'compact' }
 
 export interface OpencodeControlResponse {
   ok: boolean

@@ -813,6 +813,9 @@ export async function compactPeer(
   const control = opts.controlFn ?? routeControl
   const compactDone = opts.compactDoneFn ?? waitForCompactDone
   const waitDone = (rt: Runtime, baseline: ReturnType<typeof compactDoneBaseline>, woke: boolean): CompactPeerOutcome | null => {
+    // A structural runtime's control already returned only after the native compaction was recorded
+    // (docs/20) — there is no transcript marker to wait for.
+    if (getAdapter(rt).deliveryConfirm === 'structural') return null
     const done = compactDone(
       {
         personality,

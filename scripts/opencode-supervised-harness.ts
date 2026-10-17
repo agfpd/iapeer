@@ -186,8 +186,21 @@ try {
   const intr = await executeControlOnTarget(target, { name: 'interrupt' })
   await until('idle after interrupt', () => readState()?.status === 'idle', 10000)
   check('interrupt via control', intr.ok, intr)
+  const unsupported = await executeControlOnTarget(target, { name: 'goal' })
+  check('unsupported control fails loud', !unsupported.ok, unsupported)
+
+  // 4b. compact: native summary turn → session.compacted recorded → ack; the dialogue continues
+  const seqC = readEvents().at(-1).seq
+  const wireBefore = wire.length
   const compact = await executeControlOnTarget(target, { name: 'compact' })
-  check('unsupported control fails loud', !compact.ok, compact)
+  const compacted = readEvents().find(e => e.seq > seqC && e.type === 'session.compacted')
+  check('compact: acked only with a native session.compacted record', compact.ok && !!compacted, compact)
+  check('compact: ran a native summary turn at the provider', wire.length > wireBefore)
+  const wc = await deliverWarm(target, 'AFTER_COMPACT', cwd, {}, env)
+  await until('AFTER_COMPACT processed', () => userTexts().some(t => t.includes('AFTER_COMPACT')), 20000)
+  const afterMsgs = JSON.stringify(wire.at(-1).messages)
+  check('after compact: dialogue continues on a compacted history', wc.ok && !afterMsgs.includes('WHILE_BUSY'), { messages: wire.at(-1).messages.length })
+  await until('idle after compact', () => readState()?.status === 'idle', 20000)
 
   // 5. the TUI is the attach surface and shows the core's session
   await Bun.sleep(1500)
@@ -215,7 +228,7 @@ try {
   const last = wire.at(-1)
   const sys2 = JSON.stringify(last.messages.filter((m: any) => m.role === 'system'))
   check('resume: doctrine TWO replaces ONE', sys2.includes('IAPEER_DOCTRINE_TWO') && !sys2.includes('IAPEER_DOCTRINE_ONE'))
-  check('resume: earlier history carried', JSON.stringify(last.messages).includes('FIRST_MSG'))
+  check('resume: earlier (post-compact) history carried', JSON.stringify(last.messages).includes('AFTER_COMPACT'))
   code = results.every(r => r.ok) ? 0 : 1
 } catch (e) {
   check('harness', false, e instanceof Error ? e.message : String(e))

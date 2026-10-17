@@ -145,6 +145,15 @@ async function server(input) {
     await client.tui.publish({ body: { type: 'tui.session.select', properties: { sessionID: state.sessionID } } }).catch(() => {})
   }
 
+  // Model of the last assistant turn — compaction runs on it. Seeded from history on resume.
+  let lastModel = null
+  let compactedAfter = 0
+  function noteModel(info) {
+    if (info && info.role === 'assistant' && typeof info.providerID === 'string' && typeof info.modelID === 'string') {
+      lastModel = { providerID: info.providerID, modelID: info.modelID }
+    }
+  }
+
   // ── message acknowledgements: resolved by the native persist event ──────────
   const waiters = new Map()
   function awaitPersisted(messageID) {
@@ -186,6 +195,19 @@ async function server(input) {
         if (!state.sessionID) return { ok: false, error: 'no session' }
         const res = await client.session.abort({ path: { id: state.sessionID } })
         return res.error ? { ok: false, error: JSON.stringify(res.error) } : { ok: true }
+      }
+      case 'compact': {
+        // Native compaction (POST /session/:id/summarize) runs the summary turn to completion before
+        // it returns; the ack additionally requires the native `session.compacted` record for THIS
+        // session after the request (a silent no-op is never reported as success).
+        if (!state.sessionID) return { ok: false, error: 'no session' }
+        if (!lastModel) return { ok: false, error: 'nothing to compact (no assistant turn in this session yet)' }
+        const before = seq
+        const res = await client.session.summarize({ path: { id: state.sessionID }, body: { providerID: lastModel.providerID, modelID: lastModel.modelID } })
+        if (res.error) return { ok: false, error: 'summarize: ' + JSON.stringify(res.error) }
+        for (let i = 0; i < 50 && compactedAfter <= before; i++) await new Promise(r => setTimeout(r, 100))
+        if (compactedAfter <= before) return { ok: false, error: 'summarize returned but no session.compacted was recorded' }
+        return { ok: true, sessionID: state.sessionID, lastEventSeq: compactedAfter }
       }
       case 'select':
         await selectInTui()
@@ -283,6 +305,10 @@ async function server(input) {
       const sessionID = await ensureSession()
       const got = await client.session.get({ path: { id: sessionID } })
       if (!got.data) throw new Error('session ' + sessionID + ' not found: ' + JSON.stringify(got.error ?? null))
+      if (resumed) {
+        const hist = await client.session.messages({ path: { id: sessionID } }).catch(() => null)
+        for (const m of (hist && hist.data) || []) noteModel(m && m.info)
+      }
       if (state.status === 'starting') state.status = 'idle'
       journal('runtime.ready', { session: got.data, resumed }, null, sessionID)
     } catch (e) {
@@ -303,6 +329,7 @@ async function server(input) {
       const p = event.properties
       const sessionID = sessionOf(type, p)
       if (type === 'message.updated' && p && p.info && waiters.has(p.info.id)) waiters.get(p.info.id)()
+      if (type === 'message.updated' && p && sessionID === state.sessionID) noteModel(p.info)
       if (gated && type === 'permission.asked' && p && typeof p.id === 'string' && !approvals.has(p.id)) void brokerApproval(p)
       if (type === 'permission.replied' && p && approvals.has(p.requestID)) approvals.get(p.requestID).abort()
       if (sessionID && sessionID === state.sessionID) {
@@ -318,6 +345,7 @@ async function server(input) {
         }
       }
       journal(type, p, event.id ?? null, sessionID)
+      if (type === 'session.compacted' && sessionID === state.sessionID) compactedAfter = seq
       writeState()
     },
     dispose: async () => {

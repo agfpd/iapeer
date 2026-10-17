@@ -35,6 +35,9 @@ import type {
   RuntimeAdapter,
 } from '../types.ts'
 
+/** Compaction is a model turn; bound it like a long turn, not like a socket round-trip. */
+export const OPENCODE_COMPACT_TIMEOUT_MS = 600_000
+
 /** Journal byte offset at prepare time, per launchID — structuralReady scans only THIS launch's lines. */
 const readyOffsets = new Map<string, number>()
 
@@ -145,7 +148,12 @@ export const opencodeAdapter: RuntimeAdapter = {
       const r = await opencodeControl(controlSocket(target.personality, env), { op: 'interrupt' })
       return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'interrupt failed' }
     }
-    return { ok: false, error: `opencode does not support control command "${command.name}" yet` }
+    if (command.name === 'compact') {
+      // Blocks until the native summary turn completed and session.compacted is recorded.
+      const r = await opencodeControl(controlSocket(target.personality, env), { op: 'compact' }, OPENCODE_COMPACT_TIMEOUT_MS)
+      return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'compact failed' }
+    }
+    return { ok: false, error: `opencode does not support control command "${command.name}"` }
   },
 
   // ── Screen predicates: deliberately inert (structural runtime). ──────────────
