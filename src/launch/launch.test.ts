@@ -464,6 +464,13 @@ describe('claudeAdapter', () => {
     expect(claudeAdapter.bootDialogKeys(cursorOn1)).not.toContain('Enter')
     // cursor PROVEN on "2. Yes, I accept" → now (and only now) confirm
     expect(claudeAdapter.bootDialogKeys(cursorOn2)).toEqual(['Enter'])
+    // claude 2.1.302 unnumbered layout: same discipline, no "2." to anchor on
+    const unnumOnNo =
+      'WARNING: Claude Code running in Bypass Permissions mode\n❯ No, exit\n  Yes, I accept\nEnter to confirm · Esc to cancel'
+    const unnumOnYes =
+      'WARNING: Claude Code running in Bypass Permissions mode\n  No, exit\n❯ Yes, I accept\nEnter to confirm · Esc to cancel'
+    expect(claudeAdapter.bootDialogKeys(unnumOnNo)).toEqual(['Down'])
+    expect(claudeAdapter.bootDialogKeys(unnumOnYes)).toEqual(['Enter'])
     // the dialog gates readiness while it is up...
     expect(claudeAdapter.isInputReady(`${cursorOn1}\n❯ x`)).toBe(false)
     // ...but the post-accept ready banner ('bypass permissions on', lowercase) is a

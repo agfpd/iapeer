@@ -363,8 +363,14 @@ export const claudeAdapter: RuntimeAdapter = {
    *   - anything else (incl. the post-select "Resuming…" load state) → null (wait).
    */
   bootDialogKeys(pane: string): string[] | null {
-    if (pane.includes('Resume from summary') || pane.includes('Bypass Permissions mode')) {
+    if (pane.includes('Resume from summary')) {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
+    }
+    // Bypass accept: 2.1.30x dropped the "1."/"2." numbering ("❯ No, exit" / "Yes, I
+    // accept") — matching only "❯ 2." Down-toggled forever (live, 2026-10-17). Confirm
+    // once the cursor is SEEN on the Yes row, numbered or not.
+    if (pane.includes('Bypass Permissions mode')) {
+      return /❯\s*(?:2\.\s*)?Yes,?\s*I\s*accept/.test(pane) ? ['Enter'] : ['Down']
     }
     // Folder-trust: older claude defaulted the cursor to "1. Yes, proceed", but 2.1.30x
     // renders "❯ No, exit" / "Yes, I trust this folder" with the DEFAULT on exit — a bare
