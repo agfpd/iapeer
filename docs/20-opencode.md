@@ -257,6 +257,12 @@ plugin state; the next message on the same topic resumes the same native session
 with the re-composed doctrine and earlier history. A topicless message after an
 idle-reap wakes fresh — core executor policy, identical for every runtime.
 
+`initPeer --runtime opencode` (create/add-runtime) first satisfies the native
+plugin-dependency no-op in every OpenCode config dir (`src/opencode/deps.ts`:
+`node_modules` present and `@opencode-ai/plugin` in the lock root, pinned to
+`opencode --version`). A failure aborts before the runtime is registered. Real
+npm, isolated HOME: installed in 11 s, the repeat is `present` with no network.
+
 Still not proved here: MCP to a live daemon,
 approval routing, memory slot, two simultaneous runtimes of one personality.
 Since the commit after this proof, `opencode` is a supported local agent runtime:

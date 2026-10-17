@@ -247,6 +247,40 @@ describe('initPeer orchestration', () => {
     }
   })
 
+  test('opencode peer: dependency preinstall runs first; a failure registers nothing', async () => {
+    // The preinstall writes into OpenCode config dirs under HOME — isolate HOME (hermetic).
+    const env = cleanEnv({ HOME: join(cwd, 'home') })
+    delete env.XDG_CONFIG_HOME
+    delete env.OPENCODE_CONFIG_DIR
+    const bad = join(cwd, 'ocbad')
+    mkdirSync(bad, { recursive: true })
+    await expect(
+      initPeer({ cwd: bad, runtime: 'opencode', env, opencodeDeps: { version: () => '1.19.3', npmInstall: () => { throw new Error('offline') } } }),
+    ).rejects.toThrow(/preinstall failed.*offline/)
+    expect(readPeersIndex({ env }).peers.some(p => p.personality === 'ocbad')).toBe(false)
+    const good = join(cwd, 'ocgood')
+    mkdirSync(good, { recursive: true })
+    const specs: string[] = []
+    const r = await initPeer({
+      cwd: good,
+      runtime: 'opencode',
+      env,
+      opencodeDeps: {
+        version: () => '1.19.3',
+        npmInstall: (dir, spec) => {
+          specs.push(spec)
+          mkdirSync(join(dir, 'node_modules'), { recursive: true })
+          writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ packages: { '': { dependencies: { '@opencode-ai/plugin': '1.19.3' } } } }))
+        },
+      },
+    })
+    expect(specs).toEqual(['@opencode-ai/plugin@1.19.3'])
+    expect(existsSync(join(cwd, 'home', '.config', 'opencode', 'package-lock.json'))).toBe(true)
+    expect(r.runtime).toBe('opencode')
+    expect(r.mcpConfigPaths.length).toBe(0) // MCP is composed per launch, not written into the cwd
+    expect(readPeersIndex({ env }).peers.find(p => p.personality === 'ocgood')?.runtimes).toContain('opencode')
+  })
+
   test('claude peer: profile + registry + .mcp.json + doctrine, all wired', async () => {
     const env = cleanEnv()
     const pcwd = join(cwd, 'mypeer') // personality = normalize(basename(cwd))

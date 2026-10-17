@@ -32,6 +32,7 @@ import { provisionPeer, type ProvisionResult } from '../provision/index.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { bootstrapFailed, launchctlBootstrap, resolveAlwaysOnTarget, type BootstrapResult } from '../launch/launchd.ts'
 import { runtimeSelfConfig, type SelfConfigResult } from '../runtime/index.ts'
+import { defaultEnsureDepsDeps, ensureOpencodePluginDependency, type EnsureDepsDeps } from '../opencode/deps.ts'
 import type { Intelligence } from '../core/constants.ts'
 
 /** The MCP-server name the peer's `.mcp.json` uses for the foundation daemon. */
@@ -389,6 +390,15 @@ export function isRuntimeInstalled(runtime: Runtime, env: NodeJS.ProcessEnv = pr
 
 const AGENTIC_RUNTIMES: Runtime[] = ['claude', 'codex']
 
+/** The OpenCode binary the core launches: IAPEER_OPENCODE_BIN, else the official installer's
+ *  ~/.opencode/bin/opencode, else `opencode` on PATH (mirrors loadLifecycleConfig). */
+export function resolveOpencodeBin(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.IAPEER_OPENCODE_BIN?.trim()
+  if (override) return override
+  const installed = join(env.HOME?.trim() || homedir(), '.opencode', 'bin', 'opencode')
+  return existsSync(installed) ? installed : 'opencode'
+}
+
 /**
  * Resolve a peer's primary AGENTIC runtime — install-aware:
  *   1. explicit (`--runtime`) → use it, but VALIDATE it is installed (clear error instead
@@ -452,6 +462,9 @@ export interface InitPeerOptions {
   bootstrap?: boolean
   env?: NodeJS.ProcessEnv
   warn?: (message: string) => void
+  /** OpenCode plugin-dependency preinstall seam (tests). Absent → the real binary + npm; skipped
+   *  entirely under IAPEER_TEST_SANDBOX unless injected. */
+  opencodeDeps?: EnsureDepsDeps
 }
 
 export interface InitPeerResult extends ProvisionResult {
@@ -488,6 +501,22 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
   // decide the primary (resolvePrimaryRuntime), so the primary always matches the
   // config that gets written (no `.codex`-only-but-primary-claude mismatch).
   const runtime = resolvePrimaryRuntime(opts.cwd, opts.runtime, rt => isRuntimeInstalled(rt, env))
+  // OpenCode: satisfy the native plugin-dependency no-op BEFORE the runtime is registered, so a wake
+  // never waits on npm (docs/20). Fail-closed: a failure leaves the peer without the opencode runtime.
+  if (runtime === 'opencode') {
+    const sandboxed = env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1'
+    if (opts.opencodeDeps || !sandboxed) {
+      const deps = opts.opencodeDeps ?? defaultEnsureDepsDeps(resolveOpencodeBin(env), env)
+      const outcomes = ensureOpencodePluginDependency(opts.cwd, env, deps)
+      const failed = outcomes.filter(o => o.state === 'failed')
+      if (failed.length > 0) {
+        throw new IapError(
+          `opencode plugin dependency preinstall failed — ${failed.map(f => `${f.dir}: ${f.detail ?? 'failed'}`).join('; ')}. ` +
+            `Without it OpenCode runs npm on every cold start. Fix npm access and re-run.`,
+        )
+      }
+    }
+  }
   const provisioned = await provisionPeer({
     cwd: opts.cwd,
     runtime,
