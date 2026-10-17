@@ -38,7 +38,8 @@ The full fleet state. The peer rows are produced by the **same in-process functi
     "uptimeSecs": 32400,
     "memory": { "provider": "iapeer-memory", "version": "1.2.3", "heartbeatAgeSecs": 12 },
     "voice":  { "provider": "voice-connect", "version": "0.3.1", "heartbeatAgeSecs": null },
-    "fda": true
+    "fda": true,
+    "agent_runtimes": ["claude", "codex"]
   },
   "peers": [
     {
@@ -48,8 +49,8 @@ The full fleet state. The peer rows are produced by the **same in-process functi
       "default_runtime": "claude",
       "cwd": "/Users/me/.iapeer/peers/boris",
       "runtimes": [
-        { "runtime": "claude", "status": "live", "attached": true, "activity": "working" },
-        { "runtime": "codex",  "status": "asleep" }
+        { "runtime": "claude", "status": "live", "agent": true, "attached": true, "activity": "working" },
+        { "runtime": "codex",  "status": "asleep", "agent": true }
       ],
       "last_active_runtime": "claude",
       "last_active_ms": 1751731100000,
@@ -77,6 +78,8 @@ The full fleet state. The peer rows are produced by the **same in-process functi
 Field notes:
 
 - `runtimes[].status` — `live` (session up) · `asleep` (wakeable on demand) · `stopped` (operator stop flag; the daemon won't wake it). Same glyph semantics as the CLI: `●` / `○` / `✕`.
+- `runtimes[].agent` — **agent-endpoint discovery**: `true` iff this declared runtime is an agent runtime the running core can host (listed in `host.agent_runtimes`). A channel that offers a personality's agent endpoints (a Telegram menu, a web picker) offers exactly its `agent: true` runtimes — never a consumer-side runtime list, never a `which`/PATH probe. A declared runtime the core cannot host (a newer peer profile on an older core) is `false` and is not offered. A channel runtime (`telegram`, `web`, …) is always `false`. Additive: a pre-discovery daemon omits it — clients MUST then fall back to treating no runtime as discoverable rather than guessing. Which endpoint a send reaches is a separate rule: an omitted runtime is always `default_runtime` (config-anchored, never «the live one»); a control action for the same dialogue must name the same runtime its send used.
+- `host.agent_runtimes` — the agent runtimes this core build can host, in preference order. It grows when an agent adapter ships (e.g. `opencode`, docs/20).
 - `runtimes[].attached` — present (`true`) only when a **human operator** is attached to that live hosted session.
 - `runtimes[].activity` — **turn activity**: is this runtime *in a turn* right now. See «Activity» below. Additive; absent on a pre-activity daemon, on every non-`live` runtime, and whenever the daemon has no evidence — clients MUST treat absence as **no claim**, never as `idle`.
 - `attached` — any runtime attached (peer-level convenience).

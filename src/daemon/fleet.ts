@@ -35,6 +35,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'http'
 import { closeSync, openSync, readSync, statSync } from 'fs'
+import { isSupportedLocalRuntime, SUPPORTED_LOCAL_RUNTIMES } from '../core/constants.ts'
 import { buildProcessAddress } from '../core/socket.ts'
 import { IAPEER_VERSION } from '../core/version.ts'
 import {
@@ -79,6 +80,11 @@ export const FLEET_API_VERSION = 1
 export interface FleetRuntimeStatus {
   runtime: string
   status: 'live' | 'asleep' | 'stopped'
+  /** AGENT-ENDPOINT discovery (docs/15 §Agent endpoints): true iff this declared runtime is an
+   *  agent runtime THIS core can host (`host.agent_runtimes`). A channel offers exactly the
+   *  `agent:true` runtimes of a personality — never a consumer-side hardcode or `Bun.which`.
+   *  A declared runtime the running core cannot host (newer peer, older core) is `false`. */
+  agent: boolean
   /** Present (true) iff a HUMAN operator is attached to this live hosted session. */
   attached?: boolean
   /** Whether this runtime is IN A TURN right now — a SEPARATE concept from `status`, which
@@ -125,6 +131,8 @@ export interface FleetHost {
   memory: { provider: string; version: string; heartbeatAgeSecs: number | null } | null
   voice: { provider: string; version: string; heartbeatAgeSecs: number | null } | null
   fda: boolean | null
+  /** The agent runtimes this core build can host (its agent adapters), in preference order. */
+  agent_runtimes: string[]
 }
 
 /** A pending human-approval request as the snapshot exposes it (docs/17). The SAME items
@@ -238,6 +246,7 @@ export function buildFleetSnapshot(
       return {
         runtime: s.runtime,
         status: s.status,
+        agent: isSupportedLocalRuntime(s.runtime),
         ...(attached ? { attached: true } : {}),
         ...(activity ? { activity } : {}),
       }
@@ -289,6 +298,7 @@ export function buildFleetSnapshot(
         ? { provider: voice.provider, version: voice.version, heartbeatAgeSecs: heartbeatAgeSecs(voice, nowMs) }
         : null,
       fda: probeFullDiskAccess(env),
+      agent_runtimes: [...SUPPORTED_LOCAL_RUNTIMES],
     },
     peers,
     // ADDITIVE + omitted when empty (absence ⇒ empty queue, docs/15). broker.list() is a
