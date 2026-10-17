@@ -974,6 +974,42 @@ describe('add-runtime / default-runtime (fleet-switch levers)', () => {
     expect((await defaultRuntime('claude', { peer: 'aud2', env: e }))[0].action).toBe('flipped')
     expect(findPeer(readPeersIndex({ env: e }), 'aud2')!.runtime).toBe('claude')
   })
+
+  test('default-runtime claude WIRES an unwired declared claude — on flip AND on an already-flipped peer (live 2026-10-17)', async () => {
+    const e = env()
+    const { initPeer, hasClaudeMcpWiring } = await import('../init/index.ts')
+    const { readPeerProfile, writePeerProfileAtomic } = await import('../identity/index.ts')
+    const { reindexFromLocals } = await import('../identity/profileStandard.ts')
+    const born = async (name: string) => {
+      const cwd = join(root, 'peers', name)
+      mkdirSync(cwd, { recursive: true })
+      await upsertPeer({ personality: name, runtime: 'codex', cwd, intelligence: 'artificial' }, { rootDir: root })
+      await initPeer({ cwd, runtime: 'codex', env: e })
+      const prof = readPeerProfile(cwd)!
+      writePeerProfileAtomic(cwd, { ...prof, runtimes: [...new Set([...prof.runtimes, 'claude' as const])] })
+      return cwd
+    }
+    // (a) codex-default, claude declared-not-wired → flip must wire first
+    const a = await born('aud5')
+    await reindexFromLocals({ env: e })
+    expect(hasClaudeMcpWiring(a)).toBe(false)
+    const fa = (await defaultRuntime('claude', { peer: 'aud5', env: e }))[0]
+    expect(fa.action).toBe('flipped')
+    expect(fa.detail).toContain('not wired')
+    expect(hasClaudeMcpWiring(a)).toBe(true)
+    // (b) already flipped by an OLDER binary (default claude, unwired) → re-run repairs
+    const b = await born('aud6')
+    writePeerProfileAtomic(b, { ...readPeerProfile(b)!, runtime: 'claude' })
+    await reindexFromLocals({ env: e })
+    expect(hasClaudeMcpWiring(b)).toBe(false)
+    const fb = (await defaultRuntime('claude', { peer: 'aud6', env: e }))[0]
+    expect(fb.action).toBe('already')
+    expect(fb.detail).toContain('not wired')
+    expect(hasClaudeMcpWiring(b)).toBe(true)
+    expect(findPeer(readPeersIndex({ env: e }), 'aud6')!.runtime).toBe('claude')
+    // wired now → plain already, no detail
+    expect((await defaultRuntime('claude', { peer: 'aud6', env: e }))[0]).toEqual({ personality: 'aud6', action: 'already', detail: undefined })
+  })
 })
 
 describe('init — FU5 parity with create: declares ALL installed agentic runtimes', () => {

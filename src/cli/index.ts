@@ -530,7 +530,14 @@ export async function defaultRuntime(
   const index = readPeersIndex({ env })
   const targets = opts.all === true ? index.peers : index.peers.filter(p => p.personality === opts.peer)
   if (targets.length === 0) throw new Error(opts.peer ? `peer "${opts.peer}" is not registered` : 'no targets — pass --peer <p> or --all')
+  // Cross-peer: strip the caller's identity env (same reason as add-runtime).
+  const cleanEnv: NodeJS.ProcessEnv = { ...env }
+  delete cleanEnv.PEER_PERSONALITY
+  delete cleanEnv.PEER_RUNTIME
+  delete cleanEnv.PEER_IDENTITY
+  const { initPeer, hasClaudeMcpWiring } = await import('../init/index.ts')
   const out: DefaultRuntimeOutcome[] = []
+  let rewired = false
   for (const p of targets) {
     if (isInfraRuntime(p.runtime)) {
       out.push({ personality: p.personality, action: 'skipped-infra-peer', detail: `default runtime "${p.runtime}" is infra` })
@@ -542,10 +549,6 @@ export async function defaultRuntime(
         out.push({ personality: p.personality, action: 'failed', detail: `no local profile at ${p.cwd}` })
         continue
       }
-      if (profile.runtime === runtime) {
-        out.push({ personality: p.personality, action: 'already' })
-        continue
-      }
       if (!profile.runtimes.includes(runtime as Runtime)) {
         out.push({
           personality: p.personality,
@@ -554,15 +557,35 @@ export async function defaultRuntime(
         })
         continue
       }
-      writePeerProfileAtomic(p.cwd, { ...profile, runtime: runtime as Runtime })
-      out.push({ personality: p.personality, action: 'flipped' })
+      // DECLARED ≠ REALIZED (live 2026-10-17: the fleet flipped codex→claude onto peers
+      // that declared claude but were never wired — no `.mcp.json` iapeer server, no
+      // memory-slot surfaces → claude sessions without send_to_peer). Routing must never
+      // sit on an unwired runtime: converge FIRST via initPeer (idempotent: MCP wiring +
+      // slot provision for every declared agentic runtime) — also for an ALREADY-flipped
+      // peer, so re-running the verb is the repair for a fleet flipped by an older binary.
+      let detail: string | undefined
+      if (runtime === 'claude' && !hasClaudeMcpWiring(p.cwd)) {
+        const warns: string[] = []
+        await initPeer({ cwd: p.cwd, runtime: runtime as Runtime, env: cleanEnv, warn: m => warns.push(m) })
+        detail = ['declared but not wired — runtime re-provisioned', ...warns].join(' | ')
+        rewired = true
+      }
+      if (profile.runtime === runtime) {
+        out.push({ personality: p.personality, action: 'already', detail })
+        continue
+      }
+      // Re-read: initPeer's merge-writer may have touched the profile.
+      writePeerProfileAtomic(p.cwd, { ...(readPeerProfile(p.cwd) ?? profile), runtime: runtime as Runtime })
+      out.push({ personality: p.personality, action: 'flipped', detail })
     } catch (e) {
       out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })
     }
   }
   // Self-heal the registry from the flipped locals so routing flips in the same
   // command (REPLACE projection — the verify --fix rail).
-  if (out.some(o => o.action === 'flipped')) await reindexFromLocals({ env })
+  // initPeer's upsert sets the registry default to the provisioned runtime — reindex
+  // after a rewire too, so an `already` peer's registry stays projected from its local.
+  if (rewired || out.some(o => o.action === 'flipped')) await reindexFromLocals({ env })
   return out
 }
 
