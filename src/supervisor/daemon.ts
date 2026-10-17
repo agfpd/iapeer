@@ -113,6 +113,10 @@ const SIGWINCH_REDRAW_WAIT_MS = 300
 // Bun-native PTY (Bun ≥1.3.5) is not yet in @types/bun — type the slice we use.
 interface PtyChild {
   pid: number
+  /** Resolves with the exit status once the process is REAPED (the pty exit callback fires earlier). */
+  exited?: Promise<number>
+  exitCode?: number | null
+  signalCode?: string | number | null
   terminal: { write(d: Uint8Array | string): void; resize(cols: number, rows: number): void }
   kill(sig?: number | string): void
 }
@@ -385,26 +389,33 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
           }
         }
       },
-      exit(_t?: unknown, exitCode?: number | null, signalCode?: number | null) {
+      exit() {
         // resilience-b exit-cause (spawn-flip Ф0b): record WHY the hosted child died into exits.log,
         // mirroring the tmux pane-died hook (ev=session-exit dead_status/dead_signal), so the daemon's
         // supervise-tick death classification + crash-loop accounting have the cause. host=supervisor
-        // distinguishes the source. The Bun-native pty exit callback passes (exitCode, signalCode) like
-        // onExit; fall back to the subprocess props. Best-effort — never blocks shutdown.
-        const c = child as { exitCode?: number | null; signalCode?: number | null }
-        const status = exitCode ?? c.exitCode
-        const signal = signalCode ?? c.signalCode
-        exitLogged = true // this IS the death record — shutdown below must not write a second one
-        recordStructuralStop('child-exit', status ?? undefined, signal ?? undefined)
-        appendExitEvent({
-          ev: 'session-exit',
-          identity: session,
-          dead_status: status ?? '',
-          dead_signal: signal ?? '',
-          cause: 'child-exit',
-          host: 'supervisor',
-        })
-        shutdown()
+        // distinguishes the source.
+        //
+        // The Bun-native pty `exit` callback fires on pty EOF, BEFORE the process is reaped, and passes
+        // (0, null) even for a SIGKILL (measured, Bun 1.3.13: callback (0, null); `exited` → 137,
+        // signalCode 'SIGKILL'). Reporting those args recorded a SIGKILL as a clean exit 0 (linus OC07).
+        // So wait for the reap (bounded) and read the subprocess's own exitCode/signalCode.
+        exitLogged = true // this IS the death record — a racing shutdown must not write a second one
+        const finish = (): void => {
+          const status = child.signalCode != null ? undefined : (child.exitCode ?? undefined)
+          const signal = child.signalCode ?? undefined
+          recordStructuralStop('child-exit', status, signal)
+          appendExitEvent({
+            ev: 'session-exit',
+            identity: session,
+            dead_status: status ?? '',
+            dead_signal: signal ?? '',
+            cause: 'child-exit',
+            host: 'supervisor',
+          })
+          shutdown()
+        }
+        const reaped = child.exited ?? Promise.resolve(0)
+        void Promise.race([reaped.catch(() => 0), new Promise(r => setTimeout(r, 2000))]).then(finish)
       },
     },
   } as unknown as Parameters<typeof Bun.spawn>[1]) as unknown as PtyChild

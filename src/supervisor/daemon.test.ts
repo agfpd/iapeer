@@ -213,6 +213,9 @@ d('supervisor daemon (Bun-native pty, tick runtime)', () => {
       const recorded = await waitFor(() => existsSync(exitLog) && /ev=session-exit identity=ptsexit.*host=supervisor/.test(readFileSync(exitLog, 'utf8')))
       expect(recorded).toBe(true) // the death cause is in exits.log → crash-loop accounting has it
       expect(readFileSync(exitLog, 'utf8')).toContain('cause=child-exit') // discriminates from a signalled teardown
+      // the REAL cause: a SIGKILL is a signal death, never a clean exit 0 (linus OC07-1: the pty exit
+      // callback reports (0, null) before the reap; the record must come from the reaped subprocess)
+      expect(readFileSync(exitLog, 'utf8')).toMatch(/dead_status="?"? dead_signal="?SIGKILL"?/)
     } finally {
       try {
         killSession(runDir, exSession)
