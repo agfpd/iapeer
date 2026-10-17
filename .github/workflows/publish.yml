@@ -1,0 +1,44 @@
+name: Publish
+
+# Publishes @agfpd/iapeer to npm via trusted publishing (OIDC) — no stored token, no
+# browser 2FA. Triggered by the version tag that `npm run release` pushes; the manual
+# dispatch re-publishes an EXISTING tag (e.g. one cut before this workflow existed —
+# the workflow runs from main and checks the tag out). npmjs.com trusted-publisher
+# config must name this file: agfpd / iapeer / publish.yml.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to publish (e.g. v0.4.111)'
+        required: true
+
+permissions:
+  id-token: write # OIDC for npm trusted publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in release builds
+      - run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
+      - name: Tag matches package.json version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          ver="v$(node -p "require('./package.json').version")"
+          [ "$tag" = "$ver" ] || { echo "tag $tag != package.json $ver" >&2; exit 1; }
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run typecheck
+      - run: npm publish
