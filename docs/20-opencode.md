@@ -123,6 +123,23 @@ Open core contracts this ABI depends on:
   provision/unprovision per peer and runtime, like the memory slot. Until it
   exists, a manual install is not reported as final.
 
+## Launch self-check (OC04)
+
+OpenCode tolerates some broken surfaces silently: a fragment plugin whose file
+is missing or that throws on load, and an MCP server that does not connect
+(e.g. an unreachable memory MCP), all still give a «working» session with the
+surface absent. Before it reports readiness, the core plugin checks:
+- every MCP server's native status (`connected`/`disabled` are fine);
+- every `file://` plugin in the effective config exists;
+- the native log (`<XDG_DATA_HOME>/opencode/log/opencode.log`, lines of THIS
+  process found through a `iapeer-selfcheck <launchID>` marker line) for
+  `failed to load plugin`.
+Findings are never a refusal (the session is usable) and never silent:
+`runtime.ready.properties.warnings` (additive), `state.json` `warnings`,
+`ev=launch-warning` in lifecycle.log per warning, and the fleet field
+`runtimes[].warnings` (docs/15). Native run of 2026-10-18: unreachable MCP,
+missing plugin and throwing plugin each reported.
+
 ## Provider pinning
 
 Without an explicit `model`, native OpenCode uses its own hosted default

@@ -104,6 +104,13 @@ writeFileSync(
   }),
 )
 writeFileSync(join(cwd, 'AGENTS.md'), 'NATIVE_AGENTS_SENTINEL\n')
+// OC04 self-check fixtures: a memory fragment naming a MISSING plugin and a plugin that THROWS on load.
+const boom = join(root, 'boom-plugin.mjs')
+writeFileSync(boom, "export default { id: 'boom', server: async () => { throw new Error('PLUGIN_BOOM_SELF') } }\n")
+writeFileSync(
+  join(paths.dir, 'iapeer-memory.json'),
+  JSON.stringify({ plugin: ['file://' + join(root, 'missing-plugin.mjs'), 'file://' + boom] }),
+)
 
 const results: { check: string; ok: boolean; detail?: unknown }[] = []
 function check(name: string, ok: boolean, detail?: unknown) {
@@ -159,6 +166,13 @@ try {
   const r1 = await launch(spec('IAPEER_DOCTRINE_ONE'), opencodeAdapter, 'FIRST_MSG', cfg)
   check('launch #1 READY under supervisor', r1.status === 'READY', { ...r1, ms: Date.now() - t0 })
   check('hosted session alive', hostSessionAlive(identity, env))
+  const w = (readEvents().find(e => e.type === 'runtime.ready')?.properties?.warnings ?? []) as string[]
+  check('self-check: unreachable MCP reported (never silent)', w.some(x => /^mcp iapeer: failed/.test(x)), w)
+  check('self-check: missing fragment plugin reported', w.some(x => x.startsWith('plugin missing:') && x.includes('missing-plugin.mjs')), w)
+  check('self-check: throwing fragment plugin reported', w.some(x => x.startsWith('plugin failed:') && x.includes('boom-plugin')), w)
+  check('self-check warnings also in state.json', (readState()?.warnings ?? []).length === w.length && w.length > 0)
+  const lc = existsSync(join(root, 'iapeer', 'logs', 'iapeer', 'lifecycle.log')) ? readFileSync(join(root, 'iapeer', 'logs', 'iapeer', 'lifecycle.log'), 'utf8') : ''
+  check('self-check warnings recorded as ev=launch-warning', (lc.match(/ev=launch-warning/g) ?? []).length >= w.length)
   const ready1 = readEvents().find(e => e.type === 'runtime.ready')
   check('runtime.ready fresh (resumed=false) with a session', ready1?.properties?.resumed === false && typeof ready1?.sessionID === 'string', ready1?.sessionID)
   await until('FIRST_MSG reaches the provider', () => userTexts().some(t => t.includes('FIRST_MSG')), 30000)

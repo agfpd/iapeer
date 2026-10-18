@@ -241,6 +241,7 @@ export const launch: LaunchFn = async (
       if (adapter.structuralReady && readyToken) {
         const r = await adapter.structuralReady(spec, readyToken, Date.now() + cfg.bootDeadlineSecs * 1000, () => hostSessionAlive(identity, env), env)
         if (!r.ok) return fail(identity, `never-became-ready (structural: ${r.reason ?? 'unknown'})`)
+        for (const w of r.warnings ?? []) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
         if (firstMessage.trim().length === 0) return ready(identity)
         if (!adapter.deliver) return fail(identity, 'structural runtime has no deliver hook')
         const d = await adapter.deliver({ personality: spec.personality, identity }, firstMessage, env)

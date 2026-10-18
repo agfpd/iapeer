@@ -94,6 +94,9 @@ export interface FleetRuntimeStatus {
   /** The model the runtime ACTUALLY used last (`provider/model`, from the endpoint's own state; docs/20
    *  §Provider pinning). Absent until a first assistant turn, or for runtimes that do not report it. */
   model?: string
+  /** Launch self-check warnings of the endpoint's current session (docs/20 OC04): a missing or failed
+   *  plugin, an MCP server not connected. Absent when clean. */
+  warnings?: string[]
   /** Present (true) iff a HUMAN operator is attached to this live hosted session. */
   attached?: boolean
   /** Whether this runtime is IN A TURN right now — a SEPARATE concept from `status`, which
@@ -245,11 +248,17 @@ export function buildFleetSnapshot(
    *  never emitted, which is exactly its "no claim" semantics. */
   activityOf?: (personality: string, runtime: string) => TurnActivity | undefined,
 ): FleetSnapshot {
-  const privateDirOf = (runtime: string, personality: string): { private_dir?: string; model?: string } => {
+  const privateDirOf = (runtime: string, personality: string): { private_dir?: string; model?: string; warnings?: string[] } => {
     const d = endpointPrivateDir(runtime, personality, { env })
     if (!d) return {}
-    const model = (readOpencodeState(join(d, 'state.json')) as { model?: unknown } | null)?.model
-    return { private_dir: d, ...(typeof model === 'string' && model ? { model } : {}) }
+    const st = readOpencodeState(join(d, 'state.json'))
+    const model = st?.model
+    const warnings = Array.isArray(st?.warnings) ? st!.warnings!.filter(w => typeof w === 'string') : []
+    return {
+      private_dir: d,
+      ...(typeof model === 'string' && model ? { model } : {}),
+      ...(warnings.length ? { warnings } : {}),
+    }
   }
   const peers: FleetPeer[] = ops.listPeers({ env }).map(r => {
     const runtimes: FleetRuntimeStatus[] = r.runtimes.map(s => {

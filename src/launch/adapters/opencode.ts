@@ -125,7 +125,9 @@ export const opencodeAdapter: RuntimeAdapter = {
             const ping = await opencodeControl(controlSocket(spec.personality, env), { op: 'ping' }, 5000)
             if (!ping.ok) return { ok: false, reason: `runtime.ready seen but control ping failed: ${ping.error}` }
             if (ping.launchID !== launchID) return { ok: false, reason: `control socket answers launch ${ping.launchID}, expected ${launchID}` }
-            return { ok: true }
+            const w = (l.properties as { warnings?: unknown } | null)?.warnings
+            const warnings = Array.isArray(w) ? w.filter((x): x is string => typeof x === 'string') : []
+            return warnings.length ? { ok: true, warnings } : { ok: true }
           }
           if (l.type === 'runtime.error') {
             const e = (l.properties as { error?: unknown } | null)?.error

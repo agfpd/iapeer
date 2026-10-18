@@ -19,6 +19,8 @@ export interface OpencodeState {
   error?: string
   /** Actual `provider/model` of the last assistant turn (plugin-reported). */
   model?: string
+  /** Launch self-check findings (missing/failed plugin, MCP not connected) — docs/20 OC04. */
+  warnings?: string[]
 }
 
 export interface OpencodeJournalLine {

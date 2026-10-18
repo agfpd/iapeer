@@ -428,7 +428,7 @@ export interface RuntimeAdapter {
 
   /** Structural readiness replacing the pane-glyph gate: resolves when the runtime itself reported
    *  readiness for `readyToken` (fail on deadline / reported error / `alive()` false). */
-  structuralReady?(spec: LaunchSpec, readyToken: string, deadlineMs: number, alive: () => boolean, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; reason?: string }>
+  structuralReady?(spec: LaunchSpec, readyToken: string, deadlineMs: number, alive: () => boolean, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; reason?: string; warnings?: string[] }>
 
   /** Structural delivery (deliveryConfirm 'structural'): resolves ok only when THIS message is accepted
    *  and persisted by the runtime. */

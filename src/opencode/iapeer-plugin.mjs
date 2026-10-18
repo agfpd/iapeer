@@ -8,9 +8,11 @@
 //     message delivery (acknowledged only once THIS message is persisted natively),
 //     interrupt and TUI session selection.
 // Plain ESM, no dependencies: it runs inside OpenCode's own server worker.
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const SCHEMA = 1
 const DELIVER_ACK_MS = 15000
@@ -296,6 +298,66 @@ async function server(input) {
     control.listen(paths.socket, () => resolve())
   })
 
+  // ── launch self-check (OC04): problems OpenCode itself tolerates silently ─────
+  // A missing / throwing plugin from a fragment and an unreachable MCP server still give a «working»
+  // session with surfaces silently absent. They are reported in runtime.ready.properties.warnings and
+  // state.warnings — never a refusal (the session is usable), never silent.
+  function tailText(path, bytes) {
+    try {
+      const size = statSync(path).size
+      const fd = openSync(path, 'r')
+      try {
+        const start = Math.max(0, size - bytes)
+        const buf = Buffer.alloc(size - start)
+        readSync(fd, buf, 0, buf.length, start)
+        return buf.toString('utf8')
+      } finally {
+        closeSync(fd)
+      }
+    } catch {
+      return ''
+    }
+  }
+  async function selfCheck() {
+    const warnings = []
+    try {
+      const st = await client.mcp.status()
+      for (const [name, s] of Object.entries((st && st.data) || {})) {
+        if (s && s.status !== 'connected' && s.status !== 'disabled') warnings.push('mcp ' + name + ': ' + s.status + (s.error ? ' — ' + String(s.error).slice(0, 200) : ''))
+      }
+    } catch (e) {
+      warnings.push('mcp status unavailable: ' + (e instanceof Error ? e.message : String(e)))
+    }
+    try {
+      const cfg = await client.config.get()
+      for (const spec of ((cfg && cfg.data && cfg.data.plugin) || [])) {
+        if (typeof spec === 'string' && spec.startsWith('file://') && !existsSync(fileURLToPath(spec))) warnings.push('plugin missing: ' + spec)
+      }
+    } catch {}
+    // Plugin load failures are only in the native log (one shared file, lines tagged run=<id>): find
+    // THIS process's run id through a marker line, then its «failed to load plugin» lines.
+    try {
+      const marker = 'iapeer-selfcheck ' + launchID
+      await client.app.log({ body: { service: 'iapeer', level: 'warn', message: marker } })
+      const logFile = join(env.XDG_DATA_HOME || join(env.HOME || homedir(), '.local', 'share'), 'opencode', 'log', 'opencode.log')
+      let text = ''
+      for (let i = 0; i < 10 && !text.includes(marker); i++) {
+        await new Promise(r => setTimeout(r, 100))
+        text = tailText(logFile, 4 * 1024 * 1024)
+      }
+      const mine = text.split('\n').find(l => l.includes(marker))
+      const run = mine && (mine.match(/ run=([^ ]+)/) || [])[1]
+      if (run) {
+        for (const l of text.split('\n')) {
+          if (l.includes(' run=' + run + ' ') && /failed to load plugin|Failed to load plugin|plugin config hook failed/.test(l)) {
+            warnings.push('plugin failed: ' + l.replace(/^.*?message=/, '').slice(0, 300))
+          }
+        }
+      }
+    } catch {}
+    return warnings
+  }
+
   // Readiness runs AFTER init returns: calling the in-process client while OpenCode is
   // still loading this plugin would wait on the very instance state being built.
   // The socket is up and the session is known (fresh: created now) → runtime.ready —
@@ -310,8 +372,11 @@ async function server(input) {
         const hist = await client.session.messages({ path: { id: sessionID } }).catch(() => null)
         for (const m of (hist && hist.data) || []) noteModel(m && m.info)
       }
+      const warnings = await selfCheck()
+      if (warnings.length) state.warnings = warnings
+      else delete state.warnings
       if (state.status === 'starting') state.status = 'idle'
-      journal('runtime.ready', { session: got.data, resumed }, null, sessionID)
+      journal('runtime.ready', { session: got.data, resumed, ...(warnings.length ? { warnings } : {}) }, null, sessionID)
     } catch (e) {
       state.status = 'error'
       state.error = e instanceof Error ? e.message : String(e)
