@@ -557,6 +557,28 @@ export function muteWatchTick(deps: MuteWatchDeps, sinceMs: number): { raised: n
   return { raised, sinceMs: startedMs }
 }
 
+/**
+ * personality ← a session's self-stated cwd: the peer whose registered cwd is that path OR its
+ * NEAREST ancestor. A session records the cwd it is IN at each line, and a peer that `cd`s into a
+ * subdirectory of its project (observed 18.10.2026: `…/oc-test-nemo/.iapeer`) would otherwise fall
+ * out of attribution — no notice, no limit-park. Longest prefix wins, so a peer nested inside
+ * another peer's tree is attributed to itself. Keys are normalized (trailing slash off, lowercase).
+ */
+export function peerByCwdPrefix(byCwd: Map<string, string>, cwd: string): string | undefined {
+  const exact = cwd.replace(/\/+$/, '').toLowerCase()
+  let p = exact
+  while (p) {
+    const hit = byCwd.get(p)
+    // An ANCESTOR hit counts only below /<a>/<b>/<c> depth: a peer whose cwd is $HOME (or shallower)
+    // must not swallow every session on the host — such a peer attributes by exact match only.
+    if (hit && (p === exact || p.split('/').length > 4)) return hit
+    const i = p.lastIndexOf('/')
+    if (i <= 0) return undefined
+    p = p.slice(0, i)
+  }
+  return undefined
+}
+
 export interface StartMuteWatchOptions {
   env?: NodeJS.ProcessEnv
   intervalMs?: number
@@ -604,7 +626,7 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
         now,
         onError: opts.onError,
         onLimit: opts.onLimit,
-        peerByCwd: (cwd: string) => byCwd.get(cwd.replace(/\/+$/, '').toLowerCase()),
+        peerByCwd: (cwd: string) => peerByCwdPrefix(byCwd, cwd),
         opencodeJournals: () =>
           rows
             .filter(r => (r.runtimes ?? []).includes('opencode'))

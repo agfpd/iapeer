@@ -198,3 +198,18 @@ describe('continue-work wake intent — the nudge resumes the stopped context', 
     expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has, undefined, f => f(), true).cause).toBe('self-fresh-eager')
   })
 })
+
+describe('mute-watch attribution — a peer that cd-ed into a subdirectory is still itself', () => {
+  test('nearest registered ancestor wins; a non-peer path stays unattributed', async () => {
+    const { peerByCwdPrefix } = await import('../daemon/mutewatch.ts')
+    const m = new Map([['/users/x/peers/a', 'a'], ['/users/x/peers/a/nested', 'n']])
+    expect(peerByCwdPrefix(m, '/Users/x/peers/a/.iapeer')).toBe('a')
+    expect(peerByCwdPrefix(m, '/Users/x/peers/a/nested/src/')).toBe('n')
+    expect(peerByCwdPrefix(m, '/Users/x/peers/a')).toBe('a')
+    expect(peerByCwdPrefix(m, '/Users/x/elsewhere')).toBeUndefined()
+    expect(peerByCwdPrefix(m, '/')).toBeUndefined()
+    const home = new Map([['/users/x', 'h']])
+    expect(peerByCwdPrefix(home, '/Users/x')).toBe('h') // exact still attributes
+    expect(peerByCwdPrefix(home, '/Users/x/Projects/other')).toBeUndefined() // a $HOME peer never swallows the host
+  })
+})
