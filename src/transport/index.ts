@@ -844,7 +844,7 @@ const PROCESSED_TAIL_BYTES = 16 * 1024 * 1024
  * UUID-less historical records retain the legacy ordered scan; a broken UUID chain never does.
  */
 function claudeDeliveryState(tail: string, needles: string[]): { processed: boolean; completed: boolean } | null {
-  interface Record { type?: string; uuid?: string; parentUuid?: string | null; message?: { stop_reason?: string; content?: unknown } }
+  interface Record { type?: string; uuid?: string; parentUuid?: string | null; message?: { stop_reason?: string; content?: unknown }; attachment?: { type?: string; prompt?: unknown } }
   const rows: Record[] = []
   const byID = new Map<string, Record>()
   const carried = new Set<string>()
@@ -854,7 +854,13 @@ function claudeDeliveryState(tail: string, needles: string[]): { processed: bool
       rows.push(r)
       if (r.uuid) byID.set(r.uuid, r)
       // Only the actual input can establish causality, not its quoted prompt_snapshot or queue entry.
+      // Two native input shapes: an idle receiver records a `user` turn; a BUSY receiver absorbs the
+      // message into the running turn as an `attachment` of type `queued_command` (with a
+      // queue-operation `remove reason=absorbed_mid_turn`) and the turn's later records descend from
+      // that attachment. Missing the second shape left every mid-turn delivery «unprocessed» forever,
+      // so the next reap redelivered it (claude-boris 18.10, 0.4.140).
       if (r.type === 'user' && r.uuid && jsonStringValuesContainAll(r.message, needles)) carried.add(r.uuid)
+      if (r.type === 'attachment' && r.uuid && r.attachment?.type === 'queued_command' && jsonStringValuesContainAll(r.attachment.prompt, needles)) carried.add(r.uuid)
     } catch { /* bounded tails may start with a torn record */ }
   }
   if (!carried.size) return rows.some(r => r.uuid && (r.type === 'user' || r.type === 'assistant'))

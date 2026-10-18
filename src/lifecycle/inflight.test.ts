@@ -183,6 +183,51 @@ describe('deliveryProcessed — recorded is NOT processed', () => {
     expect(takeInterrupted(state, probe.identity)).toEqual([])
   })
 
+  test('Claude busy receiver: a message absorbed mid-turn (attachment queued_command) closes with that turn', () => {
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude/projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 'native.jsonl'), probe = entry({ cwd })
+    // Native shape (claude-boris 18.10): enqueue → the running turn's tool_result → the absorbed
+    // attachment (flushed out of order) → the rest of the turn descends from the attachment.
+    const records: Array<Record<string, unknown>> = [
+      { type: 'user', uuid: 'u0', parentUuid: null, message: { content: 'an earlier task' } },
+      { type: 'queue-operation', operation: 'enqueue', content: ENV_BODY },
+      { type: 'assistant', uuid: 'a0', parentUuid: 'u0', message: { stop_reason: 'tool_use' } },
+      { type: 'user', uuid: 'tr', parentUuid: 'a0', message: { content: [{ type: 'tool_result', content: 'ok' }] } },
+      { type: 'queue-operation', operation: 'remove', content: ENV_BODY, reason: 'absorbed_mid_turn' },
+      { type: 'attachment', uuid: 'q', parentUuid: 'tr', attachment: { type: 'queued_command', prompt: ENV_BODY, commandMode: 'prompt' } },
+    ]
+    const write = () => writeFileSync(f, records.map(r => JSON.stringify(r)).join('\n') + '\n')
+    write()
+    expect(deliveryLanded(probe, { HOME: root })).toBe(true)
+    expect(deliveryProcessed(probe, { HOME: root })).toBe(false) // absorbed, not yet answered
+    records.push({ type: 'attachment', uuid: 'r', parentUuid: 'q', attachment: { type: 'total_tokens_reminder' } })
+    records.push({ type: 'assistant', uuid: 'a1', parentUuid: 'r', message: { stop_reason: 'tool_use' } })
+    write()
+    expect(deliveryProcessed(probe, { HOME: root })).toBe(true)
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(false) // the turn it fell into is still running
+    records.push({ type: 'assistant', uuid: 'a2', parentUuid: 'a1', message: { stop_reason: 'end_turn' } })
+    write()
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(true)
+    // End of turn + the session reaped → nothing orphaned, nothing interrupted.
+    recordInflight(state, probe)
+    expect(sweepInflight(state, probe.identity, {
+      sessionToken: () => null,
+      processed: e => deliveryProcessed(e, { HOME: root }),
+      completed: e => deliveryCompleted(e, { HOME: root }),
+    })).toBe(0)
+    expect(takeOrphans(state, probe.identity)).toEqual([])
+    expect(takeInterrupted(state, probe.identity)).toEqual([])
+    // Only the absorbed input is a carrier: a different attachment type quoting the envelope is not.
+    writeFileSync(f, [
+      { type: 'attachment', uuid: 'q', attachment: { type: 'edited_text_file', prompt: ENV_BODY } },
+      { type: 'assistant', uuid: 'a', parentUuid: 'q', message: { stop_reason: 'end_turn' } },
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(false)
+  })
+
   test('Claude UUID causality refuses unrelated terminals, absent ancestors and cycles despite later file position', () => {
     const cwd = join(root, 'bob')
     mkdirSync(cwd, { recursive: true })
