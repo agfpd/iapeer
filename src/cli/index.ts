@@ -2336,6 +2336,17 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             legacyRuntimeProfiles.push({ personality: peer.personality, cwd: peer.cwd })
           }
         }
+        // MCP parity across the peer's agent runtimes: a server on one endpoint and missing on another
+        // leaves the SAME peer silently weaker there (incident 17.10 — domain MCPs only in codex config).
+        const { mcpParity } = await import('../verify/mcpParity.ts')
+        let mcpDrift = 0
+        for (const peer of index.peers) {
+          for (const issue of mcpParity(peer.personality, peer.cwd, peer.runtimes, { env })) {
+            errors++
+            mcpDrift++
+            lines.push(`✗ ${peer.personality}: MCP server "${issue.server}" is in [${issue.presentIn.join(', ')}] but MISSING in [${issue.missingIn.join(', ')}]`)
+          }
+        }
         const reconcile = reconcileIndex({ env })
         for (const r of reconcile) {
           if (r.drift === null) {
@@ -2346,7 +2357,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           }
         }
         if (flags.json === true) {
-          out(JSON.stringify({ peers: index.peers.length, errors, drift: driftCount, reconcile }, null, 2) + '\n')
+          out(JSON.stringify({ peers: index.peers.length, errors, drift: driftCount, mcpDrift, reconcile }, null, 2) + '\n')
         } else {
           for (const l of lines) out(l + '\n')
           out(`\n${index.peers.length} peers · ${errors} error(s) · ${driftCount} index↔local drift(s)\n`)
