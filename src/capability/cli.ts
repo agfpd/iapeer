@@ -6,8 +6,8 @@ import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import { pluginLogsDir } from '../storage/index.ts'
 import type { ProvisionOccasion } from '../enable/provisionCommand.ts'
 import { loadLifecycleConfig } from '../lifecycle/index.ts'
-import { applyReloads } from './reload.ts'
-import { pendingReloads, readReload, reloadIdentities, requestReload } from './reloadStore.ts'
+import { requestAndApply } from './reload.ts'
+import { pendingReloads, reloadIdentities } from './reloadStore.ts'
 import {
   capabilityEndpoints,
   listCapabilities,
@@ -68,13 +68,9 @@ export async function capabilityCli(
     const cfg = loadLifecycleConfig(env)
     for (const l of lines) {
       if (l.state !== 'ok') continue
-      try {
-        const req = requestReload(cfg, l.personality, l.runtime)
-        await applyReloads(cfg, `${l.runtime}-${l.personality}`, env)
-        const result = readReload(cfg, req)
-        l.application = result.state === 'applied' ? 'applied' : result.state === 'failed' ? 'failed' : 'pending'
-        l.applicationDetail = result.detail
-      } catch (e) { l.application = 'failed'; l.applicationDetail = String(e) }
+      const r = await requestAndApply(cfg, l.personality, l.runtime, env)
+      l.application = r.application
+      l.applicationDetail = r.detail
     }
     return lines
   }

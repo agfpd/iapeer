@@ -72,3 +72,49 @@ test('GC: applied requests are collected after the TTL, pending ones never; a go
   expect(existsSync(reloadDir(cfg, 'claude-probe'))).toBe(false)
   expect(pendingReloads(cfg, 'claude-probe')).toEqual([])
 })
+test('surface watch: a hosting without baseline adopts it; a later outside write owes ONE reload', async () => {
+  const { watchSurfaces } = await import('./reload.ts')
+  const { readSurfaceBaseline, surfaceFingerprint } = await import('./surfaces.ts')
+  const { writeFileSync } = await import('node:fs')
+  const hosted = [{ runtime: 'claude' as const, personality: 'probe' }]
+  expect(watchSurfaces(cfg, env, hosted)).toEqual([]) // legacy hosting: adopt, never guess
+  expect(readSurfaceBaseline(cfg, 'claude-probe')).toBe(surfaceFingerprint('claude', root, 'probe', env))
+  expect(watchSurfaces(cfg, env, hosted)).toEqual([])
+  writeFileSync(join(root, '.mcp.json'), '{"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:1"}}}') // provider-shaped writer
+  expect(watchSurfaces(cfg, env, hosted)).toEqual(['claude-probe'])
+  writeFileSync(join(root, '.mcp.json'), '{"mcpServers":{}}')
+  expect(watchSurfaces(cfg, env, hosted)).toEqual([]) // still owed: one application reads the latest files
+  expect(pendingReloads(cfg, 'claude-probe')).toHaveLength(1)
+})
+test('surface watch ignores runtime-written OpenCode state and core-regenerated files', async () => {
+  const { surfaceFingerprint } = await import('./surfaces.ts')
+  const { opencodePrivateDir } = await import('../storage/index.ts')
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const dir = opencodePrivateDir('probe', { env }); mkdirSync(dir, { recursive: true })
+  const before = surfaceFingerprint('opencode', root, 'probe', env)
+  for (const f of ['state.json', 'events.jsonl', 'iapeer-plugin.mjs', 'peer-mcp.json']) writeFileSync(join(dir, f), 'x')
+  expect(surfaceFingerprint('opencode', root, 'probe', env)).toBe(before)
+  writeFileSync(join(dir, 'iapeer-memory.json'), '{"mcp":{}}')
+  expect(surfaceFingerprint('opencode', root, 'probe', env)).not.toBe(before)
+})
+test('remove-runtime retire: busy stays pending (never killed); asleep completes; the retirement runs inside the wake path', async () => {
+  const { requestRetire } = await import('./reloadStore.ts')
+  const r = requestRetire(cfg, 'probe', 'claude')
+  const removed: string[] = []
+  const finishRemove = async (p: string, rt: string) => { removed.push(`${rt}-${p}`); return ['done'] }
+  await applyReloads(cfg, 'claude-probe', env, { alive: () => true, finishRemove, replace: async a => {
+    expect(a.retireOnly).toBe(true); expect(a.reload).toBe(true)
+    return { status: 'FAILED', woke: false, pending: true, reason: 'native Claude session is busy' }
+  } })
+  expect(readReload(cfg, r).state).toBe('pending')
+  expect(removed).toEqual([])
+  await applyReloads(cfg, 'claude-probe', env, { alive: () => true, finishRemove, replace: async a => {
+    await a.afterRetire!()
+    return { status: 'READY', woke: false }
+  } })
+  expect(removed).toEqual(['claude-probe'])
+  const r2 = requestRetire(cfg, 'probe', 'claude')
+  await applyReloads(cfg, 'claude-probe', env, { alive: () => false, finishRemove, replace: async () => { throw new Error('asleep: no wake') } })
+  expect(removed).toEqual(['claude-probe', 'claude-probe'])
+  expect(r2.kind).toBe('retire')
+})

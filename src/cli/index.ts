@@ -921,7 +921,7 @@ export async function compactPeer(
 export interface RemoveRuntimeOutcome {
   personality: string
   runtime: string
-  action: 'removed' | 'absent' | 'refused-default' | 'refused-last' | 'refused-live' | 'refused-infra'
+  action: 'removed' | 'pending' | 'absent' | 'refused-default' | 'refused-last' | 'refused-live' | 'refused-infra'
   reason?: string
   /** What was undone, one line per surface. */
   steps?: string[]
@@ -930,7 +930,8 @@ export interface RemoveRuntimeOutcome {
 /**
  * Detach ONE runtime from a peer (OC14-2 — the pilot rollback of `add-runtime --all`). Undoes what
  * add-runtime did for that endpoint, in this order: refuse unsafe cases (the default runtime, the last
- * runtime, a live session unless --force, an infra channel — its plist teardown is `remove`'s job);
+ * runtime, an infra channel — its plist teardown is `remove`'s job; a LIVE endpoint is retired at its next
+ * turn boundary, see completeRemoveRuntime / docs/21);
  * unprovision the memory slot and every capability for THIS runtime (occasion=remove); runtime cleanup
  * (opencode: its core private dir; codex: cwd trust); park the cwd discovery markers (`.claude`/`.codex`
  * and `.iapeer/runtimes/<rt>`) as `<name>.removed-<ts>` so re-provision does not rediscover the
@@ -965,12 +966,37 @@ export async function removeRuntimeCli(
   const steps: string[] = []
   if (isPeerLive(runtime, personality, cfg.sockDir, env)) {
     if (!opts.force) {
-      return { personality, runtime, action: 'refused-live', reason: `${identity} is LIVE — stop it first (iapeer stop ${personality} ${runtime}) or pass --force` }
+      // A live endpoint is removed at its next turn boundary (docs/21): an idle one right now, a busy
+      // one after its current turn — never killed mid-turn. The request is durable; the daemon owns it.
+      const { requestRetire } = await import('../capability/reloadStore.ts')
+      const { applyReloads } = await import('../capability/reload.ts')
+      requestRetire(cfg, personality, runtime)
+      let done: string[] | undefined
+      await applyReloads(cfg, identity, env, { finishRemove: async (p, rt, e) => (done = await completeRemoveRuntime(rt, { peer: p, env: e })) })
+      if (done) return { personality, runtime, action: 'removed', steps: ['live session retired at an idle turn boundary', ...done] }
+      return {
+        personality,
+        runtime,
+        action: 'pending',
+        reason: `${identity} is busy or accepting input — it is removed automatically after its current turn (iapeer capability list shows the owed removal; interrupt/stop abort the turn)`,
+      }
     }
     const { killPtyHost } = await import('../launch/ptyHost.ts')
     killPtyHost(identity, env, { reason: 'remove-runtime-force' })
     steps.push('live session stopped (--force)')
   }
+  return { personality, runtime, action: 'removed', steps: [...steps, ...(await completeRemoveRuntime(runtime, { env, peer: personality }))] }
+}
+
+/** The removal itself, for an endpoint with no live session (or one just retired at a turn boundary). */
+export async function completeRemoveRuntime(runtime: string, opts: CliEnvOptions & { peer: string }): Promise<string[]> {
+  const env = opts.env ?? process.env
+  const personality = opts.peer
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer || !peer.runtimes.includes(runtime)) return [`${runtime} already detached`]
+  const cfg = loadLifecycleConfig(env)
+  const identity = buildProcessAddress(runtime as Runtime, personality)
+  const steps: string[] = []
   // Slots for THIS endpoint (provider + capabilities), while the peer's state is still consistent.
   try {
     const slot = readMemoryProvider(env)
@@ -1022,7 +1048,7 @@ export async function removeRuntimeCli(
   await reindexFromLocals({ env })
   const purged = purgeIdentityState(cfg, identity)
   if (purged.length) steps.push(`lifecycle state purged: ${purged.join(', ')}`)
-  return { personality, runtime, action: 'removed', steps }
+  return steps
 }
 
 export interface RemoveOutcome {
@@ -1751,7 +1777,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|approve <id>|deny <id> [reason]|status',
     desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; renders the approval queue (badge + Allow/Deny), install activates it (installs SwiftBar when absent). See docs/16.',
   },
-  { sig: 'remove-runtime <runtime> --peer <p> [--force]', desc: 'detach ONE agentic runtime from a peer (the undo of add-runtime): unprovision memory + capabilities for it, runtime cleanup (opencode private dir, codex trust), park its cwd markers as *.removed-<ts> (data kept), drop it from the profile + registry, purge its lifecycle state. Refuses the default runtime, the last runtime, a live session (unless --force) and infra channels' },
+  { sig: 'remove-runtime <runtime> --peer <p> [--force]', desc: 'detach ONE agentic runtime from a peer (the undo of add-runtime): unprovision memory + capabilities for it, runtime cleanup (opencode private dir, codex trust), park its cwd markers as *.removed-<ts> (data kept), drop it from the profile + registry, purge its lifecycle state. A LIVE endpoint is removed at its next turn boundary: idle → now, busy → `pending` (exit 0) and removed by the daemon after the turn, never killed mid-turn; --force kills now. Refuses the default runtime, the last runtime and infra channels' },
   { sig: 'private-dir <peer> [--runtime r]', desc: 'print the core-owned private directory of a peer endpoint (docs/20: opencode journal/state/fragments). The ONLY way a process not launched by the core gets the path — never derive the layout. Without --runtime: the single declared runtime that has one. Exit 1 when none' },
   { sig: 'approval-mode <peer> [gated|yolo]', desc: 'read/flip a peer\'s human-approval mode (docs/17): yolo=current bypass; gated=blocking runtime approvals routed to a human. Persists + brings runtime surfaces to the mode; applies on next fresh session' },
   { sig: 'approvals [--json]', desc: 'list pending human-approval requests (verbatim action content); the host answer channel to the daemon broker' },
@@ -2491,7 +2517,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const o = await removeRuntimeCli(rt, { peer: peerName, force: flags.force === true, env })
         out(`${o.personality}: ${o.runtime} ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         for (const step of o.steps ?? []) out(`  ${step}\n`)
-        return o.action === 'removed' || o.action === 'absent' ? 0 : 1
+        return o.action === 'removed' || o.action === 'absent' || o.action === 'pending' ? 0 : 1
       }
       case 'default-runtime': {
         // The PRIMARY flip (routing/wake default) — the fleet-switch moment itself.
@@ -3124,11 +3150,22 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           noSetup: flags['no-setup'] === true,
           env,
         })
+        // codex installs plugins into the HOST config, which the surface watch deliberately does not
+        // fingerprint (the runtime writes it itself) — so a changed endpoint asks for its reload here.
+        const { requestAndApply } = await import('../capability/reload.ts')
+        const enableCfg = loadLifecycleConfig(env)
+        let reloadFailed = false
         for (const rt of r.runtimes) {
-          out(`  ${rt.runtime}: ${rt.state}${rt.detail ? ` — ${rt.detail}` : ''}\n`)
+          let application = ''
+          if (rt.state === 'installed' || rt.state === 'enabled') {
+            const a = await requestAndApply(enableCfg, r.personality, rt.runtime, env)
+            reloadFailed ||= a.application === 'failed'
+            application = `; runtime=${a.application} — ${a.detail}`
+          }
+          out(`  ${rt.runtime}: ${rt.state}${rt.detail ? ` — ${rt.detail}` : ''}${application}\n`)
         }
         out(`enable ${r.plugin} @ ${r.personality}: setup ${r.setup}${r.setupDetail ? ` — ${r.setupDetail}` : ''}\n`)
-        return r.runtimes.some(rt => rt.state === 'failed') || r.setup === 'failed' ? 1 : 0
+        return r.runtimes.some(rt => rt.state === 'failed') || r.setup === 'failed' || reloadFailed ? 1 : 0
       }
       case 'attach': {
         if (!positionals[0]) return argErr(errOut, 'attach needs a peer name — usage: iapeer attach <peer> [runtime]')

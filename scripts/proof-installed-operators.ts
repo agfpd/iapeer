@@ -118,15 +118,16 @@ try {
   const sentinelPid = readPidFile(runDir, 'notifier-sender')!.pid
   await initPeer({ cwd, runtime: 'opencode', personality, intelligence: 'artificial', env })
   mkdirSync(paths().dir, { recursive: true })
-  writeFileSync(paths().config, JSON.stringify({ model: 'synthetic/synthetic', small_model: 'synthetic/synthetic', enabled_providers: ['synthetic'], provider: {
+  const writeProviderConfig = () => { mkdirSync(paths().dir, { recursive: true }); writeFileSync(paths().config, JSON.stringify({ model: 'synthetic/synthetic', small_model: 'synthetic/synthetic', enabled_providers: ['synthetic'], provider: {
     synthetic: { npm: '@ai-sdk/openai-compatible', name: 'Synthetic', options: { baseURL: provider.url.origin + '/v1', apiKey: 'x' }, models: { synthetic: { name: 'Synthetic', limit: { context: 100000, output: 1000 } } } },
-  } }))
+  } })) }
+  writeProviderConfig()
   daemon = Bun.spawn([arg('--legacy-bin') ?? bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
   await until('installed daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
   await turn('FIRST_OPERATOR_PROOF')
   const original = state()!
   record('cold-turn', original)
-  if (process.argv.includes('--reload-only') || arg('--legacy-bin')) {
+  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || arg('--legacy-bin')) {
     let busySeq = 0
     await proveReload({ root, cwd, runtime: 'opencode', cli, turn, hosting, session: () => state()?.sessionID, record,
       probe: async () => {
@@ -145,7 +146,9 @@ try {
         daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
         await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
       },
-    }, surface.url, !!arg('--legacy-bin'))
+      afterReAdd: writeProviderConfig,
+      peerRuntimes: () => (JSON.parse(read(join(iap, 'peers-profiles.json'))).peers ?? []).find((p: any) => p.personality === personality)?.runtimes ?? [],
+    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : 'capability')
     success = true
   } else if (process.argv.includes('--surfaces-only')) {
     // Real capability installer argv, real register/unregister sweeps, real MCP

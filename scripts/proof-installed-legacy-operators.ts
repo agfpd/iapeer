@@ -147,7 +147,7 @@ try {
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
 
-  if (process.argv.includes('--reload-only') || arg('--legacy-bin')) {
+  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || arg('--legacy-bin')) {
     let busyAt = 0
     await proveReload({ root, cwd, runtime, cli, turn, hosting, session: nativeSession, record,
       probe: async () => {
@@ -166,7 +166,8 @@ try {
         daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
         await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
       },
-    }, surface.url, !!arg('--legacy-bin'))
+      peerRuntimes: () => (JSON.parse(read(join(iap, 'peers-profiles.json'))).peers ?? []).find((p: any) => p.personality === personality)?.runtimes ?? [],
+    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : 'capability')
     success = true
   } else {
 

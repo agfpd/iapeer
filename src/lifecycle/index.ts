@@ -56,6 +56,7 @@ import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 import { fenceHost } from '../supervisor/reload.ts'
 import { completeReloads, pendingReloads } from '../capability/reloadStore.ts'
+import { surfaceFingerprint, writeSurfaceBaseline } from '../capability/surfaces.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -994,6 +995,10 @@ export interface WakeArgs {
   reloadRequestIds?: string[]
   /** Durable continuation must be recorded BEFORE retiring the hosting. A failed write aborts it. */
   beforeReloadRetire?: (resumeRef: string) => void
+  /** remove-runtime at a turn boundary: retire the proven-idle hosting and DO NOT relaunch. `afterRetire`
+   *  runs INSIDE the wake lock, so no concurrent wake can resurrect the endpoint being removed. */
+  retireOnly?: boolean
+  afterRetire?: () => Promise<void>
 }
 
 export interface WakeResult {
@@ -1132,6 +1137,10 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
         if (hostDaemonAlive(runDir, identity)) return { status: 'FAILED', woke: false, runtime, reason: 'reload hosting teardown timed out' }
         clearHostReady(identity, env, runDir)
       } finally { lease.close() }
+      if (args.retireOnly) {
+        await args.afterRetire?.()
+        return { status: 'READY', woke: false, runtime }
+      }
       if (isStopped(cfg, identity) || isLaunchdManaged(args.personality, env)) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'stop/launchd ownership changed; no reload launch' }
     }
     if (args.restart) {
@@ -1295,6 +1304,10 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       appendLifecycleEvent(cfg.eventLogDir, { ev: 'capability-reload-error', identity, error: e instanceof Error ? e.message : String(e) }, { env })
     }
     if (reloadResumeRef && (isStopped(cfg, identity) || isLaunchdManaged(args.personality, env))) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'stop/launchd ownership changed before reload launch' }
+    // What this launch reads, taken BEFORE the process reads it: a write landing after this point
+    // differs from the baseline and is applied at the next turn boundary (capability/surfaces.ts).
+    let surfaces: string | undefined
+    try { surfaces = surfaceFingerprint(runtime, cwd, args.personality, env) } catch { /* no baseline → adopted on the next tick */ }
     const result = await launch(spec, adapter, firstMessage, launchCfg)
     if (reloadResumeRef && isStopped(cfg, identity) && !isLaunchdManaged(args.personality, env)) {
       killPtyHost(identity, env, { reason: 'stop-during-capability-reload' }, cfg.supervisorRunDir ?? hostRunDir(env))
@@ -1330,6 +1343,11 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     }
     applyConsumed()
     completeReloads(cfg, capabilitySnapshot)
+    if (surfaces) {
+      try { writeSurfaceBaseline(cfg, identity, surfaces) } catch (e) {
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'capability-reload-error', identity, error: `surface baseline: ${e instanceof Error ? e.message : String(e)}` }, { env })
+      }
+    }
     // The session is up and the message delivered. Recording supervise-state must not
     // turn a successful wake into a failure (audit #18): log loudly rather than throw
     // past a live spawn. NB since 0.2.55 (self-TTL removed) the session-state file IS

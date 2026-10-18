@@ -89,6 +89,35 @@ tools are neither advertised nor callable; added ones are discovered and usable
 without a manual `/new`. Failures and pending work remain observable rather than
 being hidden behind the plugin command's exit 0.
 
+### Writers outside the core
+
+The same invariant holds for every writer of a live endpoint's surfaces, not only the
+capability verbs: the memory provider's own `provision-peer` and update sweep, `native-memory`,
+an operator's hand edit. Such writers do not call the core, so the core records what each
+launch read — a fingerprint of the endpoint's launch-read surface files — and the daemon
+compares it every few seconds. A difference owes one reload, applied at the next turn boundary
+exactly as above. Fingerprinted files (read at launch, never written by the runtime itself):
+
+| Runtime | Files |
+|---|---|
+| claude | `<cwd>/.mcp.json`, `<cwd>/.claude/settings.json` |
+| codex | `<cwd>/.codex/config.toml`, `<cwd>/.codex/hooks.json` |
+| opencode | `<privateDir>/*.json`, `*.mjs` fragments (not `state.json`, `events.jsonl`, the core's `iapeer-plugin.mjs` and `peer-mcp.json`), plus `<cwd>/.mcp.json` and `<cwd>/.codex/config.toml` — the sources of the core's MCP projection |
+
+Host-global configuration (`~/.codex/config.toml`, `~/.claude.json`) is written by the runtimes
+themselves and is not fingerprinted; the core verbs that write it — `iapeer enable` (codex
+installs plugins host-wide) — request the reload explicitly and print `runtime=applied|pending`.
+A hosting launched before this mechanism has no baseline: its current state is adopted as the
+baseline (what it actually read is unknown, and a guess never replaces a running process).
+
+### remove-runtime on a live endpoint
+
+`remove-runtime` follows the same turn-boundary rule instead of refusing a live endpoint: an idle
+one is retired (input-fenced, proven idle) and removed in the call — `removed`; a busy one prints
+`pending` (exit 0) and is removed by the daemon after its current turn — never killed mid-turn.
+The owed removal is durable and visible in `iapeer capability list`. `--force` keeps its meaning:
+kill the session now and remove.
+
 This affects plugin install/update/uninstall sweeps: they can replace a live native
 process and its MCP helpers at a turn boundary. Conversation history is retained;
 process-local tool handles do not survive a lifecycle replacement. The acceptance

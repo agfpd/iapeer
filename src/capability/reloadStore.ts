@@ -16,6 +16,8 @@ export interface ReloadRequest {
   detail: string
   resumeRef?: string
   attemptAt?: number
+  /** 'retire' = remove-runtime owed at the next turn boundary (no relaunch). Absent = reload. */
+  kind?: 'retire'
 }
 export const reloadDir = (cfg: LifecycleConfig, identity: string): string => join(cfg.stateDir, `${identity}.capability-reloads`)
 const pathFor = (cfg: LifecycleConfig, r: ReloadRequest) => join(reloadDir(cfg, `${r.runtime}-${r.personality}`), `${r.id}.json`)
@@ -26,6 +28,12 @@ export function saveReload(cfg: LifecycleConfig, r: ReloadRequest): void {
 export function requestReload(cfg: LifecycleConfig, personality: string, runtime: string): ReloadRequest {
   if (!isValidName(personality) || !['claude', 'codex', 'opencode'].includes(runtime)) throw new Error('invalid capability reload endpoint')
   const r: ReloadRequest = { schema: 1, id: randomUUID(), personality, runtime, requestedAt: Date.now(), state: 'pending', detail: 'waiting for a native idle turn boundary' }
+  saveReload(cfg, r)
+  return r
+}
+export function requestRetire(cfg: LifecycleConfig, personality: string, runtime: string): ReloadRequest {
+  if (!isValidName(personality) || !['claude', 'codex', 'opencode'].includes(runtime)) throw new Error('invalid remove-runtime endpoint')
+  const r: ReloadRequest = { schema: 1, id: randomUUID(), personality, runtime, requestedAt: Date.now(), state: 'pending', detail: 'remove-runtime owed after the current turn', kind: 'retire' }
   saveReload(cfg, r)
   return r
 }
