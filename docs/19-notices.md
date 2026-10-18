@@ -191,7 +191,11 @@ thread, no self-fresh, and auto-continuation genuinely resumed.
 A notice states who, which runtime, which error type, which model, and when the wall lifts.
 Two of those are **absent by design rather than guessed**:
 
-- **`resetsAtMs` on claude.** Claude does not say when a per-model bucket lifts. Its
+- **`resetsAtMs` on claude — only when stated.** An ACCOUNT-level wall (five-hour / weekly) IS
+  stated structurally on the refusal line (measured 18.10.2026, claude 2.1.302:
+  `quotaLimits.resetsAt` and `apiErrorParams.rate_limit_info.resetsAt`, epoch seconds,
+  `rateLimitType: "five_hour"`) — the notice carries it and §9 acts on it. A **per-model
+  bucket** states none: claude does not say when a per-model bucket lifts. Its
   `errorDetails` is a raw 429 reading *"Please try again later"* — no stamp. The 5h/7d
   `resets_at` in the statusline blob belongs to a **different limit** and must never be
   substituted: measured live on 15.07.2026, the 5h bucket sat at **11 %** and the 7d at
@@ -431,3 +435,38 @@ unanswered rather than inferred from the 429 result.**
 provider path could in principle record something this one did not.
 
 Artifacts (rollout, injector, config): `docs/internals/forensics/model-limit-2026-07-15/`.
+
+## 9. Limit-resume — a peer stopped by a limit continues by itself after the reset
+
+**Invariant.** A peer whose turn was stopped by an exhausted model limit that STATED its reset
+continues after that reset without a human. Incident 18.10.2026: the fleet hit the claude
+five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reaped the sessions at
+~05:55, nothing woke them after the reset and every peer stood still until a manual ping at 10:12.
+
+**Mechanism** (`lifecycle/limitpark.ts`, `daemon/limitresume.ts`):
+
+1. **Park.** A `peer-mute` detection that carries `resetsAtMs` writes one record per endpoint
+   (`state/lifecycle/limit-parks/<runtime>-<personality>.json`: reset, event time, session file).
+   A newer limit event supersedes it; the overlapping sweep re-reading the same line does not.
+   No stated reset → no park (the notice still tells the owner; nothing is extrapolated).
+2. **Hold.** While `now < resetsAt + 3 min` the idle-reap skips the session (`outcome=limit-hold`,
+   traced once per park): the context stays warm and the runtime's own continuation can fire.
+   Bounded: a reset more than 6 h after the event (a weekly wall) is not held — the session is
+   reaped normally and step 3 resumes it.
+3. **Nudge.** After `resetsAt + 3 min`, if the session made no progress since the event (claude: a
+   real, non-`<synthetic>` assistant line after it; codex: a `task_complete` with a message whose
+   `completed_at` is after it), the core delivers ONE continuation message through the normal
+   route — wake-on-miss resumes a reaped session (an idle reap is resume-eligible). Progress
+   already made → the park is dropped without a message (no duplicate turn). A failed delivery is
+   retried (5 min backoff, 3 attempts); an operator `stop` is never fought.
+4. **Sender** = the core's system identity `iapeer-system` (runtime `core`, intelligence
+   `absent`): synthesized, never registered, the name reserved by the registry — so it exists on
+   every install and is never the target (the target may be the peer named `iapeer` itself). The
+   same identity now signs the OC07 interrupted/undelivered notices and the composer-queue
+   failure notices.
+
+Every decision is in `lifecycle.log`: `ev=limit-park`, `outcome=limit-hold`, `ev=limit-resume
+outcome=nudged|progressed|retry|gave-up|dropped`.
+
+**Not covered:** opencode (its `session.error` states no reset) and a claude per-model bucket
+(no reset stated) — both still raise the notice; the owner resumes by hand.

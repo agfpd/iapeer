@@ -51,9 +51,9 @@ import {
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import { buildProcessAddress } from '../core/socket.ts'
 import { err, ok } from '../core/errors.ts'
-import { resolveCallerIdentity } from '../identity/index.ts'
+import { resolveCallerIdentity, systemCaller } from '../identity/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
-import { findPeer, readPeersIndex } from '../registry/index.ts'
+import { readPeersIndex } from '../registry/index.ts'
 import {
   createComposerDeliveryQueue,
   deliveryCompleted,
@@ -74,6 +74,8 @@ import { appendDeliveryEvent } from './deliverylog.ts'
 import { buildFleetHandler } from './fleet.ts'
 import { NoticeBoard } from './notices.ts'
 import { startMuteWatch } from './mutewatch.ts'
+import { processLimitResumes } from './limitresume.ts'
+import { recordLimitPark } from '../lifecycle/limitpark.ts'
 import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
@@ -307,14 +309,12 @@ export async function processInflight(
 ): Promise<void> {
   const processed = seam.processed ?? ((e: InflightEntry) => deliveryProcessed(e, env))
   const send = seam.send ?? routeSend
-  /** A notice FROM iapeer to the entry's original sender (skipped when the sender is iapeer itself). */
+  /** A notice FROM the core's system identity to the entry's original sender. Registry-independent
+   *  (systemCaller is synthesized), so it is deliverable on every install — the earlier sender was the
+   *  peer named `iapeer`, and a host without it skipped the notice silently (linus 18.10). */
   const notifySender = async (e: InflightEntry, message: string): Promise<string> => {
     try {
-      const index = readPeersIndex({ env })
-      const self = findPeer(index, 'iapeer')
-      if (!self || `${e.caller.runtime}-${e.caller.personality}` === `${self.runtime}-iapeer`) return 'skipped'
-      const sender = resolveCallerIdentity({ personality: 'iapeer', runtime: self.runtime }, index)
-      const n = await send(sender, { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, routeDeps)
+      const n = await send(systemCaller(), { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, routeDeps)
       return String(n.ok)
     } catch {
       return 'false'
@@ -384,38 +384,9 @@ export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.Pro
     noteInflight: makeNoteInflight(cfg),
     onDelivered,
     notifyFailed: async (job, reason) => {
-      const index = readPeersIndex({ env })
-      const self = findPeer(index, 'iapeer')
-      if (!self) {
-        appendDeliveryEvent(cfg.eventLogDir, {
-          ev: 'composer-queue-failed-notify',
-          caller: 'iapeer',
-          to: job.caller.personality,
-          rt: job.caller.runtime,
-          ok: 'false',
-          err: 'foundation peer "iapeer" is not registered; cannot notify queued sender',
-        })
-        return
-      }
-      const sender = resolveCallerIdentity({ personality: 'iapeer', runtime: self.runtime }, index)
-      // SELF-NOTIFY GUARD: the failure outlet sends FROM the foundation peer (iapeer). When the QUEUED
-      // sender IS the foundation peer on the same runtime (e.g. iapeer itself queued a cross-runtime send to
-      // its codex twin and that queue later failed), this notify would be iapeer→iapeer — a genuine
-      // self-send the address-based router correctly refuses with 'cannot send to self', logging ok=false
-      // and tripping monitoring alarms. The notification is moot anyway (the sender IS the one being
-      // notified about its own send). Skip it and log a benign skip instead of attempting a self-send.
-      if (`${job.caller.runtime}-${job.caller.personality}` === sender.address) {
-        appendDeliveryEvent(cfg.eventLogDir, {
-          ev: 'composer-queue-failed-notify',
-          caller: sender.address,
-          to: job.caller.personality,
-          rt: job.caller.runtime,
-          ok: 'true',
-          err: 'skipped self-notify (queued sender is the foundation peer itself)',
-          topic: job.topic ?? 'delivery-failed',
-        })
-        return
-      }
+      // The core's system identity — exists on every install and is never a peer, so there is no
+      // missing-sender case and no self-send to guard (it used to be the peer named `iapeer`).
+      const sender = systemCaller()
       const result = await routeSend(
         sender,
         {
@@ -507,6 +478,23 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
         appendLifecycleEvent(cfg.eventLogDir, { ev: 'mutewatch-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
       } catch { /* best-effort */ }
+    },
+    // Limit-park (docs/19 §9): a limit event that STATES its reset parks the endpoint — the supervise
+    // tick holds it from idle-reap and the limit-resume pass nudges it after the reset.
+    onLimit: d => {
+      const identity = `${d.runtime}-${d.personality}`
+      if (d.resetsAtMs === undefined) return
+      const fresh = recordLimitPark(cfg, {
+        identity,
+        personality: d.personality,
+        runtime: d.runtime,
+        resetsAtMs: d.resetsAtMs,
+        eventAtMs: d.atMs,
+        ...(d.file ? { file: d.file } : {}),
+        ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+        errorType: d.errorType,
+      })
+      if (fresh) appendLifecycleEvent(cfg.eventLogDir, { ev: 'limit-park', identity, resets: new Date(d.resetsAtMs).toISOString(), error_type: d.errorType }, { env })
     },
   })
   // Goal-watch (docs/19) — the SAME board and the same class as the mute-watch: a peer left
@@ -619,6 +607,16 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         await drainAllEphemeralQueues(cfg, { env })
         // OC07 — acknowledged-but-unanswered inbound of a dead session: redeliver or tell the sender.
         await processInflight(cfg, env, {
+          env,
+          wake: makeWakeFn(cfg, env),
+          ephemeral,
+          noteLiveTopic,
+          noteDelivered: identity => setLastDelivered(cfg, identity),
+          noteInflight,
+          isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
+        })
+        // Limit-resume (docs/19 §9): a peer stopped by a model limit continues after the reset.
+        await processLimitResumes(cfg, env, {
           env,
           wake: makeWakeFn(cfg, env),
           ephemeral,

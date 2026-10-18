@@ -18,6 +18,7 @@ import {
   MAX_DESCRIPTION_LEN,
   PEERS_PROFILES_FILE,
   PEERS_SCHEMA_VERSION,
+  SYSTEM_PERSONALITY,
   defaultIntelligenceForRuntime,
   isIntelligence,
   isRuntime,
@@ -119,6 +120,9 @@ function ensurePersonality(personality: string): void {
     throw new IapError(
       `invalid personality "${personality}" — must match /^[a-z][a-z0-9-]{0,31}$/`,
     )
+  }
+  if (personality === SYSTEM_PERSONALITY) {
+    throw new IapError(`personality "${personality}" is reserved for the iapeer core's own sender identity`)
   }
 }
 

@@ -12,6 +12,7 @@
 // before any wake or reap. wakeOrSpawn refuses a launchd peer; superviseTick and
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
+import { limitHoldActive } from './limitpark.ts'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -1520,6 +1521,18 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     }
   }
   if (ageSecs > cfg.idleSecs) {
+    // LIMIT HOLD (docs/19 §9) — a session stopped by an exhausted model limit that STATED its reset is
+    // not idle, it is waiting: keep it (warm context; the runtime's own continuation gets to fire) until
+    // the reset + grace. Bounded in limitpark.ts; past the bound the reap proceeds and the limit-resume
+    // nudge wakes it (an idle reap is resume-eligible) — either way the turn is not lost.
+    const held = limitHoldActive(cfg, s.identity, nowMs)
+    if (held) {
+      // Traced ONCE per park (the tick runs every minute; a 3 h hold would flood lifecycle.log).
+      const key = `${s.identity}@${held.eventAtMs}`
+      if (verbose || !limitHoldTraced.has(key)) trace({ identity: s.identity, action: 'alive', age: `${ageSecs}s`, outcome: 'limit-hold', resets: new Date(held.resetsAtMs).toISOString() })
+      limitHoldTraced.add(key)
+      return { identity: s.identity, action: 'alive', reason: `limit hold until ${new Date(held.resetsAtMs).toISOString()}` }
+    }
     // THE ONLY place .idle-reaped is written: this is the one death the daemon
     // INITIATES. Its presence on the next wake = the session was parked cleanly =
     // RESUME-eligible (resolveWakeMode branch 3b). A crash/self-close (the dead
@@ -1535,6 +1548,9 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   if (verbose) trace({ identity: s.identity, action: 'alive', age: `${ageSecs}s` })
   return { identity: s.identity, action: 'alive' }
 }
+
+/** Parks whose hold was already traced (process-local; a daemon restart re-traces once — harmless). */
+const limitHoldTraced = new Set<string>()
 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
   const env = deps.env ?? process.env

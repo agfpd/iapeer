@@ -237,3 +237,14 @@ export function isValidName(value: unknown): boolean {
 // module so the transliteration engine is swappable behind one interface; it is
 // re-exported here so existing `from '../core/constants.ts'` importers are unchanged.
 export { normalizeNameCandidate } from './normalize.ts'
+
+/**
+ * The CORE's own sender identity — the author of daemon-originated messages (OC07 interrupted /
+ * undelivered notices, the composer-queue failure outlet, the limit-resume nudge). It exists on EVERY
+ * install by construction: it is synthesized, never registered, so a host with no peer of any given
+ * name still gets its system notices (a registry-dependent sender was skipped silently there).
+ * The name is RESERVED: the registry refuses to register a peer under it, so it can never be spoofed
+ * by — or collide with — a real peer. Intelligence `absent`: a recipient does not answer it.
+ */
+export const SYSTEM_PERSONALITY = 'iapeer-system'
+export const SYSTEM_RUNTIME = 'core'

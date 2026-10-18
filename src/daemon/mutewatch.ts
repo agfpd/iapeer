@@ -102,9 +102,11 @@ export interface MuteDetection {
   sessionId?: string
   atMs: number
   cwd: string
+  /** The session file the event was read from (the limit-park progress probe re-reads it). */
+  file?: string
 }
 
-type RawDetection = Omit<MuteDetection, 'personality' | 'runtime'>
+type RawDetection = Omit<MuteDetection, 'personality' | 'runtime' | 'file'>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure parsers — string in, detection out (fs-free: tests need no temp tree)
@@ -165,10 +167,22 @@ export function parseClaudeTranscript(text: string, sinceMs: number): RawDetecti
       sessionId: typeof d.sessionId === 'string' ? d.sessionId : undefined,
       atMs,
       cwd,
-      // Claude states no reset for a per-model bucket → resetsAtMs deliberately absent.
+      // The reset ONLY when claude states it structurally (account-level walls, observed 18.10.2026 on
+      // claude 2.1.302: `quotaLimits.resetsAt` / `apiErrorParams.rate_limit_info.resetsAt`, epoch s,
+      // rateLimitType five_hour). A per-model bucket states none («try again later») → omitted, never
+      // extrapolated from the other buckets.
+      ...(claudeResetsAtMs(d) !== undefined ? { resetsAtMs: claudeResetsAtMs(d) } : {}),
     }
   }
   return found
+}
+
+/** Claude's structurally stated reset instant (ms), or undefined. Epoch SECONDS on the wire. */
+export function claudeResetsAtMs(d: Record<string, unknown>): number | undefined {
+  const q = d.quotaLimits as { resetsAt?: unknown } | undefined
+  const r = (d.apiErrorParams as { rate_limit_info?: { resetsAt?: unknown } } | undefined)?.rate_limit_info
+  const v = typeof q?.resetsAt === 'number' ? q.resetsAt : typeof r?.resetsAt === 'number' ? r.resetsAt : undefined
+  return v !== undefined && v > 0 ? v * 1000 : undefined
 }
 
 interface CodexWindow {
@@ -463,21 +477,21 @@ export function resolveMuteWatchPaths(env: NodeJS.ProcessEnv): MuteWatchPaths {
 export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[] {
   const floor = sinceMs - SCAN_OVERLAP_MS
   const out: MuteDetection[] = []
-  const push = (raw: RawDetection | null, runtime: 'claude' | 'codex'): void => {
+  const push = (raw: RawDetection | null, runtime: 'claude' | 'codex', file: string): void => {
     if (!raw) return
     const personality = deps.peerByCwd(raw.cwd)
     if (!personality) return // not a peer's session (a human's own shell) — never notify
-    out.push({ ...raw, personality, runtime })
+    out.push({ ...raw, personality, runtime, file })
   }
   // claude: ~/.claude/projects/<slug>/<sessionId>.jsonl — one level of slug dirs.
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
     const t = readSessionSlices(file, TAIL_BYTES)
-    if (t) push(parseClaudeTranscript(t.tail, floor), 'claude')
+    if (t) push(parseClaudeTranscript(t.tail, floor), 'claude', file)
   }
   // codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {
     const t = readSessionSlices(file, TAIL_BYTES)
-    if (t) push(parseCodexRollout(t.tail, floor, t.head), 'codex')
+    if (t) push(parseCodexRollout(t.tail, floor, t.head), 'codex', file)
   }
   // opencode: the core-owned journal per endpoint (personality is known — no cwd mapping needed).
   for (const j of deps.opencodeJournals?.() ?? []) {
@@ -500,6 +514,8 @@ export interface MuteWatchDeps extends ScanDeps {
   now?: () => number
   /** Reported, never thrown — a detector must never take the daemon down. */
   onError?: (err: unknown) => void
+  /** Every detection that STATES a reset (deduped or not) — the limit-park writer (docs/19 §9). */
+  onLimit?: (d: MuteDetection) => void
 }
 
 /**
@@ -527,6 +543,13 @@ export function muteWatchTick(deps: MuteWatchDeps, sinceMs: number): { raised: n
         summary: `${d.personality} · ${d.runtime} — ${d.errorType}${d.model ? ` (${d.model})` : ''}`,
       })
       if (!deduped) raised += 1
+      if (d.resetsAtMs !== undefined && deps.onLimit) {
+        try {
+          deps.onLimit(d)
+        } catch (e) {
+          deps.onError?.(e)
+        }
+      }
     }
   } catch (e) {
     deps.onError?.(e)
@@ -543,6 +566,7 @@ export interface StartMuteWatchOptions {
   listPeers?: () => Array<{ personality: string; cwd: string; runtimes?: string[] }>
   now?: () => number
   onError?: (err: unknown) => void
+  onLimit?: (d: MuteDetection) => void
 }
 
 /**
@@ -579,6 +603,7 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
         board,
         now,
         onError: opts.onError,
+        onLimit: opts.onLimit,
         peerByCwd: (cwd: string) => byCwd.get(cwd.replace(/\/+$/, '').toLowerCase()),
         opencodeJournals: () =>
           rows

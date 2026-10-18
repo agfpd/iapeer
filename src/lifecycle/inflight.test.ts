@@ -165,7 +165,7 @@ describe('deliveryProcessed — recorded is NOT processed', () => {
 describe('processInflight — redeliver, or the sender learns', () => {
   const cfg = () => ({ stateDir: state, eventLogDir: join(root, 'logs') }) as never
   beforeEach(async () => {
-    for (const p of ['alice', 'bob', 'iapeer']) await upsertPeer({ personality: p, runtime: 'claude', cwd: join(root, p), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })
+    for (const p of ['alice', 'bob']) await upsertPeer({ personality: p, runtime: 'claude', cwd: join(root, p), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })
   })
   test('orphan → redelivered AS the original sender with a visible prefix', async () => {
     recordInflight(state, entry())
@@ -183,7 +183,7 @@ describe('processInflight — redeliver, or the sender learns', () => {
     expect(listOrphanIdentities(state)).toEqual([])
   })
 
-  test('interrupted turn → an explicit notice from iapeer to the sender, NO redelivery', async () => {
+  test('interrupted turn → an explicit notice from the core system identity to the sender (no peer named iapeer registered), NO redelivery', async () => {
     recordInflight(state, entry())
     const calls: Array<{ route: string; message: string }> = []
     await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, {
@@ -194,7 +194,7 @@ describe('processInflight — redeliver, or the sender learns', () => {
         return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: false, ts: 'x' })
       }) as never,
     })
-    expect(calls.map(c => c.route)).toEqual(['iapeer->alice'])
+    expect(calls.map(c => c.route)).toEqual(['iapeer-system->alice'])
     expect(calls[0]!.message).toMatch(/INTERRUPTED.*not guaranteed/)
     expect(listInterruptedIdentities(state)).toEqual([])
   })
@@ -209,7 +209,7 @@ describe('processInflight — redeliver, or the sender learns', () => {
         return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: false, ts: 'x' })
       }) as never,
     })
-    expect(calls).toEqual(['iapeer->alice']) // no second redelivery to bob — the sender is told instead
+    expect(calls).toEqual(['iapeer-system->alice']) // no second redelivery to bob — the sender is told instead
   })
 
   test('redelivery fails (e.g. crash-loop guard) → orphan consumed and the attempt recorded; never silently kept or dropped', async () => {
@@ -222,8 +222,23 @@ describe('processInflight — redeliver, or the sender learns', () => {
         return input.personality === 'bob' ? err('peer "bob" offline and wake failed: crash-loop guard') : ok({ ok: true, delivered_to: { personality: 'alice', runtime: 'claude' }, woke: false, ts: 'x' })
       }) as never,
     })
-    expect(calls.map(c => `${c.from}->${c.to}`)).toEqual(['alice->bob', 'iapeer->alice']) // redelivery, then the explicit notice
+    expect(calls.map(c => `${c.from}->${c.to}`)).toEqual(['alice->bob', 'iapeer-system->alice']) // redelivery, then the explicit notice
     expect(calls[1]!.message).toMatch(/acknowledged but NOT processed.*crash-loop guard/)
     expect(listOrphanIdentities(state)).toEqual([])
+  })
+})
+
+describe('core system identity — the notice sender that exists on every install', () => {
+  test('the reserved name cannot be registered as a peer', async () => {
+    const { SYSTEM_PERSONALITY } = await import('../core/constants.ts')
+    await expect(upsertPeer({ personality: SYSTEM_PERSONALITY, runtime: 'claude', cwd: join(root, 'x'), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })).rejects.toThrow(/reserved/)
+  })
+  test('routeSend accepts it as a caller with NO peer named iapeer registered (reaches the route, not an identity error)', async () => {
+    await upsertPeer({ personality: 'alice', runtime: 'claude', cwd: join(root, 'alice'), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })
+    const { systemCaller } = await import('../identity/index.ts')
+    const { routeSend } = await import('../transport/index.ts')
+    const r = await routeSend(systemCaller(), { personality: 'alice', message: 'notice' }, { env: { HOME: root, IAPEER_ROOT: join(root, 'iapeer'), IAPEER_SOCK_DIR: join(root, 'socks') } })
+    expect(r.ok).toBe(false) // alice has no live session and no wake dep → the explicit offline miss
+    if (!r.ok) expect(r.error.message).not.toMatch(/self|unknown caller|not in the iapeer peers index/)
   })
 })

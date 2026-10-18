@@ -11,6 +11,8 @@ import {
   IAPEER_DIR,
   PEER_PROFILE_FILE,
   NAME_RE,
+  SYSTEM_PERSONALITY,
+  SYSTEM_RUNTIME,
   allowedIntelligencesForRuntime,
   defaultIntelligenceForRuntime,
   isInfraRuntime,
@@ -779,6 +781,32 @@ export interface ResolvedCaller {
   intelligence: Intelligence
   cwd: string
   record: PeerRecord
+}
+
+/**
+ * The core's own sender (core/constants SYSTEM_PERSONALITY). Synthesized — never read from the
+ * registry — so daemon-originated notices are deliverable on every install, independent of which
+ * peers happen to be registered. Never a request identity: resolveCallerIdentity refuses it (the
+ * name cannot be registered), so no client can send AS the core.
+ */
+export function systemCaller(): ResolvedCaller {
+  const record: PeerRecord = {
+    personality: SYSTEM_PERSONALITY,
+    runtime: SYSTEM_RUNTIME,
+    runtimes: [SYSTEM_RUNTIME],
+    description: 'iapeer core — system notices (no reply needed)',
+    intelligence: 'absent',
+    cwd: '',
+  }
+  return {
+    personality: SYSTEM_PERSONALITY,
+    runtime: SYSTEM_RUNTIME,
+    address: buildProcessAddress(SYSTEM_RUNTIME, SYSTEM_PERSONALITY),
+    description: record.description,
+    intelligence: 'absent',
+    cwd: '',
+    record,
+  }
 }
 
 /**
