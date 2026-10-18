@@ -127,7 +127,7 @@ try {
   await turn('FIRST_OPERATOR_PROOF')
   const original = state()!
   record('cold-turn', original)
-  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || arg('--legacy-bin')) {
+  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || process.argv.includes('--hand-edit-only') || arg('--legacy-bin')) {
     let busySeq = 0
     await proveReload({ root, cwd, runtime: 'opencode', cli, turn, hosting, session: () => state()?.sessionID, record,
       probe: async () => {
@@ -148,7 +148,7 @@ try {
       },
       afterReAdd: writeProviderConfig,
       peerRuntimes: () => (JSON.parse(read(join(iap, 'peers-profiles.json'))).peers ?? []).find((p: any) => p.personality === personality)?.runtimes ?? [],
-    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : 'capability')
+    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : process.argv.includes('--hand-edit-only') ? 'hand-edit' : 'capability')
     success = true
   } else if (process.argv.includes('--surfaces-only')) {
     // Real capability installer argv, real register/unregister sweeps, real MCP

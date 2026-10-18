@@ -10,7 +10,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { findSurfaceNamespace, findSurfaceTool, proveReload, surfaceProofServer } from './reload-proof.ts'
+import { findSurfaceNamespace, findSurfaceTool, proveReload, surfaceNames, surfaceProofServer } from './reload-proof.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const runtime = arg('--runtime')
@@ -147,13 +147,18 @@ try {
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
 
-  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || arg('--legacy-bin')) {
+  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || process.argv.includes('--hand-edit-only') || process.argv.includes('--enable-only') || arg('--legacy-bin')) {
     let busyAt = 0
     await proveReload({ root, cwd, runtime, cli, turn, hosting, session: nativeSession, record,
       probe: async () => {
         const from = wire.length, calls = surface.calls(); useSurface = true
         try { await turn('RELOAD_TOOL_PROOF') } finally { useSurface = false }
-        return { offered: wire.slice(from).some(w => !!findSurfaceTool(w.body.tools)), calls: surface.calls() - calls }
+        return { offered: wire.slice(from).some(w => !!findSurfaceTool(w.body.tools)), calls: surface.calls() - calls, names: [...new Set(wire.slice(from).flatMap(w => surfaceNames(w.body.tools)))] }
+      },
+      nativeRun: async args => {
+        const p = Bun.spawn([native, ...args], { env, cwd, stdout: 'pipe', stderr: 'pipe' })
+        const [code, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()])
+        return { code, stdout, stderr }
       },
       beginBusy: async () => {
         busyAt = Date.now(); busyNext = true; busyReceived = false
@@ -167,7 +172,7 @@ try {
         await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
       },
       peerRuntimes: () => (JSON.parse(read(join(iap, 'peers-profiles.json'))).peers ?? []).find((p: any) => p.personality === personality)?.runtimes ?? [],
-    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : 'capability')
+    }, surface.url, !!arg('--legacy-bin'), process.argv.includes('--provider-only') ? 'provider' : process.argv.includes('--remove-only') ? 'remove' : process.argv.includes('--hand-edit-only') ? 'hand-edit' : process.argv.includes('--enable-only') ? 'enable' : 'capability')
     success = true
   } else {
 
@@ -254,7 +259,7 @@ try {
   surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
-    for (const p of files(root).filter(p => /(?:\.jsonl|\.log|\.out|\.err)$/.test(p))) {
+    for (const p of files(root).filter(p => /(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) && !p.includes('/node_modules/'))) {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))
