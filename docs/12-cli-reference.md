@@ -47,7 +47,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 | `refresh <peer> [runtime] \| --all` | A lazy "soft restart": an agent peer comes up fresh (re-reads the doctrine/fragments from disk) on its NEXT natural wake. Doesn't kill a live session, doesn't wake the rest, doesn't do an immediate restart — only sets a marker. Routers (notifier/telegram) and absent runtimes are skipped (they have no doctrine). `--all` — all peers. |
 | `remove <peer> [--force]` | Delete the registry entry (doesn't touch the peer's folder). Refuses a live peer without `--force`. Idempotent. |
 | `attach <peer> [runtime]` | Bring up (if asleep), resume the conversation, open the session under the supervisor in the terminal (detach — `Ctrl-]`). |
-| `interrupt <peer> [runtime]` | Interrupt the current turn (Escape), context intact. |
+| `interrupt <peer> [runtime]` | Interrupt the current turn (Escape / abort), context intact. **Without a runtime: EVERY live runtime of the peer, in parallel** (operator stop = the peer stops); with a runtime: that endpoint only. |
 | `compact <peer> [runtime]` | Compact the conversation; a sleeper is resumed first after idle sleep. |
 | `add-runtime <runtime> (--peer <p> \| --all)` | Add a runtime to existing peers. Doesn't touch `default_runtime`. An infrastructure runtime attaches an always-on channel and is `--peer`-only (never an `--all` sweep). |
 | `default-runtime <runtime> (--peer <p> \| --all)` | Switch the primary runtime (routing / first bring-up). Refuses if the runtime isn't declared. |

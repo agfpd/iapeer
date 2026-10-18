@@ -1182,6 +1182,10 @@ export async function executeControlOnTarget(
 export interface ControlResult {
   ok: true
   controlled: { personality: string; runtime: string }
+  /** interrupt WITHOUT a runtime: every live endpoint it acted on (>= 1; `controlled` is the first). */
+  controlledAll?: Array<{ personality: string; runtime: string }>
+  /** interrupt WITHOUT a runtime: live endpoints whose interrupt FAILED (others still interrupted). */
+  failed?: Array<{ runtime: string; error: string }>
   command: string
   ts: string
 }
@@ -1217,6 +1221,7 @@ export async function routeControl(personality: string, runtime: string | undefi
     return err(`invalid personality "${personality}" — must match /^[a-z][a-z0-9-]{0,31}$/`)
   }
   if (runtime && !isRuntime(runtime)) return err(`invalid runtime "${runtime}"`)
+  if (command.name === 'interrupt' && !runtime) return interruptAllLive(personality, command)
   const target = resolveControlTarget(personality, runtime)
   if (!target.ok) return err(`cannot control "${personality}": ${target.error.message}`)
   const done = await executeControlOnTarget(target.value, command)
@@ -1224,6 +1229,48 @@ export async function routeControl(personality: string, runtime: string | undefi
   return ok({
     ok: true,
     controlled: { personality: target.value.personality, runtime: target.value.runtime },
+    command: command.name,
+    ts: new Date().toISOString(),
+  })
+}
+
+/**
+ * Operator STOP = the PEER stops, not one of its sessions (Artur 18.10: «Стоп должен работать на все
+ * рантаймы. Один пир может одновременно в нескольких рантаймах»). A runtime-less interrupt acts on
+ * EVERY live endpoint of the peer, in parallel (the whole stop lands within one control round-trip, not
+ * N of them). An explicit runtime stays exact (routeControl above). /compact and /new are NOT widened:
+ * they act on a dialogue's context, and a peer's dialogues are per-runtime by design.
+ * Zero live → the usual `peer offline: <p>`; all failed → error; partial → ok with `failed` listed.
+ */
+export async function interruptAllLive(
+  personality: string,
+  command: ControlCommand,
+  seam: { env?: NodeJS.ProcessEnv; live?: () => Array<{ personality: string; runtime: string }>; exec?: typeof executeControlOnTarget } = {},
+): Promise<Result<ControlResult>> {
+  const env = seam.env ?? process.env
+  const exec = seam.exec ?? executeControlOnTarget
+  const live = (seam.live?.() ?? listOnlinePeers(resolveSockDir(env), env)).filter(p => p.personality === personality)
+  if (live.length === 0) return err(`cannot control "${personality}": peer offline: ${personality}`)
+  const sockDir = resolveSockDir(env)
+  const results = await Promise.all(
+    live.map(async p => {
+      const target: DeliveryTarget = {
+        runtime: p.runtime,
+        personality: p.personality,
+        address: buildProcessAddress(p.runtime, p.personality),
+        socketPath: buildSocketPath(p.runtime, p.personality, sockDir),
+      }
+      return { runtime: p.runtime, r: await exec(target, command) }
+    }),
+  )
+  const done = results.filter(x => x.r.ok).map(x => ({ personality, runtime: x.runtime }))
+  const failed = results.flatMap(x => (x.r.ok ? [] : [{ runtime: x.runtime, error: x.r.error.message }]))
+  if (done.length === 0) return err(`interrupt failed on every live runtime of "${personality}": ${failed.map(f => `${f.runtime}: ${f.error}`).join('; ')}`)
+  return ok({
+    ok: true,
+    controlled: done[0]!,
+    controlledAll: done,
+    ...(failed.length ? { failed } : {}),
     command: command.name,
     ts: new Date().toISOString(),
   })

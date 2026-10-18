@@ -1716,7 +1716,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'switch/set the PRIMARY runtime of peer(s) (routing/wake default) — the fleet-switch lever; refuses an undeclared runtime; registry self-healed in the same command',
   },
   { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then attach to the pty session (Ctrl-] detaches)' },
-  { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact' },
+  { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact; no runtime = EVERY live runtime of the peer' },
   { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
   { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
   { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
@@ -2998,7 +2998,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           errOut(`${verb}: ${r.error.message}\n`)
           return 1
         }
-        out(`${verb} → ${r.value.controlled.personality} (${r.value.controlled.runtime})\n`)
+        const rts = (r.value.controlledAll ?? [r.value.controlled]).map(c => c.runtime).join(', ')
+        out(`${verb} → ${r.value.controlled.personality} (${rts})\n`)
+        for (const f of r.value.failed ?? []) errOut(`${verb}: ${r.value.controlled.personality} (${f.runtime}) failed: ${f.error}\n`)
         return 0
       }
       case 'compact': {

@@ -203,7 +203,7 @@ What the headline states look like on the stream: a peer **waking** is `ev=wake`
 | `start` | clear the stop flag (warm peers become wakeable; no session is launched) / bootstrap always-on | `200` / `502` mirror of `stop` |
 | `new` | **unconditional** fresh restart (the emergency lever) | `200` + `action:"fresh"` |
 | `refresh` | lazy soft-reload: fresh on next natural wake, no kill | `200` + `outcomes[]` |
-| `interrupt` | interrupt a stuck/raving turn (Escape into the live session) | `200` / `502` |
+| `interrupt` | interrupt the current turn. **No `runtime` in the body → every live runtime of the peer, in parallel** (response `controlledAll`, partial failures in `failed`); with `runtime` → that endpoint only. An operator `/stop` must send NO runtime | `200` / `502` |
 | `compact` | compact the resumable dialogue (honest failure when none) | `200` + `action:"compacted"` / `502` |
 
 `POST /fleet/v1/send` — deliver a message through the same routing path as the `send_to_peer` tool (wake-on-miss, queueing, delivery log — identical semantics):
