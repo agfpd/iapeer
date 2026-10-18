@@ -56,6 +56,7 @@
 // IDLE codex pane-log freezes (39s→46s). The signal means opposite things per runtime; one
 // clock that lies differently on each runtime is worse than no clock.
 
+import { peerByCwdPrefix } from './mutewatch.ts'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
@@ -101,6 +102,13 @@ function toMs(ts: unknown): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
+/** Claude's own record of an interrupted turn: a user line whose text is the interrupt marker. */
+export function isClaudeInterruptMarker(d: Record<string, unknown>): boolean {
+  const c = (d.message as { content?: unknown } | undefined)?.content
+  const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => String(b.text ?? '')) : []
+  return texts.some(t => /^\[Request interrupted by user/.test(t.trim()))
+}
+
 /**
  * The claude transcript's turn state, or null if the file states nothing usable.
  *
@@ -136,8 +144,12 @@ export function parseClaudeTurn(text: string): TurnState | null {
       state = msg?.stop_reason === 'tool_use' ? 'working' : 'idle'
     } else {
       // A real user line: a prompt to answer or a tool_result to consume — either way the
-      // model is on the hook. (The non-model user lines were filtered above.)
-      state = 'working'
+      // model is on the hook. (The non-model user lines were filtered above.) EXCEPT the
+      // interrupt marker: an operator interrupt (Escape / `iapeer interrupt`) ENDS the turn, and
+      // claude records that end as a user line `[Request interrupted by user]` / `… for tool
+      // use]` (real bytes 18.10.2026) — no assistant stop_reason follows. Read as working, it was
+      // a permanent phantom «working» on a stopped session.
+      state = isClaudeInterruptMarker(d) ? 'idle' : 'working'
     }
     found = { state, atMs, cwd }
   }
@@ -171,7 +183,7 @@ export function parseCodexTurn(text: string, head = ''): TurnState | null {
   let found: TurnState | null = null
   for (const line of text.split('\n')) {
     const s = line.trim()
-    if (!s.startsWith('{') || !s.includes('task_')) continue
+    if (!s.startsWith('{') || (!s.includes('task_') && !s.includes('turn_aborted'))) continue
     let d: { timestamp?: unknown; type?: unknown; payload?: { type?: unknown } }
     try {
       d = JSON.parse(s)
@@ -180,7 +192,9 @@ export function parseCodexTurn(text: string, head = ''): TurnState | null {
     }
     if (d.type !== 'event_msg') continue
     const p = d.payload?.type
-    if (p !== 'task_started' && p !== 'task_complete') continue
+    // `turn_aborted` (reason "interrupted") is how codex ends a turn the operator interrupted — NO
+    // task_complete follows (real rollouts). Without it an interrupted codex turn stayed «working».
+    if (p !== 'task_started' && p !== 'task_complete' && p !== 'turn_aborted') continue
     const atMs = toMs(d.timestamp)
     if (atMs === null) continue
     found = { state: p === 'task_started' ? 'working' : 'idle', atMs, cwd }
@@ -407,7 +421,7 @@ export function startTurnWatch(cfg: LifecycleConfig, board: ActivityBoard, opts:
           env,
           now,
           onError: opts.onError,
-          peerByCwd: (cwd: string) => byCwd.get(cwd.replace(/\/+$/, '').toLowerCase()),
+          peerByCwd: (cwd: string) => peerByCwdPrefix(byCwd, cwd),
         },
         since,
       ).sinceMs

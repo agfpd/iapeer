@@ -114,6 +114,24 @@ function codexEvent(type: string, ts = T): string {
   return JSON.stringify({ type: 'event_msg', timestamp: ts, payload: { type } })
 }
 
+describe('parseClaudeTurn — an operator interrupt ENDS the turn (real bytes 18.10.2026)', () => {
+  const cwd = '/Users/macmini/.iapeer/peers/oc-test-nemo'
+  const toolUse = JSON.stringify({ type: 'assistant', timestamp: '2026-10-18T08:32:20.000Z', cwd, message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash' }] } })
+  const rejected = JSON.stringify({ type: 'user', timestamp: '2026-10-18T08:32:24.459Z', cwd, message: { role: 'user', content: [{ type: 'tool_result', content: "The user doesn't want to proceed with this tool use." }] } })
+  const marker = (text: string) => JSON.stringify({ type: 'user', timestamp: '2026-10-18T08:32:24.461Z', cwd, interruptedMessageId: 'msg_011Cg9Ph5Wv5YAyEwkzM8uqn', message: { role: 'user', content: [{ type: 'text', text }] } })
+  test('mid-tool interrupt → idle (was a permanent phantom working)', () => {
+    expect(parseClaudeTurn([toolUse, rejected, marker('[Request interrupted by user for tool use]')].join('\n'))?.state).toBe('idle')
+  })
+  test('interrupt during generation → idle', () => {
+    expect(parseClaudeTurn([marker('[Request interrupted by user]')].join('\n'))?.state).toBe('idle')
+  })
+  test('the rejected tool_result alone (marker not yet written) is still working; a real prompt after the interrupt is working again', () => {
+    expect(parseClaudeTurn([toolUse, rejected].join('\n'))?.state).toBe('working')
+    const next = JSON.stringify({ type: 'user', timestamp: '2026-10-18T08:33:00.000Z', cwd, message: { role: 'user', content: 'new task' } })
+    expect(parseClaudeTurn([marker('[Request interrupted by user]'), next].join('\n'))?.state).toBe('working')
+  })
+})
+
 describe('parseCodexTurn', () => {
   test('task_started → working, task_complete → idle, last wins', () => {
     expect(parseCodexTurn([codexMeta, codexEvent('task_started')].join('\n'))).toMatchObject({ state: 'working', cwd: CWD })
@@ -130,6 +148,16 @@ describe('parseCodexTurn', () => {
 
   test('unrelated event types are ignored', () => {
     expect(parseCodexTurn([codexMeta, codexEvent('token_count')].join('\n'))).toBeNull()
+  })
+})
+
+describe('parseCodexTurn — an interrupted turn ends on turn_aborted (real rollout shape)', () => {
+  test('task_started → turn_aborted → idle', () => {
+    const meta = JSON.stringify({ type: 'session_meta', payload: { cwd: '/p' } })
+    const start = JSON.stringify({ timestamp: '2026-10-18T08:00:00.000Z', type: 'event_msg', payload: { type: 'task_started' } })
+    const aborted = JSON.stringify({ timestamp: '2026-10-18T08:00:35.000Z', type: 'event_msg', payload: { type: 'turn_aborted', reason: 'interrupted', completed_at: 1, duration_ms: 35533 } })
+    expect(parseCodexTurn([meta, start].join('\n'))?.state).toBe('working')
+    expect(parseCodexTurn([meta, start, aborted].join('\n'))?.state).toBe('idle')
   })
 })
 

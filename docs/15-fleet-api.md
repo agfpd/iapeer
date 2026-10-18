@@ -126,7 +126,8 @@ mtime, never a reconstruction:
 
 - **codex** — the rollout's `event_msg` payloads `task_started` → `working`, `task_complete` →
   `idle`; last one wins. Codex emits `task_complete` for a turn that ends on an error too, so
-  the terminal-error path needs no separate marker.
+  the terminal-error path needs no separate marker. An INTERRUPTED turn ends on `turn_aborted`
+  (no `task_complete` follows) → `idle`.
 - **claude** — the transcript's assistant `stop_reason`. **Only `tool_use` means the turn
   continues**; every other terminal reason (`end_turn`, `stop_sequence`, `max_tokens`, a future
   value, `null`) means it ended. The polarity is deliberately asymmetric: an unrecognised reason
@@ -134,7 +135,11 @@ mtime, never a reconstruction:
   tool_result to consume), but compaction summaries (`isCompactSummary`), sub-agent sidechains
   (`isSidechain`) and injected meta lines (`isMeta`) are excluded — each is a measured
   false-`working` vector, the worst being a `/compact` run while idle leaving a phantom
-  `working` forever.
+  `working` forever. An operator interrupt ends the turn with a user line whose text is
+  `[Request interrupted by user]` / `[Request interrupted by user for tool use]` → `idle` (it
+  used to read `working` forever on a stopped session, 18.10.2026).
+- **Attribution** — a session is the peer whose registered cwd is the session's cwd or its
+  nearest ancestor (a peer that `cd`-ed into a subdirectory stays itself).
 
 ### Bounds a client can rely on
 
