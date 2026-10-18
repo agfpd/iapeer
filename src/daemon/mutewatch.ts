@@ -78,6 +78,8 @@ import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import type { NoticeBoard } from './notices.ts'
 import { readSessionSlices } from './sessionfiles.ts'
+import { endpointPrivateDir } from '../storage/index.ts'
+import { readOpencodeState } from '../opencode/journal.ts'
 
 /** How much of a session file's tail is parsed. The evidence is always at the end. */
 const TAIL_BYTES = 256 * 1024
@@ -89,7 +91,7 @@ const CODEX_WALK_DEPTH = 3
 
 export interface MuteDetection {
   personality: string
-  runtime: 'claude' | 'codex'
+  runtime: 'claude' | 'codex' | 'opencode'
   /** The runtime's OWN taxonomy value — claude's `error`, codex's rate_limit_reached_type. */
   errorType: string
   model?: string
@@ -405,6 +407,41 @@ export interface MuteWatchPaths {
 export interface ScanDeps extends MuteWatchPaths {
   /** personality ← cwd. Built from the registry by the composition point. */
   peerByCwd: (cwd: string) => string | undefined
+  /** OpenCode endpoints: personality → its journal (core-owned private dir; docs/20). Optional:
+   *  absent → no opencode sweep (tests of the claude/codex paths). */
+  opencodeJournals?: () => Array<{ personality: string; events: string; model?: string }>
+}
+
+/**
+ * OpenCode (docs/20): the core plugin journals native `session.error` events unchanged. That IS the
+ * structural fact — the error's own `name` (APIError, ProviderAuthError, …) and status are the
+ * runtime's taxonomy, the message is verbatim. Read only events newer than the floor (by the journal
+ * line's own `time`, so an overlapping sweep re-reads the same occurrence without recounting).
+ */
+export function parseOpencodeJournal(tail: string, floorMs: number): Omit<RawDetection, 'cwd'> | null {
+  let last: Omit<RawDetection, 'cwd'> | null = null
+  for (const line of tail.split('\n')) {
+    if (!line.includes('"session.error"')) continue
+    let e: { type?: string; time?: number; sessionID?: string | null; properties?: { error?: { name?: string; data?: { message?: string; statusCode?: number } } } }
+    try {
+      e = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (e.type !== 'session.error' || typeof e.time !== 'number' || e.time < floorMs) continue
+    const err = e.properties?.error
+    if (!err) continue
+    const name = err.name ?? 'UnknownError'
+    if (name === 'MessageAbortedError') continue // an interrupt the operator asked for, not a failure
+    const status = err.data?.statusCode
+    last = {
+      errorType: status ? `${name}:${status}` : name,
+      content: err.data?.message ?? name,
+      ...(e.sessionID ? { sessionId: e.sessionID } : {}),
+      atMs: e.time,
+    }
+  }
+  return last
 }
 
 /**
@@ -441,6 +478,19 @@ export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[]
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {
     const t = readSessionSlices(file, TAIL_BYTES)
     if (t) push(parseCodexRollout(t.tail, floor, t.head), 'codex')
+  }
+  // opencode: the core-owned journal per endpoint (personality is known — no cwd mapping needed).
+  for (const j of deps.opencodeJournals?.() ?? []) {
+    let mt = 0
+    try {
+      mt = statSync(j.events).mtimeMs
+    } catch {
+      continue
+    }
+    if (mt < floor) continue
+    const t = readSessionSlices(j.events, TAIL_BYTES)
+    const d = t ? parseOpencodeJournal(t.tail, floor) : null
+    if (d) out.push({ ...d, ...(j.model ? { model: j.model } : {}), cwd: '', personality: j.personality, runtime: 'opencode' })
   }
   return out
 }
@@ -490,7 +540,7 @@ export interface StartMuteWatchOptions {
   /** Override the runtime session roots (tests). Default: resolveMuteWatchPaths(env). */
   paths?: MuteWatchPaths
   /** Override the registry read (tests). Default: a lazy import of the CLI's listPeers. */
-  listPeers?: () => Array<{ personality: string; cwd: string }>
+  listPeers?: () => Array<{ personality: string; cwd: string; runtimes?: string[] }>
   now?: () => number
   onError?: (err: unknown) => void
 }
@@ -516,7 +566,7 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
     try {
       if (!listPeers) {
         const cli = await import('../cli/index.ts')
-        listPeers = () => cli.listPeers({ env }).map(p => ({ personality: p.personality, cwd: p.cwd }))
+        listPeers = () => cli.listPeers({ env }).map(p => ({ personality: p.personality, cwd: p.cwd, runtimes: p.runtimes.map(r => r.runtime) }))
       }
       const rows = listPeers()
       // cwd → personality. Compared case-insensitively: macOS paths are case-insensitive and
@@ -530,6 +580,15 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
         now,
         onError: opts.onError,
         peerByCwd: (cwd: string) => byCwd.get(cwd.replace(/\/+$/, '').toLowerCase()),
+        opencodeJournals: () =>
+          rows
+            .filter(r => (r.runtimes ?? []).includes('opencode'))
+            .flatMap(r => {
+              const dir = endpointPrivateDir('opencode', r.personality, { env })
+              if (!dir) return []
+              const model = readOpencodeState(join(dir, 'state.json'))?.model
+              return [{ personality: r.personality, events: join(dir, 'events.jsonl'), ...(model ? { model } : {}) }]
+            }),
       }
       since = muteWatchTick(deps, since).sinceMs
     } catch (e) {

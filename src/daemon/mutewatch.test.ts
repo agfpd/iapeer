@@ -451,3 +451,35 @@ describe('resolveMuteWatchPaths', () => {
     expect(p.codexSessionsDir).toBe('/tmp/sandbox/codex')
   })
 })
+
+describe('opencode source (docs/20 OC13)', () => {
+  test('parseOpencodeJournal: native session.error → its own name:status taxonomy + verbatim message; abort is not a failure; floor respected', async () => {
+    const { parseOpencodeJournal } = await import('./mutewatch.ts')
+    const line = (time: number, error: object) => JSON.stringify({ schema: 1, seq: time, time, type: 'session.error', sessionID: 'ses_1', properties: { error } })
+    const tail = [
+      line(100, { name: 'APIError', data: { message: 'old', statusCode: 500 } }),
+      line(2000, { name: 'MessageAbortedError', data: { message: 'aborted' } }),
+      line(3000, { name: 'APIError', data: { message: 'Rate limit exceeded for nemotron', statusCode: 429 } }),
+    ].join('\n')
+    const d = parseOpencodeJournal(tail, 1000)
+    expect(d).toMatchObject({ errorType: 'APIError:429', content: 'Rate limit exceeded for nemotron', sessionId: 'ses_1', atMs: 3000 })
+    expect(parseOpencodeJournal(line(2000, { name: 'MessageAbortedError', data: {} }), 1000)).toBeNull()
+  })
+
+  test('scanMuteEvents raises an opencode endpoint from its journal, attributed by personality (no cwd mapping)', async () => {
+    const { scanMuteEvents } = await import('./mutewatch.ts')
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = mkdtempSync(join(tmpdir(), 'mw-oc-'))
+    const events = join(dir, 'events.jsonl')
+    const now = Date.now()
+    writeFileSync(events, JSON.stringify({ time: now, type: 'session.error', sessionID: 's', properties: { error: { name: 'ProviderAuthError', data: { message: 'invalid key' } } } }) + '\n')
+    const out = scanMuteEvents(
+      { claudeProjectsDir: join(dir, 'none1'), codexSessionsDir: join(dir, 'none2'), peerByCwd: () => undefined, opencodeJournals: () => [{ personality: 'oc', events, model: 'nvidia/x' }] },
+      now - 1000,
+    )
+    expect(out).toEqual([expect.objectContaining({ personality: 'oc', runtime: 'opencode', errorType: 'ProviderAuthError', content: 'invalid key', model: 'nvidia/x' })])
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
