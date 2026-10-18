@@ -32,7 +32,13 @@ export interface InflightEntry {
   attachments?: string[]
   /** The presented envelope (what the model sees) — the processed-check needle source. */
   rendered: string
+  /** The live confirm window ran out at delivery: whether it LANDED is still unknown. */
+  unconfirmed?: true
 }
+
+/** How long an unconfirmed delivery may stay unlanded in a live session before the ledger treats the
+ *  paste as swallowed and redelivers it (once). Generous: a busy receiver records a queued message late. */
+export const UNLANDED_AFTER_MS = 120_000
 
 const inflightPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.inflight.jsonl`)
 const orphansPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.orphans.jsonl`)
@@ -84,6 +90,9 @@ export interface InflightSweepDeps {
   sessionToken: (identity: string) => string | null
   /** Did the receiving session answer this entry? */
   processed: (entry: InflightEntry) => boolean
+  /** Did the entry land in the session at all? Only consulted for `unconfirmed` entries. */
+  landed?: (entry: InflightEntry) => boolean
+  now?: number
 }
 
 /**
@@ -105,8 +114,23 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
       done = false
     }
     if (done) continue
-    if (current !== null && current === e.sessionToken) keep.push(e)
-    else orphaned.push(e)
+    if (current !== null && current === e.sessionToken) {
+      // Unknown landing (confirm window ran out): once seen in the session it is a normal pending entry;
+      // still unseen after UNLANDED_AFTER_MS → the paste was swallowed → orphan (redeliver once).
+      if (e.unconfirmed && deps.landed) {
+        let landed = false
+        try {
+          landed = deps.landed(e)
+        } catch {
+          landed = false
+        }
+        if (landed) keep.push({ ...e, unconfirmed: undefined })
+        else if ((deps.now ?? Date.now()) - e.ts > UNLANDED_AFTER_MS) orphaned.push(e)
+        else keep.push(e)
+        continue
+      }
+      keep.push(e)
+    } else orphaned.push(e)
   }
   writeJsonl(inflightPath(stateDir, identity), keep)
   if (orphaned.length) for (const o of orphaned) appendFileSync(orphansPath(stateDir, identity), JSON.stringify(o) + '\n', { mode: 0o600 })

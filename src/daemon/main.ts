@@ -56,6 +56,7 @@ import type { ResolvedCaller } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import {
   createComposerDeliveryQueue,
+  deliveryLanded,
   deliveryProcessed,
   routeSend,
   type InflightNote,
@@ -265,8 +266,10 @@ export function makeNoteInflight(cfg: LifecycleConfig): (note: InflightNote) => 
 }
 
 /** The redelivery prefix — the model sees it is a re-send, not a duplicate of something it answered. */
+const REDELIVERY_PREFIX = '[redelivered by iapeer:'
 export function redeliveryMessage(e: InflightEntry): string {
-  return `[redelivered by iapeer: the receiving session ended before answering this message; originally sent ${e.sentAt}]\n${e.message}`
+  const why = e.unconfirmed ? 'it never reached the receiving session' : 'the receiving session ended before answering this message'
+  return `${REDELIVERY_PREFIX} ${why}; originally sent ${e.sentAt}]\n${e.message}`
 }
 
 /** Body of the explicit non-delivery notice to the original sender. */
@@ -289,7 +292,7 @@ export async function processInflight(
   cfg: LifecycleConfig,
   env: NodeJS.ProcessEnv,
   routeDeps: RouteDeps,
-  seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean } = {},
+  seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean; landed?: (e: InflightEntry) => boolean } = {},
 ): Promise<void> {
   const processed = seam.processed ?? ((e: InflightEntry) => deliveryProcessed(e, env))
   const send = seam.send ?? routeSend
@@ -297,6 +300,7 @@ export async function processInflight(
     const n = sweepInflight(cfg.stateDir, identity, {
       sessionToken: id => (hostSessionAlive(id, env) ? hostSessionToken(id, env) : null),
       processed,
+      landed: seam.landed ?? ((e: InflightEntry) => deliveryLanded(e, env)),
     })
     if (n > 0) appendLifecycleEvent(cfg.eventLogDir, { ev: 'inflight-orphaned', identity, count: n }, { env })
   }
@@ -305,6 +309,9 @@ export async function processInflight(
       const index = readPeersIndex({ env })
       let reason: string
       try {
+        // ONE redelivery per message: an already-redelivered message that orphans again goes to the
+        // sender as an explicit notice instead of looping.
+        if (e.message.startsWith(REDELIVERY_PREFIX)) throw new Error('already redelivered once and still not processed')
         const caller = resolveCallerIdentity({ personality: e.caller.personality, runtime: e.caller.runtime }, index)
         const r = await send(
           caller,

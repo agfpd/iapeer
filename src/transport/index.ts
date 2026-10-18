@@ -294,6 +294,13 @@ export interface WarmDeliverSeam {
    *  the real `resubmitHosted` (a bare CR over the control channel). Tests inject a spy to assert the
    *  retry fires only while unconfirmed — and never once the record is in. */
   resubmit?: (identity: string) => Promise<void>
+  /** UNKNOWN ≠ FAILED (incident 18.10: a busy receiver's transcript record landed after the grace,
+   *  the sender got «NOT delivered», believed it and sent a duplicate). When set, a confirm grace that
+   *  runs out on a LIVE session is reported as UNCONFIRMED — `onUnconfirmed()` fires and the delivery
+   *  returns ok — and the inflight ledger, not the sender, owns any retry (docs/20 §Durable inbound).
+   *  Unset (default): the strict legacy false-FAIL. */
+  allowUnconfirmed?: boolean
+  onUnconfirmed?: () => void
 }
 
 /**
@@ -444,6 +451,10 @@ async function deliverViaHost(
       nextResubmitAt = monotonicMs() + RESUBMIT_INTERVAL_MS
     }
     await sleep(LIVENESS_POLL_MS)
+  }
+  if (seam.allowUnconfirmed) {
+    seam.onUnconfirmed?.()
+    return ok(undefined)
   }
   return err(
     `hosted peer "${target.personality}" (${target.runtime}) is listed live but did not accept the message ` +
@@ -892,6 +903,36 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
   return false
 }
 
+/**
+ * Did the envelope LAND in the receiving session at all (any record carrying it, including claude's
+ * queue-operation for a busy session)? Weaker than deliveryProcessed — it separates «queued / being
+ * worked on» from «the paste was swallowed and nothing will ever see it». Structural runtimes (opencode)
+ * always landed: their delivery ack is a native persistence ack.
+ */
+export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (getAdapter(probe.runtime).deliveryConfirm === 'structural') return true
+  const needles = confirmNeedles(probe.rendered)
+  if (!needles.length || needles.every(n => !n)) return false
+  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+    let st
+    try {
+      st = statSync(path)
+    } catch {
+      continue
+    }
+    if (st.mtimeMs < probe.ts - 5000) continue
+    for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
+      if (!line.trim()) continue
+      try {
+        if (jsonStringValuesContainAll(JSON.parse(line), needles)) return true
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  return false
+}
+
 /** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
 export interface InflightNote {
   sentAt: string
@@ -905,6 +946,8 @@ export interface InflightNote {
   topic?: string
   attachments?: string[]
   rendered: string
+  /** The live confirm window ran out (see WarmDeliverSeam.allowUnconfirmed). */
+  unconfirmed?: true
 }
 
 function compactDoneTimeoutMs(env: NodeJS.ProcessEnv | undefined): number {
@@ -1144,6 +1187,10 @@ export interface RouteResult {
   queuedBy?: 'ephemeral' | 'composer'
   /** Queue depth right after the enqueue (observability; only with queued). */
   queueDepth?: number
+  /** The bytes reached the live session but its acceptance record did not appear within the confirm
+   *  window (e.g. a busy receiver). NOT a failure: do not resend — the core's inflight ledger checks
+   *  it landed and redelivers once (or tells you) if it did not. */
+  unconfirmed?: true
 }
 
 // WakeFn — the lifecycle wake primitive, INJECTED (transport never imports
@@ -1293,7 +1340,7 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   }
 }
 
-type InflightInfo = { sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string }
+type InflightInfo = { sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean }
 
 /** Best-effort inflight record (OC07) — only for agent (tui) endpoints. */
 function noteInflight(
@@ -1318,6 +1365,7 @@ function noteInflight(
       ...(info.topic ? { topic: info.topic } : {}),
       ...(info.attachments?.length ? { attachments: info.attachments } : {}),
       rendered: renderEnvelopeForAgent(info.envelope),
+      ...(info.unconfirmed ? { unconfirmed: true as const } : {}),
     })
   } catch {
     /* a post-delivery hook must never fail the delivery */
@@ -1790,16 +1838,26 @@ async function routeSendInner(
     // peer.cwd enables the Ф-B transcript-mtime liveness probe (busy-session case).
     // deliverWarm is HOST-AWARE (spawn-flip Ф0b-2): a supervisor-hosted target delivers over its
     // socket, any other target keeps the tmux path. Flag-off → byte-identical to deliverViaTmux.
-    const delivered = await deliverWarm(target.value, envelope, peer.cwd, {}, env)
+    // Unknown ≠ failed: a confirm window that runs out on a LIVE session is reported unconfirmed and the
+    // inflight ledger owns the retry — only when that ledger is wired (deps.noteInflight), else strict.
+    let unconfirmed = false
+    const delivered = await deliverWarm(
+      target.value,
+      envelope,
+      peer.cwd,
+      deps.noteInflight ? { allowUnconfirmed: true, onUnconfirmed: () => (unconfirmed = true) } : {},
+      env,
+    )
     if (!delivered.ok) return delivered
     noteTopic(deps, target.value.address, topic)
     noteDelivered(deps, target.value.address) // В7 — floor the idle proxy so this delivery isn't reaped away
-    noteInflight(deps, target.value, peer.cwd, inflightInfo, env)
+    noteInflight(deps, target.value, peer.cwd, { ...inflightInfo, unconfirmed }, env)
     return ok({
       ok: true,
       delivered_to: { personality: target.value.personality, runtime: target.value.runtime },
       woke: false,
       ts: sentAt,
+      ...(unconfirmed ? { unconfirmed: true as const } : {}),
     })
   }
 

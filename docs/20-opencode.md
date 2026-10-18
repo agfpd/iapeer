@@ -175,6 +175,14 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
   (lifecycle.log) and `ev=inflight-redelivered|inflight-undelivered`
   (delivery.log).
 - A false «not processed» costs a visible duplicate, never a silent loss.
+- Unknown is not failed. When a live receiver's acceptance record does not appear
+  within the confirm window (a busy claude records a queued message late), the
+  send returns `ok` with `unconfirmed: true` instead of «NOT delivered» — the
+  sender must not resend. The ledger keeps the entry marked unconfirmed: once any
+  record carrying the envelope appears (including a claude `queue-operation`) it
+  is an ordinary pending entry; if none appears within 120 s the paste was
+  swallowed, and the ledger redelivers it. Each message is redelivered at most
+  once; a second miss becomes an explicit notice to the sender.
 
 The real death cause is recorded too: the supervisor waits for the reap, so a
 SIGKILL is logged as `dead_signal=SIGKILL`, never as a clean exit 0.

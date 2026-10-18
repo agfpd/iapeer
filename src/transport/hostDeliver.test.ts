@@ -71,6 +71,33 @@ describe('deliverWarm — hosted CLAUDE (transcript-confirm) confirms by a NEW r
     }
   })
 
+  test('UNKNOWN ≠ FAILED: with the inflight ledger wired, a run-out confirm window is UNCONFIRMED (ok + signal), never «NOT delivered»', async () => {
+    let signalled = false
+    const seam: WarmDeliverSeam = {
+      deliverHosted: async () => ({ ok: true }),
+      confirmLanded: () => false, // the busy receiver records it LATE (incident 18.10)
+      sleep: async () => {},
+      allowUnconfirmed: true,
+      onUnconfirmed: () => (signalled = true),
+    }
+    const prev = process.env.IAP_HOST_LIVENESS_GRACE_MS
+    process.env.IAP_HOST_LIVENESS_GRACE_MS = '0'
+    try {
+      const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+      expect(r.ok).toBe(true)
+      expect(signalled).toBe(true)
+    } finally {
+      if (prev === undefined) delete process.env.IAP_HOST_LIVENESS_GRACE_MS
+      else process.env.IAP_HOST_LIVENESS_GRACE_MS = prev
+    }
+  })
+
+  test('UNCONFIRMED never masks a real failure: a socket-level deliver error is still a loud failure', async () => {
+    const seam: WarmDeliverSeam = { deliverHosted: async () => ({ ok: false, error: 'no socket' }), allowUnconfirmed: true }
+    const r = await deliverWarm(hostedTarget, 'task', '/peer/cwd', seam)
+    expect(r.ok).toBe(false)
+  })
+
   test('the carrying record appears only after a couple of polls (busy enqueues, then logs) → ok', async () => {
     let polls = 0
     const seam: WarmDeliverSeam = {

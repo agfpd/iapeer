@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFile
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeOrphans, type InflightEntry } from './inflight.ts'
-import { deliveryProcessed } from '../transport/index.ts'
+import { deliveryLanded, deliveryProcessed } from '../transport/index.ts'
 import { processInflight, redeliveryMessage } from '../daemon/main.ts'
 import { ok, err } from '../core/errors.ts'
 import { upsertPeer } from '../registry/index.ts'
@@ -48,6 +48,32 @@ describe('inflight ledger (OC07)', () => {
     expect(listOrphanIdentities(state)).toEqual(['claude-bob'])
     expect(takeOrphans(state, 'claude-bob').map(e => e.id).sort()).toEqual(['old', 'pending'])
     expect(listOrphanIdentities(state)).toEqual([])
+  })
+})
+
+describe('unconfirmed deliveries — the ledger, not the sender, decides', () => {
+  test('unconfirmed + not landed: kept inside the window, orphaned after it; landed → a normal pending entry', () => {
+    recordInflight(state, entry({ id: 'u1', unconfirmed: true, ts: 1_000_000 }))
+    const base = { sessionToken: () => 'host:1', processed: () => false }
+    expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => false, now: 1_000_000 + 60_000 })).toBe(0)
+    expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => true, now: 1_000_000 + 60_000 })).toBe(0)
+    expect(readInflight(state, 'claude-bob')[0]!.unconfirmed).toBeUndefined() // landed → flag cleared
+    recordInflight(state, entry({ id: 'u2', unconfirmed: true, ts: 1_000_000 }))
+    expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => false, now: 1_000_000 + 121_000 })).toBe(1)
+    expect(takeOrphans(state, 'claude-bob').map(e => e.id)).toEqual(['u2'])
+  })
+
+  test('deliveryLanded: a claude queue-operation carrying the envelope counts as landed (busy receiver)', () => {
+    const env = { HOME: root }
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const probe = { runtime: 'claude', personality: 'bob', cwd, ts: Date.now() - 1000, rendered: ENV_BODY }
+    writeFileSync(join(dir, 's.jsonl'), JSON.stringify({ type: 'assistant', message: { content: 'x' } }) + '\n')
+    expect(deliveryLanded(probe, env)).toBe(false)
+    appendFileSync(join(dir, 's.jsonl'), JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: ENV_BODY }) + '\n')
+    expect(deliveryLanded(probe, env)).toBe(true)
   })
 })
 
@@ -103,6 +129,19 @@ describe('processInflight — redeliver, or the sender learns', () => {
     expect(sends[0]).toMatchObject({ from: 'alice', to: 'bob' })
     expect(sends[0]!.message).toBe(redeliveryMessage(entry()))
     expect(listOrphanIdentities(state)).toEqual([])
+  })
+
+  test('ONE redelivery per message: an orphan that was already redelivered goes to the sender as a notice', async () => {
+    recordInflight(state, entry({ message: redeliveryMessage(entry()) }))
+    const calls: string[] = []
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, {
+      processed: () => false,
+      send: (async (caller: { personality: string }, input: { personality: string }) => {
+        calls.push(`${caller.personality}->${input.personality}`)
+        return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: false, ts: 'x' })
+      }) as never,
+    })
+    expect(calls).toEqual(['iapeer->alice']) // no second redelivery to bob — the sender is told instead
   })
 
   test('redelivery fails (e.g. crash-loop guard) → orphan consumed and the attempt recorded; never silently kept or dropped', async () => {
