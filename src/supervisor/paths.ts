@@ -14,6 +14,8 @@ export function defaultRunDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export const sockPath = (runDir: string, session: string): string => join(runDir, `${session}.sock`)
 export const pidPath = (runDir: string, session: string): string => join(runDir, `${session}.pid`)
+/** Presence advertises acknowledged input and the short-lived reload fence. Legacy hosts lack it. */
+export const inputProtocolPath = (runDir: string, session: string): string => join(runDir, `${session}.input-v1`)
 
 // ── pid-OWNERSHIP token (В22) ───────────────────────────────────────────────────
 // kill(pid,0) proves SOME process holds the pid, not that it is STILL our daemon: after an abnormal

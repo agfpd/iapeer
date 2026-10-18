@@ -3,7 +3,7 @@
 // port-deps live here + in protocol.ts: #1 TERM_RESET on EVERY exit path (incl. SIGHUP window-close,
 // via writeSync which works inside a signal handler), and #2 backpressure is the daemon's side.
 import { writeSync } from 'node:fs'
-import { FRAME_DATA, FRAME_RESIZE, TERM_ATTACH_RESET, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
+import { FRAME_DATA, FRAME_RESIZE, FRAME_ERROR, TERM_ATTACH_RESET, TERM_RESET, frame, makeFramer, sizePayload } from './protocol.ts'
 import { ownershipVerdict, pidStartToken, readPidFile, sockPath } from './paths.ts'
 
 const DETACH = 0x1d // Ctrl-]
@@ -77,6 +77,7 @@ export async function runSupervisorClient(runDir: string, session: string): Prom
 
   const framer = makeFramer((type, payload) => {
     if (type === FRAME_DATA) process.stdout.write(Buffer.from(payload))
+    if (type === FRAME_ERROR) { restore(); process.stderr.write(`\r\n[supervisor] ${payload.toString()}\r\n`); process.exit(1) }
   })
   // Ready the terminal BEFORE connecting, so the repaint snapshot renders the instant it arrives.
   if (process.stdin.isTTY) process.stdin.setRawMode(true)

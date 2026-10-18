@@ -79,6 +79,7 @@ import { recordLimitPark } from '../lifecycle/limitpark.ts'
 import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
+import { startCapabilityReloads } from '../capability/reload.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 import { randomBytes } from 'crypto'
 import { clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
@@ -480,6 +481,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   const ephemeral = makeEphemeralRouteDeps(cfg, env)
   const composerQueue = makeComposerQueueRouteDeps(cfg, env)
   const noteInflight = makeNoteInflight(cfg)
+  const stopCapabilityReloads = startCapabilityReloads(cfg, env)
   // Notice board (docs/19) — ONE instance shared by the mute-watch (raises) and the
   // fleet handler (serves /notices + the snapshot field). Constructed HERE, at the
   // composition point, because that sharing is the whole wiring.
@@ -677,7 +679,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
   // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
   // every test that starts a daemon would hang on exit).
-  return { ...handle, close: async () => { stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
+  return { ...handle, close: async () => { stopCapabilityReloads(); stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

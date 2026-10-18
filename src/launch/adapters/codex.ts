@@ -84,7 +84,10 @@ function codexUpdatePromptActive(pane: string): boolean {
   return pane.includes('Update available!') && pane.includes('Press enter to continue')
 }
 function codexDirTrustActive(pane: string): boolean {
-  return pane.includes('Do you trust the contents of this directory')
+  // ≤0.139 wording, and the 0.160 «Folder access / Trust this folder? › 1. Trust and continue» screen
+  // (captured live 18.10.2026: a project `.codex/config.toml` appearing in an untrusted cwd raises it on
+  // the next launch; unmatched, its `› 1.` row passed isInputReady and the next delivery's CR answered it).
+  return pane.includes('Do you trust the contents of this directory') || (pane.includes('Trust this folder?') && pane.includes('Trust and continue'))
 }
 function codexHooksReviewActive(pane: string): boolean {
   return pane.includes('Hooks need review')
@@ -272,7 +275,7 @@ export const codexAdapter: RuntimeAdapter = {
     const roots = spec.writableRoots ?? []
     return [
       cfg.codexBin,
-      ...(spec.resume ? ['resume', '--last'] : []),
+      ...(spec.resume ? ['resume', ...(spec.exactResume && spec.resumeRef ? [spec.resumeRef] : ['--last'])] : []),
       '--no-alt-screen',
       '-C',
       spec.cwd,
@@ -363,7 +366,8 @@ export const codexAdapter: RuntimeAdapter = {
   // composer arrow) is the same whether or not it launched with the YOLO bypass flag.
   isInputReady(pane: string, _mode?: ApprovalMode): boolean {
     if (pane.includes('Press enter to continue')) return false
-    return pane.split(/\r?\n/).some(line => line.trimStart().startsWith('› '))
+    // A numbered select row (`› 1. Trust and continue`) is a modal, never the composer.
+    return pane.split(/\r?\n/).some(line => { const l = line.trimStart(); return l.startsWith('› ') && !/^› \d+\. /.test(l) })
   },
 
   /**

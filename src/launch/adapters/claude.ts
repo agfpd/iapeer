@@ -329,7 +329,7 @@ export const claudeAdapter: RuntimeAdapter = {
       '--add-dir',
       '/',
       ...(spec.systemPromptFile ? ['--system-prompt-file', spec.systemPromptFile] : []),
-      ...(spec.resume ? ['--continue'] : []),
+      ...(spec.resume ? spec.exactResume && spec.resumeRef ? ['--resume', spec.resumeRef] : ['--continue'] : []),
       ...(spec.extraArgs ?? []),
     ]
   },

@@ -54,6 +54,8 @@ import { composeSystemPrompt, gatherPromptInput } from '../launch/composeSystemP
 import { clearHostReady, hostRunDir, hostSessionAlive, hostSessionReady, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
 import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
+import { fenceHost } from '../supervisor/reload.ts'
+import { completeReloads, pendingReloads } from '../capability/reloadStore.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -985,6 +987,13 @@ export interface WakeArgs {
   continueWork?: boolean
   /** Operator /new: retire the old hosting INSIDE the wake lock, then launch fresh. Not an IAP flag. */
   restart?: boolean
+  /** Capability application: replace only a proven-idle, input-fenced hosting, preserving history. */
+  reload?: boolean
+  /** Exact dialogue for a reload/recovery; unlike ordinary wake, never pick a newer cwd session. */
+  reloadResumeRef?: string
+  reloadRequestIds?: string[]
+  /** Durable continuation must be recorded BEFORE retiring the hosting. A failed write aborts it. */
+  beforeReloadRetire?: (resumeRef: string) => void
 }
 
 export interface WakeResult {
@@ -1004,6 +1013,7 @@ export interface WakeResult {
    *  deliver the envelope itself via the live path, or the second sender's
    *  message is silently lost behind a false ok (contract forbids silent loss). */
   taskDelivered?: boolean
+  pending?: boolean
 }
 
 export interface WakeDeps {
@@ -1086,6 +1096,10 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
   }
 
   const runWake = async (): Promise<WakeResult> => {
+    let reloadResumeRef = args.reloadResumeRef
+    if (args.reloadRequestIds && !pendingReloads(cfg, identity).some(r => args.reloadRequestIds!.includes(r.id))) {
+      return { status: 'READY', woke: false, runtime }
+    }
     // Re-check the refusal gates INSIDE the lock (audit #3/#11): a `stop` (C1 flag) or a
     // plist install that completed AFTER the pre-lock check but before the lock was
     // acquired must still be honored — else a concurrently stopped / launchd-claimed peer
@@ -1099,6 +1113,26 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     if (isLaunchdManaged(args.personality, env)) {
       logWake({ identity, runtime, mode: 'refused', cause: 'launchd-managed-mid-wake' })
       return { status: 'FAILED', woke: false, runtime, reason: `"${args.personality}" became launchd-managed mid-wake; the daemon does not wake it` }
+    }
+    if (args.reload) {
+      const runDir = cfg.supervisorRunDir ?? hostRunDir(env)
+      if (!hostDaemonAlive(runDir, identity)) return { status: 'READY', woke: false, runtime }
+      if (!hostSessionReady(identity, env, runDir)) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'waiting for the hosting ready gate' }
+      const lease = await fenceHost(runDir, identity)
+      try {
+        if (!lease.ready.ok || !lease.ready.resumeRef) return { status: 'FAILED', woke: false, runtime, pending: lease.ready.pending, reason: lease.ready.error ?? 'no resumable idle dialogue' }
+        reloadResumeRef = lease.ready.resumeRef
+        // Recheck stop/H4 after the async fence acquisition. Reload never clears operator intent.
+        if (isStopped(cfg, identity) || isLaunchdManaged(args.personality, env)) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'stop/launchd ownership changed during reload' }
+        args.beforeReloadRetire?.(reloadResumeRef)
+        const retired = await lease.retire()
+        if (!retired.ok) return { status: 'FAILED', woke: false, runtime, reason: retired.error ?? 'reload retirement failed' }
+        const deadline = Date.now() + 5000
+        while (hostDaemonAlive(runDir, identity) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50))
+        if (hostDaemonAlive(runDir, identity)) return { status: 'FAILED', woke: false, runtime, reason: 'reload hosting teardown timed out' }
+        clearHostReady(identity, env, runDir)
+      } finally { lease.close() }
+      if (isStopped(cfg, identity) || isLaunchdManaged(args.personality, env)) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'stop/launchd ownership changed; no reload launch' }
     }
     if (args.restart) {
       // /new is a replacement, not a wake of an existing host. SIGTERM is asynchronous: without
@@ -1167,8 +1201,8 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       cfg,
       identity,
       cwd,
-      args.restart ? false : args.resume,
-      c => adapter.resolveResume(c, { personality: args.personality, env }),
+      args.restart ? false : reloadResumeRef ? true : args.resume,
+      c => reloadResumeRef ? { ok: true, ref: reloadResumeRef } : adapter.resolveResume(c, { personality: args.personality, env }),
       args.topic,
       f => consumeOnUp.push(f),
       args.continueWork,
@@ -1226,6 +1260,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       systemPromptFile,
       resume, // RESOLVED resume/fresh (C3a), not the raw caller flag
       resumeRef,
+      ...(reloadResumeRef ? { exactResume: true } : {}),
       extraArgs: [],
       // Carry the peer's nature so the launch primitive can enforce an adapter's
       // intelligence gate (telegram requires natural). From the registry record.
@@ -1253,7 +1288,18 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // resume (a resumed session already holds its context). Best-effort read: a
     // profile read hiccup must never block the wake (the seed is optional).
     const firstMessage = composeFirstMessage(cwd, args.task, fresh)
+    // A damaged reload request must not block an ordinary wake: the launch reads the current surfaces
+    // anyway; the request simply stays pending and visible in `capability list` / lifecycle.log.
+    let capabilitySnapshot: ReturnType<typeof pendingReloads> = []
+    try { capabilitySnapshot = pendingReloads(cfg, identity) } catch (e) {
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'capability-reload-error', identity, error: e instanceof Error ? e.message : String(e) }, { env })
+    }
+    if (reloadResumeRef && (isStopped(cfg, identity) || isLaunchdManaged(args.personality, env))) return { status: 'FAILED', woke: false, runtime, pending: true, reason: 'stop/launchd ownership changed before reload launch' }
     const result = await launch(spec, adapter, firstMessage, launchCfg)
+    if (reloadResumeRef && isStopped(cfg, identity) && !isLaunchdManaged(args.personality, env)) {
+      killPtyHost(identity, env, { reason: 'stop-during-capability-reload' }, cfg.supervisorRunDir ?? hostRunDir(env))
+      return { status: 'FAILED', woke: false, runtime, stopped: true, pending: true, reason: 'operator stopped the endpoint during reload launch' }
+    }
     if (result.status === 'FAILED') {
       // enroll-on-FAILED (0.2.57): launch can return FAILED on a ready-gate false-negative
       // (model-did-not-process-task) while the tmux session + its process actually SURVIVE —
@@ -1283,6 +1329,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       return { status: 'FAILED', woke: false, runtime, reason: result.reason }
     }
     applyConsumed()
+    completeReloads(cfg, capabilitySnapshot)
     // The session is up and the message delivered. Recording supervise-state must not
     // turn a successful wake into a failure (audit #18): log loudly rather than throw
     // past a live spawn. NB since 0.2.55 (self-TTL removed) the session-state file IS

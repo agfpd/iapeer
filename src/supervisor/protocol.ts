@@ -10,6 +10,9 @@ const EMPTY = Buffer.alloc(0)
 // ── client/daemon frame protocol: [type:u8][len:u32be][payload] ──
 export const FRAME_DATA = 0
 export const FRAME_RESIZE = 1
+export const FRAME_RELOAD = 2
+export const FRAME_INPUT_ACK = 3
+export const FRAME_ERROR = 4
 
 export function frame(type: number, payload: Buffer | string): Buffer {
   const p = Buffer.isBuffer(payload) ? payload : Buffer.from(payload)

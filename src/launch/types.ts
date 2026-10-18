@@ -161,6 +161,8 @@ export interface LaunchSpec {
   resume?: boolean
   /** Pre-resolved resume ref (claude `--resume <uuid>`); set by resolveResume. */
   resumeRef?: string
+  /** Internal capability reload: resume this exact proven-idle dialogue, not latest-for-cwd. */
+  exactResume?: boolean
   /** Free-form extra CLI args (PEER_START_ARGS). */
   extraArgs?: string[]
   /** claude `--disallowedTools` value (opt-in per-peer override via launch.env `PEER_DISALLOWED_TOOLS`).

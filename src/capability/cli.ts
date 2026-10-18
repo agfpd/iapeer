@@ -5,6 +5,9 @@ import { readPeersIndex } from '../registry/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import { pluginLogsDir } from '../storage/index.ts'
 import type { ProvisionOccasion } from '../enable/provisionCommand.ts'
+import { loadLifecycleConfig } from '../lifecycle/index.ts'
+import { applyReloads } from './reload.ts'
+import { pendingReloads, readReload, reloadIdentities, requestReload } from './reloadStore.ts'
 import {
   capabilityEndpoints,
   listCapabilities,
@@ -20,6 +23,8 @@ export interface CapabilitySweepLine {
   runtime: string
   state: string
   detail?: string
+  application?: 'applied' | 'pending' | 'failed'
+  applicationDetail?: string
 }
 
 /** Run one command of ONE capability across every registered peer's applicable endpoints. */
@@ -59,10 +64,24 @@ export async function capabilityCli(
   errOut: (s: string) => void,
 ): Promise<number> {
   const [sub, arg] = positionals
+  const apply = async (lines: CapabilitySweepLine[]): Promise<CapabilitySweepLine[]> => {
+    const cfg = loadLifecycleConfig(env)
+    for (const l of lines) {
+      if (l.state !== 'ok') continue
+      try {
+        const req = requestReload(cfg, l.personality, l.runtime)
+        await applyReloads(cfg, `${l.runtime}-${l.personality}`, env)
+        const result = readReload(cfg, req)
+        l.application = result.state === 'applied' ? 'applied' : result.state === 'failed' ? 'failed' : 'pending'
+        l.applicationDetail = result.detail
+      } catch (e) { l.application = 'failed'; l.applicationDetail = String(e) }
+    }
+    return lines
+  }
   const report = (lines: CapabilitySweepLine[]): number => {
-    for (const l of lines) out(`${l.personality} (${l.runtime}): ${l.state}${l.detail ? ` — ${l.detail}` : ''}\n`)
+    for (const l of lines) out(`${l.personality} (${l.runtime}): ${l.state}${l.detail ? ` — ${l.detail}` : ''}${l.application ? `; runtime=${l.application} — ${l.applicationDetail}` : ''}\n`)
     if (lines.length === 0) out('no applicable peer endpoints\n')
-    return lines.some(l => l.state !== 'ok') ? 1 : 0
+    return lines.some(l => l.state !== 'ok' || l.application === 'failed') ? 1 : 0
   }
   try {
     switch (sub) {
@@ -71,7 +90,16 @@ export async function capabilityCli(
         for (const d of declarations) out(`${d.capability}${d.version ? `@${d.version}` : ''}  runtimes=[${d.runtimes.join(', ')}]  ${d.provision.command}\n`)
         for (const b of invalid) out(`INVALID ${b.file}: ${b.error}\n`)
         if (declarations.length + invalid.length === 0) out('no capabilities registered\n')
-        return invalid.length ? 1 : 0
+        const cfg = loadLifecycleConfig(env)
+        let failed = false
+        for (const identity of reloadIdentities(cfg)) {
+          const pending = pendingReloads(cfg, identity)
+          if (!pending.length) continue
+          const last = pending.reduce((a, b) => (a.attemptAt ?? a.requestedAt) > (b.attemptAt ?? b.requestedAt) ? a : b)
+          failed ||= last.state === 'failed'
+          out(`${identity}: runtime=${last.state === 'replacing' ? 'pending' : last.state} (${pending.length} request(s)) — ${last.detail}\n`)
+        }
+        return invalid.length || failed ? 1 : 0
       }
       case 'register': {
         if (!arg) throw new Error('usage: iapeer capability register <declaration.json>')
@@ -79,21 +107,21 @@ export async function capabilityCli(
         const path = writeCapabilityDeclaration(decl, { env })
         out(`registered ${decl.capability} → ${path}\n`)
         // Existing peers get the surfaces now; new peers get them at birth.
-        return report(await sweepCapability(decl, 'provision', 'sweep-on', env))
+        return report(await apply(await sweepCapability(decl, 'provision', 'sweep-on', env)))
       }
       case 'sync': {
         if (!arg) throw new Error('usage: iapeer capability sync <name>')
-        return report(await sweepCapability(find(arg, env), 'provision', 'sweep-on', env))
+        return report(await apply(await sweepCapability(find(arg, env), 'provision', 'sweep-on', env)))
       }
       case 'unregister': {
         if (!arg) throw new Error('usage: iapeer capability unregister <name>')
         const decl = find(arg, env)
-        const code = report(await sweepCapability(decl, 'unprovision', 'off-all', env))
+        const lines = await sweepCapability(decl, 'unprovision', 'off-all', env)
         // The declaration goes even if a peer failed to unwind: a lingering declaration
         // would re-provision surfaces on the next birth. The failures are reported above.
         removeCapabilityDeclaration(decl.capability, { env })
         out(`unregistered ${decl.capability}\n`)
-        return code
+        return report(await apply(lines))
       }
       default:
         errOut('usage: iapeer capability <list | register <declaration.json> | sync <name> | unregister <name>>\n')

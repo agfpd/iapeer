@@ -5,11 +5,13 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { findSurfaceTool, proveReload, surfaceProofServer } from './reload-proof.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const hostHome = homedir(), bin = resolve(arg('--bin') ?? join(hostHome, '.local/bin/iapeer'))
 const native = resolve(arg('--native') ?? join(hostHome, '.opencode/bin/opencode'))
 const artifacts = arg('--artifacts'), seed = arg('--seed-config')
+let cliBin = arg('--legacy-bin') ?? bin
 if (!seed) throw new Error('set --seed-config to an OpenCode config directory with the SDK installed')
 const root = mkdtempSync('/tmp/iap-installed-operators-'), home = join(root, 'home'), iap = join(root, 'iapeer')
 let personality = 'operator-proof', cwd = join(root, personality)
@@ -19,6 +21,8 @@ const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { ret
 const files = (dir: string): string[] => existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]) : []
 const wire: any[] = [], results: any[] = []
 let hanging = false, selfFresh = false, useSurface = false, surfaceCalls = 0
+let busyNext = false, busyReceived = false, releaseBusy: (() => void) | undefined
+const surface = surfaceProofServer()
 const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   const body: any = await req.json().catch(() => ({}))
   wire.push({ time: Date.now(), path: new URL(req.url).pathname, body })
@@ -36,6 +40,10 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   const chunk = (delta: unknown, finish: string | null) => 'data: ' + JSON.stringify({ id: `chatcmpl-${id}`, object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n'
   let first: string, finish = 'stop'
   const surfaceTool = (body.tools ?? []).find((t: any) => t.function?.name?.includes('surface_ping'))?.function?.name
+  if (busyNext && JSON.stringify(body.tools).includes('bash') && JSON.stringify(body).includes('RELOAD_BUSY_PROOF')) {
+    busyNext = false; busyReceived = true
+    await new Promise<void>(r => { releaseBusy = r })
+  }
   if (useSurface && surfaceTool) {
     useSurface = false; finish = 'tool_calls'
     first = chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${id}`, type: 'function', function: { name: surfaceTool, arguments: '{}' } }] }, null)
@@ -79,7 +87,7 @@ const until = async (what: string, f: () => unknown | Promise<unknown>, ms = 200
 }
 const record = (check: string, details: unknown) => { results.push({ check, time: Date.now(), details }); console.log(`PASS ${check}`) }
 const cli = async (...args: string[]) => {
-  const t = Date.now(), p = Bun.spawn([bin, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
+  const t = Date.now(), p = Bun.spawn([cliBin, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
   const [code, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()])
   const r = { args, code, stdout, stderr, ms: Date.now() - t }; results.push({ cli: r })
   return r
@@ -110,12 +118,33 @@ try {
   writeFileSync(paths().config, JSON.stringify({ model: 'synthetic/synthetic', small_model: 'synthetic/synthetic', enabled_providers: ['synthetic'], provider: {
     synthetic: { npm: '@ai-sdk/openai-compatible', name: 'Synthetic', options: { baseURL: provider.url.origin + '/v1', apiKey: 'x' }, models: { synthetic: { name: 'Synthetic', limit: { context: 100000, output: 1000 } } } },
   } }))
-  daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
+  daemon = Bun.spawn([arg('--legacy-bin') ?? bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
   await until('installed daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
   await turn('FIRST_OPERATOR_PROOF')
   const original = state()!
   record('cold-turn', original)
-  if (process.argv.includes('--surfaces-only')) {
+  if (process.argv.includes('--reload-only') || arg('--legacy-bin')) {
+    let busySeq = 0
+    await proveReload({ root, cwd, runtime: 'opencode', cli, turn, hosting, session: () => state()?.sessionID, record,
+      probe: async () => {
+        const from = wire.length, calls = surface.calls(); useSurface = true
+        try { await turn('RELOAD_TOOL_PROOF') } finally { useSurface = false }
+        return { offered: wire.slice(from).some(w => !!findSurfaceTool(w.body.tools)), calls: surface.calls() - calls }
+      },
+      beginBusy: async () => {
+        busySeq = state()?.lastEventSeq ?? 0; busyNext = true; busyReceived = false
+        await send('RELOAD_BUSY_PROOF'); await until('main native request pending', () => busyReceived)
+      },
+      finishBusy: async () => { releaseBusy?.(); await completed(busySeq) },
+      restartDaemon: async () => {
+        cliBin = bin
+        daemon!.kill(); await daemon!.exited
+        daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
+        await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
+      },
+    }, surface.url, !!arg('--legacy-bin'))
+    success = true
+  } else if (process.argv.includes('--surfaces-only')) {
     // Real capability installer argv, real register/unregister sweeps, real MCP
     // discovery/calls. A manual /new is the positive/negative control, not the fix.
     const fixture = join(root, 'surface-lifecycle.ts'), declaration = join(root, 'surface-proof.json')
@@ -232,11 +261,13 @@ const path=join(dir,'surface-proof.json');if(kind==='off')rmSync(path,{force:tru
   success = true
   }
 } finally {
+  releaseBusy?.()
   if (attached) { attached.kill(); await attached.exited; attached.terminal?.close() }
   if (daemon) { daemon.kill(); await daemon.exited }
   for (const p of ['operator-proof', 'operator-renamed']) await cli('supervisor', 'kill', 'opencode-' + p, '--run-dir', runDir)
   await cli('supervisor', 'kill', 'notifier-sender', '--run-dir', runDir)
   provider.stop(true)
+  surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
     for (const p of files(root).filter(p => /(?:\.jsonl|\.log|\.out|\.err)$/.test(p))) {

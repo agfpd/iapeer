@@ -173,20 +173,42 @@ async function server(input) {
     })
   }
 
+  let reloadFence = null
+  let inputOperations = 0
+  const pendingInputs = new Set()
+  let lastNativeUserAt = 0
   async function handle(req) {
+    if (reloadFence && reloadFence.until < Date.now()) reloadFence = null
+    if (req && (req.op === 'deliver' || req.op === 'compact') && reloadFence) return { ok: false, error: 'session is reloading; retry shortly' }
+    if (req && (req.op === 'deliver' || req.op === 'compact')) {
+      inputOperations++
+      try { return await handleInput(req) } finally { inputOperations-- }
+    }
+    return handleInput(req)
+  }
+  async function handleInput(req) {
     switch (req && req.op) {
+      case 'prepareReload':
+        if (reloadFence || inputOperations || pendingInputs.size || state.status !== 'idle' || !state.sessionID || lastNativeUserAt < req.notBefore) return { ok: false, error: 'native OpenCode is busy or accepting input' }
+        reloadFence = { token: req.token, until: Date.now() + 5000 }
+        return { ok: true, sessionID: state.sessionID }
+      case 'releaseReload':
+        if (reloadFence?.token === req.token) reloadFence = null
+        return { ok: true }
       case 'ping':
         return { ok: true, identity, launchID, sessionID: state.sessionID, status: state.status, lastEventSeq: state.lastEventSeq }
       case 'deliver': {
         if (typeof req.text !== 'string' || !req.text) return { ok: false, error: 'deliver: empty text' }
         const sessionID = await ensureSession()
         const messageID = ascendingId('msg')
+        pendingInputs.add(messageID)
         const persisted = awaitPersisted(messageID)
         const res = await client.session.promptAsync({
           path: { id: sessionID },
           body: { messageID, agent: 'iapeer', parts: [{ type: 'text', text: req.text }] },
         })
         if (res.error) {
+          pendingInputs.delete(messageID)
           waiters.delete(messageID)
           persisted.catch(() => {})
           return { ok: false, error: 'prompt_async: ' + JSON.stringify(res.error) }
@@ -197,6 +219,7 @@ async function server(input) {
       case 'interrupt': {
         if (!state.sessionID) return { ok: false, error: 'no session' }
         const res = await client.session.abort({ path: { id: state.sessionID } })
+        if (!res.error) pendingInputs.clear()
         return res.error ? { ok: false, error: JSON.stringify(res.error) } : { ok: true }
       }
       case 'compact': {
@@ -400,6 +423,10 @@ async function server(input) {
       const sessionID = sessionOf(type, p)
       if (type === 'message.updated' && p && p.info && waiters.has(p.info.id)) waiters.get(p.info.id)()
       if (type === 'message.updated' && p && sessionID === state.sessionID) noteModel(p.info)
+      if (type === 'message.updated' && p && sessionID === state.sessionID) {
+        if (p.info?.role === 'user') lastNativeUserAt = Math.max(lastNativeUserAt, p.info.time?.created ?? 0)
+        if (p.info?.role === 'assistant' && p.info.time?.completed && ['stop', 'length', 'content-filter'].includes(p.info.finish)) pendingInputs.delete(p.info.parentID)
+      }
       if (gated && type === 'permission.asked' && p && typeof p.id === 'string' && !approvals.has(p.id)) void brokerApproval(p)
       if (type === 'permission.replied' && p && approvals.has(p.requestID)) approvals.get(p.requestID).abort()
       if (sessionID && sessionID === state.sessionID) {

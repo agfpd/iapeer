@@ -18,6 +18,9 @@ import {
   BackpressureWriter,
   FRAME_DATA,
   FRAME_RESIZE,
+  FRAME_RELOAD,
+  FRAME_INPUT_ACK,
+  FRAME_ERROR,
   capabilityResponses,
   frame,
   makeFramer,
@@ -26,7 +29,10 @@ import {
   stripQueries,
 } from './protocol.ts'
 import { formatEventLine } from '../storage/rotatelog.ts'
-import { attachedPath, geometryPath, pidPath, pidStartToken, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
+import { attachedPath, geometryPath, inputProtocolPath, pidPath, pidStartToken, servePath, sockPath, writeGeometry, writePidFile } from './paths.ts'
+import { nativeIdle } from './nativeIdle.ts'
+import { opencodeControl } from '../opencode/control.ts'
+import type { ReloadReply } from './reload.ts'
 import { newStabilityGate, nagSignature, nextBootAction, nextNagAction, signatureStable, type BootPredicates, type NagPredicate } from './boot.ts'
 import { modelToPlainText } from './render.ts'
 import { codexAdapter } from '../launch/adapters/codex.ts'
@@ -260,6 +266,17 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   // write's parse-callback; `writeSeq` bumps on every write so the drain can detect new arrivals mid-await.
   let writeChain: Promise<void> = Promise.resolve()
   let writeSeq = 0
+  let lastInputAt = 0
+  type Fence = { owner: object; token: string; until: number; ready?: ReloadReply; committed?: boolean }
+  let fence: Fence | undefined
+  let fenceSeq = 0
+  const structuralDir = env.IAPEER_OPENCODE_DIR
+  const releaseFence = (): void => {
+    if (fence?.committed) return
+    const token = fence?.token
+    fence = undefined
+    if (token && runtime === 'opencode' && structuralDir) void opencodeControl(join(structuralDir, 'control.sock'), { op: 'releaseReload', token }, 1000)
+  }
   // В24 — a trailing INCOMPLETE escape sequence carried from one child-output chunk to the next, so a
   // capability query split across a pty read boundary is detected/stripped as a whole (client-facing only;
   // the model + pane-log always get the raw bytes immediately).
@@ -560,9 +577,46 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     /* intentional no-op: detach must NOT resize the child — see comment above */
   }
 
-  const onClientFrame = (s: { write(b: Buffer): number }, type: number, payload: Buffer): void => {
+  const onClientFrame = (s: { write(b: Buffer): number; end(): void }, type: number, payload: Buffer): void => {
+    if (fence && !fence.committed && fence.until < Date.now()) releaseFence()
+    if (type === FRAME_RELOAD) {
+      const reply = (r: ReloadReply) => s.write(frame(FRAME_RELOAD, JSON.stringify(r)))
+      if (payload.toString() === 'acquire') {
+        if (fence || clients.size !== 1) { reply({ ok: false, pending: true, error: 'input/attach is active; waiting for an unattached turn boundary' }); return }
+        const lease: Fence = { owner: s as object, token: `${process.pid}:${++fenceSeq}`, until: Date.now() + 4000 }
+        fence = lease
+        const evaluate = async (): Promise<ReloadReply> => {
+          if (runtime === 'opencode' && structuralDir) {
+            const r = await opencodeControl(join(structuralDir, 'control.sock'), { op: 'prepareReload', token: lease.token, notBefore: lastInputAt }, 1000)
+            return r.ok && r.sessionID ? { ok: true, resumeRef: r.sessionID } : { ok: false, pending: true, error: r.error ?? 'OpenCode has no idle session to resume' }
+          }
+          return nativeIdle({ runtime, childPid: child.pid, cwd: opts.cwd ?? runDir, env, lastInputAt })
+        }
+        void evaluate().then(r => {
+          if (fence !== lease) return
+          lease.ready = r
+          reply(r)
+          if (!r.ok) releaseFence()
+        }).catch(e => { reply({ ok: false, error: String(e) }); releaseFence() })
+      } else if (payload.toString() === 'retire') {
+        if (fence?.owner !== s || !fence.ready?.ok || fence.until < Date.now()) { reply({ ok: false, error: 'reload fence expired' }); return }
+        fence.committed = true
+        reply(fence.ready)
+        // Keep the input fence closed while the response flushes. No client can submit work
+        // between the native idle proof and shutdown. No timer/await reopens a committed fence.
+        setTimeout(() => shutdown('capability-reload'), 25)
+      }
+      return
+    }
+    if (fence && (type === FRAME_DATA || type === FRAME_RESIZE)) {
+      s.write(frame(FRAME_ERROR, 'session is reloading; retry shortly'))
+      s.end()
+      return
+    }
     if (type === FRAME_DATA) {
+      lastInputAt = Date.now()
       child.terminal.write(payload) // keystrokes → child
+      s.write(frame(FRAME_INPUT_ACK, ''))
     } else if (type === FRAME_RESIZE) {
       const sz = parseSize(payload)
       if (!painted.has(s as object)) {
@@ -580,10 +634,11 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
   } catch {
     /* */
   }
+  writeFileSync(inputProtocolPath(runDir, session), String(process.pid), { mode: 0o600 })
   const server = Bun.listen({
     unix: sock,
     socket: {
-      open(s: { write(b: Buffer): number }) {
+      open(s: { write(b: Buffer): number; end(): void }) {
         framers.set(s as object, makeFramer((t, p) => onClientFrame(s, t, p)))
         clients.add(s)
         initializing.add(s as object) // hold live-forward until this client's snapshot is sent (race guard)
@@ -601,6 +656,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         if (!writers.get(s)?.flush()) { clients.delete(s); painted.delete(s); syncAttached() } // writable again → flush queued tail
       },
       close(s: object) {
+        if (fence?.owner === s) releaseFence()
         clients.delete(s)
         painted.delete(s)
         writers.delete(s)
@@ -608,6 +664,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         restoreServeGeometryIfIdle() // last client gone → un-stick the pty from its size
       },
       error(s: object) {
+        if (fence?.owner === s) releaseFence()
         clients.delete(s)
         painted.delete(s)
         writers.delete(s)
@@ -656,7 +713,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
     } catch {
       /* */
     }
-    for (const f of [sock, pid, servePath(runDir, session), attachedMarker, geometryPath(runDir, session)]) {
+    for (const f of [sock, pid, servePath(runDir, session), attachedMarker, geometryPath(runDir, session), inputProtocolPath(runDir, session)]) {
       try {
         unlinkSync(f)
       } catch {
@@ -707,6 +764,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         clearInterval(driver)
         return
       }
+      if (fence) return
       let action
       try {
         const enc = { appCursorKeys: xterm.modes.applicationCursorKeysMode }
@@ -782,6 +840,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
         clearInterval(nagWatch)
         return
       }
+      if (fence) return
       if (Date.now() - nagFiredMs < NAG_COOLDOWN_MS) return // let a just-answered modal repaint away first
       let action
       try {
@@ -863,7 +922,7 @@ export function runSupervisorDaemon(opts: SupervisorDaemonOptions): void {
               personality: brokerPersonality,
               runtime: brokerRuntime,
               env: brokerEnv,
-              write: b => child.terminal.write(b),
+              write: b => { if (!fence) child.terminal.write(b) },
               stillActive,
               log: line => {
                 try {

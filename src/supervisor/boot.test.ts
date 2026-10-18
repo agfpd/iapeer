@@ -16,6 +16,22 @@ describe('nextBootAction — codex startup dialogs answered off the model', () =
     expect(bytesOf(a)).toEqual(Buffer.from('\r'))
   })
 
+  test('dir-trust, codex 0.160 «Folder access» wording → Enter; its `› 1.` row is not a ready composer (live 18.10)', () => {
+    const pane = [
+      '  Folder access',
+      '  /tmp/p/operator-proof',
+      '  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.',
+      '› 1. Trust and continue',
+      '  2. Quit',
+      '  enter continue · esc quit',
+    ].join('\n')
+    const a = nextBootAction(codexAdapter, pane)
+    expect(a.kind).toBe('dialog')
+    expect(bytesOf(a)).toEqual(Buffer.from('\r'))
+    expect(codexAdapter.isInputReady(pane)).toBe(false)
+    expect(codexAdapter.isInputReady('› Ask Codex to do anything')).toBe(true)
+  })
+
   test('update offer → decline [2,Enter], and NOT ready while "Press enter to continue" is up', () => {
     const pane = 'Update available! 9.9.9\nPress enter to continue'
     const a = nextBootAction(codexAdapter, pane)

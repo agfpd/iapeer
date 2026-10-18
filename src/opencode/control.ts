@@ -9,6 +9,8 @@ export type OpencodeControlRequest =
   | { op: 'interrupt' }
   | { op: 'select' }
   | { op: 'compact' }
+  | { op: 'prepareReload'; token: string; notBefore: number }
+  | { op: 'releaseReload'; token: string }
 
 export interface OpencodeControlResponse {
   ok: boolean

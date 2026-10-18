@@ -7,8 +7,8 @@
 // submits — the SAME two-step the cold/warm tmux delivery uses. Backpressure-safe: a multi-KB
 // envelope past the socket buffer is queued + flushed on drain, never truncated (the same failure
 // mode that staled heavy reattach — protocol.ts port-dep #2).
-import { BackpressureWriter, FRAME_DATA, frame } from './protocol.ts'
-import { sockPath } from './paths.ts'
+import { BackpressureWriter, FRAME_DATA, FRAME_INPUT_ACK, FRAME_ERROR, frame, makeFramer } from './protocol.ts'
+import { inputProtocolPath, sockPath } from './paths.ts'
 import { existsSync } from 'node:fs'
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
@@ -16,6 +16,26 @@ const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 export interface DeliverResult {
   ok: boolean
   error?: string
+}
+
+/** A socket flush is not acceptance: a fenced host must reject, not silently swallow, an input.
+ * Legacy hosts have no fence and keep the old protocol until their next natural restart. */
+function inputAcks(required: boolean) {
+  let count = 0, wanted = 0, error: string | undefined
+  const consume = makeFramer((type, payload) => {
+    if (type === FRAME_INPUT_ACK) count++
+    if (type === FRAME_ERROR) error = payload.toString()
+  })
+  return {
+    consume,
+    close: () => { error ??= 'input connection closed before acknowledgement' },
+    wait: async (): Promise<string | undefined> => {
+      if (!required) return undefined
+      const n = ++wanted, deadline = Date.now() + 1500
+      while (!error && count < n && Date.now() < deadline) await sleep(10)
+      return count >= n ? undefined : error ?? 'input was not acknowledged'
+    },
+  }
 }
 
 /** Deliver `message` to a hosted session over its supervisor socket: connect → bracketed-paste →
@@ -30,6 +50,7 @@ export async function deliverToHost(
   if (!existsSync(sock)) return { ok: false, error: `no supervisor socket for "${session}"` }
   let conn: Awaited<ReturnType<typeof Bun.connect>> | undefined
   let writer: BackpressureWriter | undefined
+  const ack = inputAcks(existsSync(inputProtocolPath(runDir, session)))
   try {
     conn = await Bun.connect({
       unix: sock,
@@ -37,14 +58,13 @@ export async function deliverToHost(
         drain() {
           writer?.flush()
         },
-        data() {
-          /* the daemon forwards screen output; the deliver client ignores it */
-        },
+        data(_s, data) { ack.consume(data) },
         error() {
+          ack.close()
           /* surfaced via the writer's dead state */
         },
         close() {
-          /* */
+          ack.close()
         },
       },
     })
@@ -53,9 +73,13 @@ export async function deliverToHost(
     const paste = `\x1b[200~${message}\x1b[201~` // bracketed paste — atomic, like paste-buffer -p
     if (!writer.send(frame(FRAME_DATA, Buffer.from(paste, 'utf8')))) return { ok: false, error: 'socket dead during paste' }
     if (!(await drainFully(writer))) return { ok: false, error: 'paste not fully flushed (socket stalled)' }
+    const pasteError = await ack.wait()
+    if (pasteError) return { ok: false, error: pasteError }
     await sleep(opts.submitDelayMs ?? 300)
     if (!writer.send(frame(FRAME_DATA, Buffer.from('\r', 'utf8')))) return { ok: false, error: 'socket dead during submit' }
     if (!(await drainFully(writer))) return { ok: false, error: 'submit not fully flushed (socket stalled)' }
+    const submitError = await ack.wait()
+    if (submitError) return { ok: false, error: submitError }
     await sleep(50) // let the CR land before we close the connection
     return { ok: true }
   } catch (e) {
@@ -94,16 +118,19 @@ export async function sendControlToHost(
   if (!existsSync(sock)) return { ok: false, error: `no supervisor socket for "${session}"` }
   let conn: Awaited<ReturnType<typeof Bun.connect>> | undefined
   let writer: BackpressureWriter | undefined
+  const ack = inputAcks(existsSync(inputProtocolPath(runDir, session)))
   try {
     conn = await Bun.connect({
       unix: sock,
-      socket: { drain() { writer?.flush() }, data() { /* */ }, error() { /* */ }, close() { /* */ } },
+      socket: { drain() { writer?.flush() }, data(_s, d) { ack.consume(d) }, error() { ack.close() }, close() { ack.close() } },
     })
     const c = conn
     writer = new BackpressureWriter(b => c.write(b))
     for (const chunk of chunks) {
       if (!writer.send(frame(FRAME_DATA, chunk))) return { ok: false, error: 'socket dead during control send' }
       if (!(await drainFully(writer))) return { ok: false, error: 'control not fully flushed (socket stalled)' }
+      const error = await ack.wait()
+      if (error) return { ok: false, error }
       if (opts.stepDelayMs) await sleep(opts.stepDelayMs)
     }
     await sleep(50) // let the last chunk land before we close the connection

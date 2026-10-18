@@ -10,6 +10,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { findSurfaceNamespace, findSurfaceTool, proveReload, surfaceProofServer } from './reload-proof.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const runtime = arg('--runtime')
@@ -17,6 +18,7 @@ if (runtime !== 'claude' && runtime !== 'codex') throw new Error('set --runtime 
 const hostHome = homedir(), bin = resolve(arg('--bin') ?? join(hostHome, '.local/bin/iapeer'))
 const native = resolve(arg('--native') ?? (runtime === 'claude' ? join(hostHome, '.local/bin/claude') : '/opt/homebrew/bin/codex'))
 const artifacts = arg('--artifacts')
+let cliBin = arg('--legacy-bin') ?? bin
 const binSHA256 = createHash('sha256').update(readFileSync(bin)).digest('hex')
 const root = mkdtempSync(`/tmp/iap-installed-${runtime}-operators-`), home = join(root, 'home'), iap = join(root, 'iapeer')
 let personality = 'operator-proof', cwd = join(root, personality)
@@ -25,6 +27,8 @@ const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { ret
 const files = (dir: string): string[] => existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]) : []
 const wire: any[] = [], results: any[] = []
 let toolAction: 'sleep' | 'self-fresh' | undefined
+let useSurface = false, busyNext = false, busyReceived = false, releaseBusy: (() => void) | undefined
+const surface = surfaceProofServer()
 const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   const body: any = await req.json().catch(() => ({})), path = new URL(req.url).pathname
   wire.push({ time: Date.now(), path, body })
@@ -34,13 +38,20 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   // Telemetry/title requests are not the instructed native turn. Consume an
   // action only when its test input reaches a tool-capable inference request.
   const toolCapable = JSON.stringify(body.tools ?? []).includes(runtime === 'claude' ? '"Bash"' : '"exec_command"')
+  if (busyNext && toolCapable && JSON.stringify(body).includes('RELOAD_BUSY_PROOF')) {
+    busyNext = false; busyReceived = true
+    await new Promise<void>(r => { releaseBusy = r })
+  }
+  const surfaceTool = useSurface ? findSurfaceTool(body.tools) : undefined
+  const surfaceNamespace = surfaceTool ? findSurfaceNamespace(body.tools) : undefined
+  if (surfaceTool) useSurface = false
   const action = toolAction && toolCapable && JSON.stringify(body).includes(toolAction === 'sleep' ? 'INTERRUPT_OPERATOR_PROOF' : 'SELF_FRESH_OPERATOR_PROOF') ? toolAction : undefined
   if (action) toolAction = undefined
   const command = action === 'sleep' ? `echo $$ > ${JSON.stringify(join(root, 'sleep.pid'))}; exec /bin/sleep 180` : `${JSON.stringify(bin)} self-fresh`
   const text = `PROBE_REPLY_${id}`
   const event = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
   if (runtime === 'codex') {
-    const item = action
+    const item = surfaceTool ? { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: surfaceTool, ...(surfaceNamespace ? { namespace: surfaceNamespace } : {}), arguments: '{}' } : action
       ? { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: 'exec_command', arguments: JSON.stringify({ cmd: command, yield_time_ms: 10000 }) }
       : { type: 'message', id: `msg_${id}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] }
     const response = { id: `resp_${id}`, object: 'response', status: 'completed', output: [item], usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } }
@@ -50,10 +61,10 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
       event('response.completed', { type: 'response.completed', response }),
     ].join(''), { headers: { 'content-type': 'text/event-stream' } })
   }
-  const content = action
+  const content = surfaceTool ? [{ type: 'tool_use' as const, id: `toolu_${id}`, name: surfaceTool, input: {} }] : action
     ? [{ type: 'tool_use' as const, id: `toolu_${id}`, name: 'Bash', input: { command, timeout: 300000, description: 'Isolated native operator proof' } }]
     : [{ type: 'text' as const, text }]
-  const message = { id: `msg_${id}`, type: 'message', role: 'assistant', model: body.model ?? 'claude-sonnet-4-5', content, stop_reason: action ? 'tool_use' : 'end_turn', stop_sequence: null, usage: { input_tokens: 100, output_tokens: 10 } }
+  const message = { id: `msg_${id}`, type: 'message', role: 'assistant', model: body.model ?? 'claude-sonnet-4-5', content, stop_reason: action || surfaceTool ? 'tool_use' : 'end_turn', stop_sequence: null, usage: { input_tokens: 100, output_tokens: 10 } }
   if (!body.stream) return Response.json(message)
   let stream = event('message_start', { type: 'message_start', message: { ...message, content: [], stop_reason: null } })
   for (const [index, block] of content.entries()) {
@@ -105,7 +116,7 @@ const until = async (what: string, f: () => unknown | Promise<unknown>, ms = 300
 }
 const record = (check: string, details: unknown) => { results.push({ check, time: Date.now(), details }); console.log(`PASS ${check}`) }
 const cli = async (...args: string[]) => {
-  const t = Date.now(), p = Bun.spawn([bin, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
+  const t = Date.now(), p = Bun.spawn([cliBin, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
   const [code, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()])
   const r = { args, code, stdout, stderr, ms: Date.now() - t }; results.push({ cli: r })
   return r
@@ -128,12 +139,35 @@ try {
   if (sink.state !== 'started') throw new Error(JSON.stringify(sink))
   const sentinelPid = readPidFile(runDir, 'notifier-sender')!.pid
   await must('version')
-  daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
+  daemon = Bun.spawn([arg('--legacy-bin') ?? bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
   await until('installed daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
   await turn('FIRST_OPERATOR_PROOF')
   const original = nativeSession()
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
+
+  if (process.argv.includes('--reload-only') || arg('--legacy-bin')) {
+    let busyAt = 0
+    await proveReload({ root, cwd, runtime, cli, turn, hosting, session: nativeSession, record,
+      probe: async () => {
+        const from = wire.length, calls = surface.calls(); useSurface = true
+        try { await turn('RELOAD_TOOL_PROOF') } finally { useSurface = false }
+        return { offered: wire.slice(from).some(w => !!findSurfaceTool(w.body.tools)), calls: surface.calls() - calls }
+      },
+      beginBusy: async () => {
+        busyAt = Date.now(); busyNext = true; busyReceived = false
+        await send('RELOAD_BUSY_PROOF'); await until('main native request pending', () => busyReceived)
+      },
+      finishBusy: async () => { releaseBusy?.(); await until('busy turn completed without abort', () => completedAfter(busyAt)) },
+      restartDaemon: async () => {
+        cliBin = bin
+        daemon!.kill(); await daemon!.exited
+        daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
+        await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
+      },
+    }, surface.url, !!arg('--legacy-bin'))
+    success = true
+  } else {
 
   let attachOut = ''
   attached = Bun.spawn([bin, 'attach', personality, runtime], { env, terminal: { cols: 100, rows: 32, name: 'xterm-256color', data(_t, d) { attachOut += Buffer.from(d).toString('utf8') } } })
@@ -207,12 +241,15 @@ try {
   if (read(join(iap, 'peers-profiles.json')).includes(personality) || !existsSync(cwd)) throw new Error('remove left registry entry or deleted user data')
   record('remove-live-guard-force-keeps-cwd', {})
   success = true
+  }
 } finally {
+  releaseBusy?.()
   if (attached) { attached.kill(); await attached.exited; attached.terminal?.close() }
   if (daemon) { daemon.kill(); await daemon.exited }
   for (const p of ['operator-proof', 'operator-renamed']) await cli('supervisor', 'kill', `${runtime}-${p}`, '--run-dir', runDir)
   await cli('supervisor', 'kill', 'notifier-sender', '--run-dir', runDir)
   provider.stop(true)
+  surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
     for (const p of files(root).filter(p => /(?:\.jsonl|\.log|\.out|\.err)$/.test(p))) {
