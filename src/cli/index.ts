@@ -48,6 +48,7 @@ import {
   killSession,
   loadLifecycleConfig,
   purgeIdentityState,
+  setLastDelivered,
   removeSessionState,
   resolvePeerRuntime,
   setEphemeralArmed,
@@ -1378,7 +1379,7 @@ export async function sendMessage(
   // unawaited in-process wake would die with it; the daemon's supervise-tick
   // drain scan (≤60 s) picks the queue up — the EXISTING retry path for failed
   // kicks, not a new mechanism.
-  const { makeArmEphemeralOnDelivered, makeEphemeralRouteDeps, makeNoteLiveTopic } = await import('../daemon/main.ts')
+  const { makeArmEphemeralOnDelivered, makeEphemeralRouteDeps, makeNoteInflight, makeNoteLiveTopic } = await import('../daemon/main.ts')
   const cfg = loadLifecycleConfig(env)
   const t0 = Date.now()
   const result = await routeSend(
@@ -1397,6 +1398,10 @@ export async function sendMessage(
       wake: cliWake,
       ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}),
       noteLiveTopic: makeNoteLiveTopic(cfg, env),
+      // CLI-path parity: the idle-proxy floor (В7) and the inflight ledger (OC07) — the daemon tick
+      // redelivers a CLI-sent message too if its receiving session dies before answering.
+      noteDelivered: identity => setLastDelivered(cfg, identity),
+      noteInflight: makeNoteInflight(cfg),
       originGuardBypass: opts.originGuardBypass,
     },
   )
