@@ -617,7 +617,7 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
   // observations in; the snapshot below reads it. Reading is O(1): no file touched per request.
   const activity = opts.activity ?? new ActivityBoard()
   const activityOf = (personality: string, runtime: string): TurnActivity | undefined =>
-    activity.get(personality, runtime, Date.now())
+    structuralActivity(personality, runtime, env) ?? activity.get(personality, runtime, Date.now())
   let opsPromise: Promise<FleetOps> | undefined
   const getOps = (): Promise<FleetOps> => {
     if (opts.ops) return Promise.resolve(opts.ops)
@@ -898,6 +898,20 @@ async function runCommand(
     default:
       return sendJson(res, 404, { error: `unknown command "${command}"` })
   }
+}
+
+/**
+ * Activity of a STRUCTURAL runtime straight from its own state (docs/20: state.json `status` is the
+ * busy/idle source, not a transcript watch). busy/approval → working, idle → idle; anything else (or
+ * no private dir) → undefined, so the transcript turn-watch decides for claude/codex as before.
+ */
+export function structuralActivity(personality: string, runtime: string, env: NodeJS.ProcessEnv): TurnActivity | undefined {
+  const dir = endpointPrivateDir(runtime, personality, { env })
+  if (!dir) return undefined
+  const status = readOpencodeState(join(dir, 'state.json'))?.status
+  if (status === 'busy' || status === 'approval') return 'working'
+  if (status === 'idle') return 'idle'
+  return undefined
 }
 
 /** Serve the SSE event stream: optional replay of the newest N historical events,

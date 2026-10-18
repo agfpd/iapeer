@@ -21,6 +21,7 @@ import {
   FleetEventTailer,
   buildFleetHandler,
   buildFleetSnapshot,
+  structuralActivity,
   fleetEventFiles,
   readRecentEvents,
   resolveSendCaller,
@@ -156,6 +157,19 @@ describe('GET /fleet/v1/snapshot', () => {
     const e = { ...process.env, IAPEER_ROOT: '/x/root' }
     const boris = buildFleetSnapshot(e, cfg, ops, Date.now()).peers.find(p => p.personality === 'boris')!
     expect(boris.runtimes.map(r => [r.runtime, r.private_dir])).toEqual([['claude', undefined], ['codex', undefined], ['opencode', '/x/root/state/opencode/boris']])
+  })
+
+  test('structuralActivity: opencode busy/approval → working, idle → idle; claude/codex untouched', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-act-'))
+    const dir = join(root, 'state', 'opencode', 'boris')
+    mkdirSync(dir, { recursive: true })
+    const e = { ...process.env, IAPEER_ROOT: root }
+    for (const [st, want] of [['busy', 'working'], ['approval', 'working'], ['idle', 'idle'], ['stopped', undefined]] as const) {
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({ schema: 1, launchID: 'l', status: st }))
+      expect(structuralActivity('boris', 'opencode', e)).toBe(want)
+    }
+    expect(structuralActivity('boris', 'claude', e)).toBeUndefined()
+    rmSync(root, { recursive: true, force: true })
   })
 
   test('runtimes[].model: the ACTUAL model from the endpoint state (implicit provider is visible)', () => {
