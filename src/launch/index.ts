@@ -194,13 +194,17 @@ export const launch: LaunchFn = async (
     // Structural runtimes (opencode) prepare launch artifacts + extra env BEFORE spawn. The identity
     // ABI stays authoritative: prepared env never overrides PEER_PERSONALITY/RUNTIME/IDENTITY.
     let readyToken: string | undefined
+    const loggedWarnings = new Set<string>()
     if (adapter.prepareLaunch) {
       try {
         const prepared = adapter.prepareLaunch(spec, invocation.env, cfg)
         const { PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY } = invocation.env
         invocation.env = { ...invocation.env, ...prepared.env, PEER_PERSONALITY, PEER_RUNTIME, PEER_IDENTITY }
         readyToken = prepared.readyToken
-        for (const w of prepared.warnings ?? []) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
+        for (const w of prepared.warnings ?? []) {
+          loggedWarnings.add(w)
+          appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
+        }
       } catch (e) {
         return fail(identity, `launch preparation failed: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -241,7 +245,9 @@ export const launch: LaunchFn = async (
       if (adapter.structuralReady && readyToken) {
         const r = await adapter.structuralReady(spec, readyToken, Date.now() + cfg.bootDeadlineSecs * 1000, () => hostSessionAlive(identity, env), env)
         if (!r.ok) return fail(identity, `never-became-ready (structural: ${r.reason ?? 'unknown'})`)
-        for (const w of r.warnings ?? []) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
+        for (const w of r.warnings ?? []) {
+          if (!loggedWarnings.has(w)) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
+        }
         if (firstMessage.trim().length === 0) return ready(identity)
         if (!adapter.deliver) return fail(identity, 'structural runtime has no deliver hook')
         const d = await adapter.deliver({ personality: spec.personality, identity }, firstMessage, env)

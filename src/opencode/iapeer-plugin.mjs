@@ -321,6 +321,10 @@ async function server(input) {
   async function selfCheck() {
     const warnings = []
     try {
+      const fromCore = JSON.parse(env.IAPEER_OPENCODE_WARNINGS || '[]') // launch-time facts (e.g. implicit provider)
+      if (Array.isArray(fromCore)) for (const w of fromCore) if (typeof w === 'string') warnings.push(w)
+    } catch {}
+    try {
       const st = await client.mcp.status()
       for (const [name, s] of Object.entries((st && st.data) || {})) {
         if (s && s.status !== 'connected' && s.status !== 'disabled') warnings.push('mcp ' + name + ': ' + s.status + (s.error ? ' — ' + String(s.error).slice(0, 200) : ''))

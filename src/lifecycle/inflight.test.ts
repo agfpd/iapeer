@@ -66,6 +66,21 @@ describe('interrupted turns (OC07 extension) — processed but unfinished: never
     expect(takeInterrupted(state, 'claude-bob').map(e => e.id)).toEqual(['mid']) // 'early' is covered by the later finished 'fin'
     expect(takeOrphans(state, 'claude-bob').map(e => e.id)).toEqual(['fresh'])
   })
+  test('REGRESSION (linus 0.4.122): a turn finished in a NEW session never covers a dead session — A → interrupted, B → orphan', () => {
+    recordInflight(state, entry({ id: 'A', ts: 1, sessionToken: 'host:old' })) // started, then SIGKILL
+    recordInflight(state, entry({ id: 'B', ts: 2, sessionToken: 'host:old' })) // queued, never answered
+    recordInflight(state, entry({ id: 'C', ts: 3, sessionToken: 'host:new' })) // woke a fresh session, finished
+    const n = sweepInflight(state, 'claude-bob', {
+      sessionToken: () => 'host:new',
+      processed: e => e.id === 'A' || e.id === 'C',
+      completed: e => e.id === 'C',
+    })
+    expect(n).toBe(2)
+    expect(takeInterrupted(state, 'claude-bob').map(e => e.id)).toEqual(['A'])
+    expect(takeOrphans(state, 'claude-bob').map(e => e.id)).toEqual(['B'])
+    expect(readInflight(state, 'claude-bob')).toEqual([])
+  })
+
   test('live session: a processed-unfinished turn is still working → kept', () => {
     recordInflight(state, entry({ id: 'working' }))
     expect(sweepInflight(state, 'claude-bob', { sessionToken: () => 'host:1', processed: () => true, completed: () => false })).toBe(0)

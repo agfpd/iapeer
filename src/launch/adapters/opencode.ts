@@ -108,6 +108,9 @@ export const opencodeAdapter: RuntimeAdapter = {
     const warnings = hasExplicitModel(config)
       ? []
       : [`opencode-implicit-provider: no explicit "model" in ${p.config} — OpenCode's own default provider receives the doctrine and messages`]
+    // Handed to the plugin too, so they reach runtime.ready / state.json / fleet runtimes[].warnings like
+    // the self-check findings (not only lifecycle.log).
+    if (warnings.length) out.IAPEER_OPENCODE_WARNINGS = JSON.stringify(warnings)
     return { env: out, readyToken: launchID, warnings }
   },
 

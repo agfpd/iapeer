@@ -119,17 +119,20 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
     }
   }
   // A session works its input in order: a FINISHED turn for a later message means every earlier one
-  // was handled too (bounds the ledger when a turn-end record is missed).
-  let finishedUpTo = -Infinity
+  // OF THE SAME SESSION was handled too (bounds the ledger when a turn-end record is missed). Strictly
+  // per session token: a turn finished in a NEW session says nothing about a dead session's queue —
+  // that cross-session shortcut silently dropped A and B in 0.4.122 (linus OC07 regression).
+  const finishedUpTo = new Map<string, number>()
   const finished = new Set<string>()
+  const sessionKey = (e: InflightEntry) => e.sessionToken ?? '∅'
   for (const e of entries) {
     if (safe(deps.completed, e, false) || (!deps.completed && safe(deps.processed, e, false))) {
       finished.add(e.id)
-      finishedUpTo = Math.max(finishedUpTo, e.ts)
+      finishedUpTo.set(sessionKey(e), Math.max(finishedUpTo.get(sessionKey(e)) ?? -Infinity, e.ts))
     }
   }
   for (const e of entries) {
-    if (finished.has(e.id) || e.ts < finishedUpTo) continue
+    if (finished.has(e.id) || e.ts < (finishedUpTo.get(sessionKey(e)) ?? -Infinity)) continue
     const done = safe(deps.processed, e, false)
     if (done) {
       // Answered but its turn did not finish: live → still working; gone → INTERRUPTED (side effects
