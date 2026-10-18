@@ -5,9 +5,11 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { writePidFile, pidPath } from '../src/supervisor/paths.ts'
+import { fileSHA256 } from './proof-installed-lib.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const bin = resolve(arg('--bin') ?? join(homedir(), '.local/bin/iapeer'))
+const binSHA256 = fileSHA256(bin)
 const runDir = join(homedir(), '.iapeer/state/supervisor')
 const session = `guardprobe-${process.pid}` // not a valid runtime-prefixed peer identity
 const pidfile = pidPath(runDir, session)
@@ -22,7 +24,7 @@ try {
   await Bun.sleep(100)
   let sentinelAlive = false
   try { process.kill(child.pid, 0); sentinelAlive = child.exitCode === null } catch { /* dead */ }
-  const result = { bin, code, stdout, stderr, sentinelPid: child.pid, sentinelAlive,
+  const result = { bin, binSHA256, code, stdout, stderr, sentinelPid: child.pid, sentinelAlive,
     success: code !== 0 && /refusing to signal the REAL supervisor/.test(stderr) && sentinelAlive }
   const artifacts = arg('--artifacts')
   if (artifacts) {

@@ -14,11 +14,13 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileSHA256 } from './proof-installed-lib.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const runtime = arg('--runtime')
 if (runtime !== 'claude' && runtime !== 'codex' && runtime !== 'opencode') throw new Error('set --runtime claude|codex|opencode')
 const hostHome = homedir(), bin = resolve(arg('--bin') ?? join(hostHome, '.local/bin/iapeer'))
+const binSHA256 = fileSHA256(bin)
 const native = resolve(arg('--native') ?? (runtime === 'claude' ? join(hostHome, '.local/bin/claude') : runtime === 'codex' ? '/opt/homebrew/bin/codex' : join(hostHome, '.opencode/bin/opencode')))
 const artifacts = arg('--artifacts'), root = mkdtempSync('/tmp/iap-installed-midturn-')
 const home = join(root, 'home'), iap = join(root, 'iapeer'), cwd = join(root, 'midturn-proof')
@@ -206,7 +208,7 @@ try {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))
-    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, runtime, native, results }, null, 2) + '\n')
+    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, binSHA256, runtime, native, results }, null, 2) + '\n')
   }
   console.log(JSON.stringify({ success, runtime }))
   await Bun.sleep(500)

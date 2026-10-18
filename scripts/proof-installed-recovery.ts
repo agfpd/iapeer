@@ -6,11 +6,13 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileSHA256 } from './proof-installed-lib.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const hostHome = homedir()
 const bin = resolve(arg('--bin') ?? join(hostHome, '.local/bin/iapeer'))
 const legacy = resolve(arg('--legacy') ?? `${bin}.prev`)
+const binSHA256 = fileSHA256(bin), legacyBinSHA256 = fileSHA256(legacy)
 const native = resolve(arg('--codex-bin') ?? '/opt/homebrew/bin/codex')
 const auth = join(process.env.CODEX_HOME ?? join(hostHome, '.codex'), 'auth.json')
 const artifacts = arg('--artifacts')
@@ -162,7 +164,7 @@ try {
       const dest = join(artifacts, p.slice(root.length + 1))
       mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
-    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, legacy, native, snapshots }, null, 2) + '\n')
+    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, binSHA256, legacy, legacyBinSHA256, native, snapshots }, null, 2) + '\n')
   }
   console.log(JSON.stringify({ success, snapshots }, null, 2))
   await Bun.sleep(500)
