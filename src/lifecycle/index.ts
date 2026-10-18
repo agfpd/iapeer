@@ -653,6 +653,10 @@ export function resolveWakeMode(
    *  next resume/fresh decision (a crash-looping binary used to eat .idle-reaped, and after the fix the
    *  peer came back FRESH, its context lost). Absent → consume immediately (legacy/test callers). */
   defer?: (consume: () => void) => void,
+  /** The waking message is an explicit "continue THIS work" (the limit-resume nudge, docs/19 §9):
+   *  in the idle-reaped executor branch it satisfies the topic gate by itself. Never outranks an
+   *  owner's /new, a soft-reload, a folder-launch or a crash (those decide before 3b). */
+  continueWork?: boolean,
 ): WakeMode {
   const done = defer ?? ((f: () => void) => f())
   // 1. folder-launch → always fresh. Consume a standing .new-eager too — the mark's
@@ -725,6 +729,12 @@ export function resolveWakeMode(
   // gap is not a request to resume specific work; defaulting it to resume revived stale
   // context (e.g. a 3-day-old session). The sender opts INTO continuity by passing the topic.
   const topic = incomingTopic?.trim() ?? ''
+  if (continueWork) {
+    const r = resolveResume(cwd)
+    return r.ok
+      ? { resume: true, resumeRef: r.ref, cause: 'idle-reaped-continue' }
+      : { resume: false, cause: 'idle-reaped-no-resume' }
+  }
   if (!topic) return { resume: false, cause: 'idle-reaped-no-topic' }
   // RESUME if the incoming topic matches ANY thread this session lineage worked on — not
   // just the last. Different threads accumulate in one session; a later ping on an earlier
@@ -967,6 +977,8 @@ export interface WakeArgs {
   /** First message delivered to the woken session (the routed envelope). */
   task: string
   resume?: boolean
+  /** Explicit "continue THIS work" intent — see resolveWakeMode `continueWork`. */
+  continueWork?: boolean
 }
 
 export interface WakeResult {
@@ -1124,6 +1136,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       c => adapter.resolveResume(c, { personality: args.personality, env }),
       args.topic,
       f => consumeOnUp.push(f),
+      args.continueWork,
     )
     const applyConsumed = (): void => {
       for (const f of consumeOnUp.splice(0)) {

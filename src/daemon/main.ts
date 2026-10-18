@@ -140,7 +140,7 @@ const DAEMON_MAIN_PATH = fileURLToPath(import.meta.url)
 export function makeWakeFn(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): WakeFn {
   return (req: WakeRequest): Promise<WakeOutcome> =>
     wakeOrSpawn(
-      { personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task },
+      { personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task, ...(req.continueWork ? { continueWork: true } : {}) },
       { cfg, env },
     )
 }
@@ -493,6 +493,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         ...(d.file ? { file: d.file } : {}),
         ...(d.sessionId ? { sessionId: d.sessionId } : {}),
         errorType: d.errorType,
+        ...(readTopic(cfg, identity) ? { topic: readTopic(cfg, identity) } : {}),
       })
       if (fresh) appendLifecycleEvent(cfg.eventLogDir, { ev: 'limit-park', identity, resets: new Date(d.resetsAtMs).toISOString(), error_type: d.errorType }, { env })
     },

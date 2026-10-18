@@ -42,6 +42,8 @@ export interface LimitPark {
   file?: string
   sessionId?: string
   errorType?: string
+  /** The session's most-recent topic when parked — the nudge continues that thread. */
+  topic?: string
   attempts?: number
   lastAttemptMs?: number
 }

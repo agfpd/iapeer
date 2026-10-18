@@ -456,7 +456,11 @@ five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reape
 3. **Nudge.** After `resetsAt + 3 min`, if the session made no progress since the event (claude: a
    real, non-`<synthetic>` assistant line after it; codex: a `task_complete` with a message whose
    `completed_at` is after it), the core delivers ONE continuation message through the normal
-   route — wake-on-miss resumes a reaped session (an idle reap is resume-eligible). Progress
+   route — wake-on-miss RESUMES a reaped session: the nudge carries an explicit continue-work
+   wake intent that satisfies the executor topic gate by itself (wake cause
+   `idle-reaped-continue`); it never outranks an owner `/new`, a soft-reload or a crash. Without
+   it the first live run (0.4.127) woke the peer FRESH (`idle-reaped-new-topic`) and the peer
+   answered «nothing to resume» — the very loss this section exists to prevent. Progress
    already made → the park is dropped without a message (no duplicate turn). A failed delivery is
    retried (5 min backoff, 3 attempts); an operator `stop` is never fought.
 4. **Sender** = the core's system identity `iapeer-system` (runtime `core`, intelligence

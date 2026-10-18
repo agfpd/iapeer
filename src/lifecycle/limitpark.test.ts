@@ -13,7 +13,7 @@ import {
   recordLimitPark,
   type LimitPark,
 } from './limitpark.ts'
-import { loadLifecycleConfig, superviseTick, hasIdleReaped, type LifecycleConfig } from './index.ts'
+import { loadLifecycleConfig, superviseTick, hasIdleReaped, resolveWakeMode, setIdleReaped, setNewEager, addTopic, type LifecycleConfig } from './index.ts'
 import { limitResumeMessage, processLimitResumes } from '../daemon/limitresume.ts'
 import { claudeResetsAtMs, parseClaudeTranscript } from '../daemon/mutewatch.ts'
 import { ok, err } from '../core/errors.ts'
@@ -130,8 +130,10 @@ describe('HOLD — superviseTick does not idle-reap a session waiting for its li
 
 describe('NUDGE — after the reset the core continues the stopped turn, no human', () => {
   type Sent = { from: string; to: string; runtime?: string; topic?: string; message: string }
+  const depsSeen: Array<{ wakeContinueWork?: boolean }> = []
   const spy = (sent: Sent[], result: 'ok' | 'fail' | 'stopped' = 'ok') =>
-    (async (caller: { personality: string }, input: { personality: string; runtime?: string; topic?: string; message: string }) => {
+    (async (caller: { personality: string }, input: { personality: string; runtime?: string; topic?: string; message: string }, deps: { wakeContinueWork?: boolean }) => {
+      depsSeen.push(deps)
       sent.push({ from: caller.personality, to: input.personality, runtime: input.runtime, topic: input.topic, message: input.message })
       if (result === 'fail') return err('peer "iapeer" offline and wake failed: boom')
       if (result === 'stopped') return err('peer "iapeer" is stopped and not accepting messages')
@@ -147,6 +149,7 @@ describe('NUDGE — after the reset the core continues the stopped turn, no huma
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ from: SYSTEM_PERSONALITY, to: 'iapeer', runtime: 'claude', topic: 'limit-resume' })
     expect(sent[0]!.message).toBe(limitResumeMessage(park()))
+    expect(depsSeen[0]?.wakeContinueWork).toBe(true) // the wake it may trigger RESUMES (live run 18.10: without it → fresh, context lost)
     expect(listLimitParks(cfg)).toHaveLength(0) // one nudge per limit event
     await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS * 10 })
     expect(sent).toHaveLength(1)
@@ -169,5 +172,29 @@ describe('NUDGE — after the reset the core continues the stopped turn, no huma
     recordLimitPark(cfg, park({ identity: 'claude-s', personality: 's' }))
     await processLimitResumes(cfg, env, {}, { send: spy(sent, 'stopped'), progressed: () => false, now: () => t + 10 * 60_000 })
     expect(readLimitPark(cfg, 'claude-s')).toBeNull()
+  })
+})
+
+describe('continue-work wake intent — the nudge resumes the stopped context', () => {
+  const peerCwd = () => {
+    const c = join(root, 'peers', 'p')
+    mkdirSync(join(c, '.iapeer'), { recursive: true })
+    writeFileSync(join(c, '.iapeer', 'peer-profile.json'), JSON.stringify({ personality: 'p', default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' }))
+    return c
+  }
+  const has = () => ({ ok: true, ref: 'uuid-1' })
+  test('idle-reaped + a topic the lineage never saw → still RESUME under continueWork (fresh without it)', () => {
+    const c = peerCwd()
+    setIdleReaped(cfg, 'claude-p')
+    addTopic(cfg, 'claude-p', 'old-thread')
+    expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has, 'limit-resume', f => f(), false).cause).toBe('idle-reaped-new-topic')
+    setIdleReaped(cfg, 'claude-p')
+    expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has, 'limit-resume', f => f(), true)).toEqual({ resume: true, resumeRef: 'uuid-1', cause: 'idle-reaped-continue' })
+  })
+  test('never outranks an owner /new', () => {
+    const c = peerCwd()
+    setIdleReaped(cfg, 'claude-p')
+    setNewEager(cfg, 'claude-p')
+    expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has, undefined, f => f(), true).cause).toBe('self-fresh-eager')
   })
 })

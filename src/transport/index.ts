@@ -1272,6 +1272,8 @@ export interface WakeRequest {
   topic?: string
   /** First message delivered to the woken session (the routed envelope). */
   task: string
+  /** Explicit "continue THIS work" intent (core-originated limit-resume only). */
+  continueWork?: boolean
 }
 export interface WakeOutcome {
   status: 'READY' | 'FAILED'
@@ -1347,6 +1349,9 @@ export interface ComposerQueueRouteDeps {
 }
 
 export interface RouteDeps {
+  /** A wake triggered by THIS send carries the "continue THIS work" intent (resume an idle-reaped
+   *  session regardless of topic). Set only by the core's limit-resume pass — never from a request. */
+  wakeContinueWork?: boolean
   /** Б7 — injected env sandboxes ALL of routeSend's env-resolved reads (the registry, the supervisor
    *  run-dir liveness/delivery). Default process.env (prod: env === process.env). Closes the daemon:286
    *  isolation invariant — a library/test daemon with an injected root no longer reads the real registry
@@ -1970,7 +1975,7 @@ async function routeSendInner(
         `(restart window outlasted the grace?) — message NOT delivered; retry`,
     )
   }
-  const woke = await deps.wake({ personality, runtime, topic, task: envelope })
+  const woke = await deps.wake({ personality, runtime, topic, task: envelope, ...(deps.wakeContinueWork ? { continueWork: true } : {}) })
   if (woke.status === 'FAILED') {
     // C1 — a durably STOPPED peer is a deliberate halt, not a transient miss:
     // surface the explicit "stopped" reason (no "offline and wake failed" wrapping).

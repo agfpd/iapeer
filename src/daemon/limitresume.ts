@@ -74,7 +74,10 @@ export async function processLimitResumes(
     }
     let reason: string
     try {
-      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic: 'limit-resume' }, routeDeps)
+      // Topic = the stopped session's own thread (captured at park time), so the topic set still
+      // follows the work; the RESUME itself rides the explicit continue-work intent, not the topic.
+      const topic = p.topic || 'limit-resume'
+      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic }, { ...routeDeps, wakeContinueWork: true })
       if (r.ok) {
         clearLimitPark(cfg, p.identity)
         log({ identity: p.identity, outcome: 'nudged', woke: String(r.value.woke), resets: new Date(p.resetsAtMs).toISOString() })
