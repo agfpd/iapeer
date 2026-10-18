@@ -63,6 +63,38 @@ Failure handling:
   hiccup never kills a birth or blocks a removal.
 - For the sweep verbs, failures are listed per endpoint and the exit code is 1.
 
+## Applying surfaces to a live endpoint
+
+Successful `register`, `sync` and `unregister` converge a live agent session to the
+registered MCP configuration automatically, for Claude, Codex and OpenCode alike.
+Writing the plugin's files is not evidence that its running session loaded them.
+
+- An idle endpoint reloads immediately, retaining its conversation history. A
+  lifecycle replacement resumes the native dialogue; it is not a fresh `/new`.
+- A busy endpoint finishes its current turn without interruption, then reloads
+  automatically. The request is durable across daemon restarts. Repeated requests
+  may coalesce, but a change arriving during reload must not be silently consumed.
+- CLI output distinguishes surfaces written from runtime application: `applied`
+  means reload completed; `pending` means automatic application is still owed.
+  Exit 0 with `pending` promises that automatic continuation, not merely advice to
+  run `/new`. A scheduling or reload failure is reported per endpoint, with exit 1.
+- An asleep/stopped endpoint stays asleep/stopped; its next ordinary launch reads
+  the current surfaces. Reload never changes the default runtime or a stop flag.
+- H4 still wins: the core never replaces a launchd-owned endpoint. An application
+  it cannot arrange through the owning lifecycle is explicit, not a false `applied`.
+
+Unregister is not an emergency revocation mechanism: it allows an already-running
+turn to finish. Use `interrupt` or `stop` to abort work. After reload, removed MCP
+tools are neither advertised nor callable; added ones are discovered and usable
+without a manual `/new`. Failures and pending work remain observable rather than
+being hidden behind the plugin command's exit 0.
+
+This affects plugin install/update/uninstall sweeps: they can replace a live native
+process and its MCP helpers at a turn boundary. Conversation history is retained;
+process-local tool handles do not survive a lifecycle replacement. The acceptance
+matrix exercises both idle and busy register/unregister on all three runtimes,
+including actual new-tool calls and absence of the removed tool after reload.
+
 ## Plugin obligations
 
 - **Idempotent** by construction. The core may repeat `birth`/`sweep-on` for an
