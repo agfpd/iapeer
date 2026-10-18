@@ -1135,6 +1135,24 @@ describe('rename (full folder rename — personality = folder name, history move
     expect(JSON.parse(readFileSync(join(newCwd, '.iapeer', 'peer-profile.json'), 'utf8')).personality).toBe('new-name')
   })
 
+  test('opencode: the private dir (session, journal, fragments) moves with the peer', async () => {
+    const cwd = join(root, 'oc-old')
+    mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality: 'oc-old', default_runtime: 'opencode', runtimes: ['opencode'], description: '', intelligence: 'artificial' }),
+    )
+    await upsertPeer({ personality: 'oc-old', runtime: 'opencode', cwd, intelligence: 'artificial' }, { rootDir: root })
+    const e = env()
+    const { opencodePaths } = await import('../opencode/config.ts')
+    mkdirSync(opencodePaths('oc-old', { env: e }).dir, { recursive: true })
+    writeFileSync(opencodePaths('oc-old', { env: e }).state, '{"sessionID":"ses_keep"}')
+    const o = await renamePeerCli('oc-old', 'oc-new', { env: e, claudeProjectsDir: join(root, 'fp-oc') })
+    expect(o.action).toBe('renamed')
+    expect(existsSync(opencodePaths('oc-old', { env: e }).dir)).toBe(false)
+    expect(readFileSync(opencodePaths('oc-new', { env: e }).state, 'utf8')).toContain('ses_keep') // resume survives
+  })
+
   test('moves the claude transcript slug dir (history preserved) via the projectsDir seam', async () => {
     const oldCwd = await seedWithProfile('tx-old')
     const newCwd = join(root, 'tx-new')

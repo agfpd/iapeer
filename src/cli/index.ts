@@ -1448,6 +1448,21 @@ export async function renamePeerCli(
       sideEffects.push(`claude .mcp.json: failed (${e instanceof Error ? e.message : String(e)})`)
     }
   }
+  if (peer.runtimes.includes('opencode')) {
+    // The opencode private dir is keyed by personality (docs/20): move it with the peer, or the endpoint
+    // loses its session (resume), journal history and provider/memory/capability fragments.
+    try {
+      const { opencodePrivateDir } = await import('../storage/index.ts')
+      const from = opencodePrivateDir(oldPersonality, { env })
+      const to = opencodePrivateDir(newPersonality, { env })
+      if (existsSync(from) && !existsSync(to)) {
+        renameSync(from, to)
+        sideEffects.push(`opencode private dir moved: ${to}`)
+      } else if (existsSync(from)) sideEffects.push(`opencode private dir NOT moved: ${to} already exists`)
+    } catch (e) {
+      sideEffects.push(`opencode private dir: failed (${e instanceof Error ? e.message : String(e)})`)
+    }
+  }
   const purgedState = peer.runtimes.flatMap(rt => purgeIdentityState(cfg, buildProcessAddress(rt, oldPersonality)))
   return { oldPersonality, newPersonality, action: 'renamed', oldCwd, newCwd, transcriptMoved, purgedState, sideEffects }
 }
