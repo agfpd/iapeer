@@ -139,6 +139,19 @@ there. Owner policy (2026-10-18): this is allowed, but never silent.
 - The model actually used is reported by the plugin (`state.json` `model`) and
   appears as the fleet snapshot field `runtimes[].model` (docs/15).
 
+## Host-default provider
+
+`<root>/runtimes/opencode/opencode.json` (operator-owned) is the host default:
+every opencode peer starts from it, and the peer's own
+`<private_dir>/opencode.json` overrides it key by key (deep merge; the inline
+`OPENCODE_CONFIG_CONTENT` and fragments follow; provider pinning applies to the
+result). Credentials stay references (`{env:NVIDIA_API_KEY}`); their values live
+in the HOST launch.env `<root>/runtimes/opencode/launch.env`. Its env vars apply
+to every peer's session of that runtime, under the peer's own launch.env (the
+peer wins); launch directives (`PEER_START_ARGS`, `PEER_DISALLOWED_TOOLS`) stay
+per-peer. With a host default in place, `add-runtime opencode --all` yields
+working peers with no per-peer step.
+
 ## Durable inbound across a session death (OC07, all agent runtimes)
 
 Invariant: an inbound the core acknowledged is either processed by a later

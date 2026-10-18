@@ -558,18 +558,22 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
   // exact file to fill, instead of letting the first wake be the first signal.
   if (provisioned.runtime === 'opencode') {
     const { opencodePaths } = await import('../opencode/config.ts')
+    const { opencodeHostConfigPath } = await import('../storage/index.ts')
     const cfgPath = opencodePaths(provisioned.personality, { env }).config
-    let model: unknown
-    try {
-      model = (JSON.parse(readFileSync(cfgPath, 'utf8')) as { model?: unknown }).model
-    } catch {
-      model = undefined
+    const modelOf = (path: string): unknown => {
+      try {
+        return (JSON.parse(readFileSync(path, 'utf8')) as { model?: unknown }).model
+      } catch {
+        return undefined
+      }
     }
+    // the peer's own config wins; else the host default (docs/20 §Host-default provider)
+    const model = modelOf(cfgPath) ?? modelOf(opencodeHostConfigPath({ env }))
     if (typeof model !== 'string' || !model.includes('/')) {
       opts.warn?.(
         `opencode provider not configured for "${provisioned.personality}": it will run on OpenCode's own default ` +
-          `provider (doctrine and messages go there) until ${cfgPath} names "model": "<provider>/<model>" ` +
-          `and that provider (docs/20 §Provider pinning)`,
+          `provider (doctrine and messages go there) until ${cfgPath} (per peer) or the host default ` +
+          `<root>/runtimes/opencode/opencode.json names "model": "<provider>/<model>" and that provider (docs/20)`,
       )
     }
   }

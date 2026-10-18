@@ -49,7 +49,9 @@ function oracleInline(
 const CFG: LaunchAdapterConfig & { env: NodeJS.ProcessEnv } = {
   claudeBin: '/bin/claude',
   codexBin: '/bin/codex',
-  env: { PATH: '/test/path', BASE_VAR: 'base' },
+  // IAPEER_ROOT pins the host-level launch.env lookup to a path that does not exist (hermetic: the
+  // real ~/.iapeer/runtimes/<rt>/launch.env must never leak into these differentials).
+  env: { PATH: '/test/path', BASE_VAR: 'base', IAPEER_ROOT: '/nonexistent-iapeer-root' },
 }
 
 function spec(over: Partial<LaunchSpec>): LaunchSpec {
@@ -141,6 +143,27 @@ describe('buildLaunchInvocation — differential vs the verbatim pre-extraction 
       const argv = buildLaunchInvocation(spec({ runtime: 'claude', identity: 'claude-p', cwd }), claudeAdapter, CFG).argv
       expect(argv.join(' ')).toContain('--disallowedTools AskUserQuestion')
     } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('host launch.env (<root>/runtimes/<rt>/launch.env) applies to every peer, UNDER the peer launch.env', () => {
+    const root = mkdtempSync(join(tmpdir(), 'inv-host-'))
+    const cwd = mkdtempSync(join(tmpdir(), 'inv-hostpeer-'))
+    try {
+      mkdirSync(join(root, 'runtimes', 'opencode'), { recursive: true })
+      writeFileSync(join(root, 'runtimes', 'opencode', 'launch.env'), 'HOST_KEY=host\nSHARED=host\nPEER_START_ARGS=--never\n')
+      const p = peerLaunchEnvPath(cwd, 'opencode')
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, 'SHARED=peer\n')
+      const cfg = { ...CFG, env: { ...CFG.env, IAPEER_ROOT: root } }
+      const got = buildLaunchInvocation(spec({ runtime: 'opencode', identity: 'opencode-p', cwd }), codexAdapter, cfg)
+      expect(got.env.HOST_KEY).toBe('host')
+      expect(got.env.SHARED).toBe('peer') // the peer wins
+      expect(got.argv).not.toContain('--never') // directives stay per-peer
+      expect(got.env.PEER_START_ARGS).toBeUndefined()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
       rmSync(cwd, { recursive: true, force: true })
     }
   })

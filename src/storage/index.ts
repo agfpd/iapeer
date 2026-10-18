@@ -283,6 +283,32 @@ export function readLaunchEnv(cwd: string, runtime: Runtime): LaunchEnv {
   } catch {
     return { startArgs: [], env: {} }
   }
+  return parseLaunchEnv(text)
+}
+
+/** HOST-level launch.env of a runtime: `<root>/runtimes/<rt>/launch.env` (same format). Its env vars
+ *  apply to EVERY peer's session of that runtime, under the peer's own launch.env (the peer wins) — the
+ *  place for a host-default provider credential (docs/20 §Host-default provider). Directives
+ *  (PEER_START_ARGS / PEER_DISALLOWED_TOOLS) stay per-peer only. */
+export function hostLaunchEnvPath(runtime: Runtime, options: StorageOptions = {}): string {
+  return join(options.rootDir ?? resolveGlobalRoot(options.env), RUNTIMES_DIR, runtime, LAUNCH_ENV_FILE)
+}
+
+export function readHostLaunchEnv(runtime: Runtime, options: StorageOptions = {}): Record<string, string> {
+  try {
+    return parseLaunchEnv(readFileSync(hostLaunchEnvPath(runtime, options), 'utf8')).env
+  } catch {
+    return {}
+  }
+}
+
+/** The host-default OpenCode configuration (operator-owned): `<root>/runtimes/opencode/opencode.json`.
+ *  Every opencode peer starts from it; the peer's own `<private_dir>/opencode.json` overrides it. */
+export function opencodeHostConfigPath(options: StorageOptions = {}): string {
+  return join(options.rootDir ?? resolveGlobalRoot(options.env), RUNTIMES_DIR, 'opencode', 'opencode.json')
+}
+
+function parseLaunchEnv(text: string): LaunchEnv {
   const env: Record<string, string> = {}
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()

@@ -7,7 +7,7 @@
 // array straight to Bun.spawn — same argv, same env, different transport.
 import { homedir } from 'os'
 import { CODEX_BEARER_ENV_VAR, CODEX_DUMMY_BEARER } from '../core/constants.ts'
-import { readLaunchEnv } from '../storage/index.ts'
+import { readHostLaunchEnv, readLaunchEnv } from '../storage/index.ts'
 import type { LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from './types.ts'
 
 export interface LaunchInvocation {
@@ -46,6 +46,8 @@ export function buildLaunchInvocation(
   const argv = adapter.buildArgv(specWithArgs, cfg)
   const childEnv: NodeJS.ProcessEnv = {
     ...env,
+    // host-level launch.env of this runtime (e.g. a host-default provider credential), UNDER the peer's
+    ...readHostLaunchEnv(spec.runtime, { env }),
     ...launchEnv.env,
     // codex token-free MCP import: the bearer env var is set to the PUBLIC, non-secret stub so codex
     // flips authStatus unsupported→bearer_token and imports send_to_peer (the OPEN daemon ignores it,

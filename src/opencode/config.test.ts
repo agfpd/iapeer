@@ -14,6 +14,22 @@ function setup() {
 const input = { personality: 'probe', doctrine: 'Synthetic doctrine', daemonUrl: 'http://127.0.0.1:1234/mcp' }
 
 describe('OpenCode private config contract', () => {
+  test('host default: a peer without its own config runs on the host provider; the peer config overrides it', () => {
+    const { rootDir, paths } = setup()
+    rmSync(paths.config)
+    const host = join(rootDir, 'runtimes', 'opencode')
+    mkdirSync(host, { recursive: true })
+    writeFileSync(join(host, 'opencode.json'), JSON.stringify({ model: 'nvidia/nemo', provider: { nvidia: { options: { apiKey: '{env:NVIDIA_API_KEY}' } }, ollama: {} }, enabled_providers: ['nvidia', 'ollama'] }))
+    const base = composeOpencodeConfig(input, { rootDir })
+    expect(base.model).toBe('nvidia/nemo')
+    expect(base.enabled_providers).toEqual(['nvidia', 'ollama'])
+    expect((base.provider as any).nvidia.options.apiKey).toBe('{env:NVIDIA_API_KEY}') // a reference, never the secret
+    writeFileSync(paths.config, JSON.stringify({ model: 'ollama/g', small_model: 'ollama/g' }))
+    const own = composeOpencodeConfig(input, { rootDir })
+    expect(own.model).toBe('ollama/g')
+    expect((own.provider as any).nvidia).toBeDefined() // host providers stay available
+  })
+
   test('no implicit provider: missing model refuses with a hint; small_model and enabled_providers are pinned', () => {
     const { rootDir, paths } = setup()
     writeFileSync(paths.config, JSON.stringify({ provider: { x: {} } }))

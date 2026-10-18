@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isValidName } from '../core/constants.ts'
-import { opencodePrivateDir, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
+import { opencodeHostConfigPath, opencodePrivateDir, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
 import pluginSource from './iapeer-plugin.mjs' with { type: 'text' }
 import { listCapabilities } from '../capability/index.ts'
 
@@ -118,7 +118,10 @@ export const OPENCODE_GATED_PERMISSION = { bash: 'ask', edit: 'ask', webfetch: '
 export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options: StorageOptions = {}): JsonObject {
   if (!input.doctrine.trim()) throw new Error('OpenCode requires a non-empty composed system prompt')
   const paths = opencodePaths(input.personality, options)
-  let result: JsonObject = existsSync(paths.config) ? object(JSON.parse(readFileSync(paths.config, 'utf8')), paths.config) : {}
+  // Host default first (docs/20 §Host-default provider), then the peer's own config overrides it.
+  const hostPath = opencodeHostConfigPath(options)
+  let result: JsonObject = existsSync(hostPath) ? object(JSON.parse(readFileSync(hostPath, 'utf8')), hostPath) : {}
+  if (existsSync(paths.config)) result = mergeOpencodeConfig(result, object(JSON.parse(readFileSync(paths.config, 'utf8')), paths.config))
   if (input.inline !== undefined) result = mergeOpencodeConfig(result, object(JSON.parse(input.inline), 'OPENCODE_CONFIG_CONTENT'))
   // Fragment owners: the memory provider + every REGISTERED capability (docs/21) — never a
   // hardcoded plugin list. An unregistered plugin's leftover fragment is not merged.
