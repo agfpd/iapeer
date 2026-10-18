@@ -1,6 +1,6 @@
 // Each request has its OWN durable file. Completing a snapshot never acknowledges a later change.
 import { randomUUID } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import { isValidName } from '../core/constants.ts'
@@ -38,10 +38,15 @@ export function readReload(cfg: LifecycleConfig, r: ReloadRequest): ReloadReques
 export function pendingReloads(cfg: LifecycleConfig, identity: string): ReloadRequest[] {
   const dir = reloadDir(cfg, identity)
   if (!existsSync(dir)) return []
-  return readdirSync(dir).filter(n => /^[a-f0-9-]+\.json$/.test(n)).map(n => {
-    const r = JSON.parse(readFileSync(join(dir, n), 'utf8')) as ReloadRequest
+  return readdirSync(dir).filter(n => /^[a-f0-9-]+\.json$/.test(n)).flatMap(n => {
+    let raw: string
+    try { raw = readFileSync(join(dir, n), 'utf8') } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [] // collected between readdir and read
+      throw e
+    }
+    const r = JSON.parse(raw) as ReloadRequest
     if (r.schema !== 1 || `${r.runtime}-${r.personality}` !== identity || `${r.id}.json` !== n) throw new Error(`invalid reload request: ${join(dir, n)}`)
-    return readReload(cfg, r)
+    return [readReload(cfg, r)]
   }).filter(r => r.state !== 'applied')
 }
 export function reloadIdentities(cfg: LifecycleConfig): string[] {
@@ -51,4 +56,26 @@ export function reloadIdentities(cfg: LifecycleConfig): string[] {
 /** Snapshot at the configuration-read boundary, completion only after that launch reaches ready. */
 export function completeReloads(cfg: LifecycleConfig, requests: ReloadRequest[]): void {
   for (const r of requests) if (existsSync(pathFor(cfg, r))) writeFileAtomic(`${pathFor(cfg, r)}.applied`, 'applied\n')
+}
+
+/** Applied requests are kept briefly so the CLI (and an operator) can read the outcome, then collected.
+ *  An endpoint that left the registry takes its whole queue with it — nothing could ever apply it. */
+export const RELOAD_APPLIED_TTL_MS = 60 * 60 * 1000
+export function gcReloads(cfg: LifecycleConfig, identity: string, endpointExists: boolean, now = Date.now()): number {
+  const dir = reloadDir(cfg, identity)
+  if (!existsSync(dir)) return 0
+  if (!endpointExists) { const n = readdirSync(dir).filter(f => f.endsWith('.json')).length; rmSync(dir, { recursive: true, force: true }); return n }
+  let removed = 0
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.json.applied')) continue
+    const marker = join(dir, f)
+    try {
+      if (now - statSync(marker).mtimeMs < RELOAD_APPLIED_TTL_MS) continue
+      rmSync(join(dir, f.slice(0, -'.applied'.length)), { force: true })
+      rmSync(marker, { force: true })
+      removed++
+    } catch { /* raced with another collector */ }
+  }
+  try { if (readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true }) } catch { /* */ }
+  return removed
 }

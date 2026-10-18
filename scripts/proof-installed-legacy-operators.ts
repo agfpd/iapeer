@@ -20,6 +20,7 @@ const native = resolve(arg('--native') ?? (runtime === 'claude' ? join(hostHome,
 const artifacts = arg('--artifacts')
 let cliBin = arg('--legacy-bin') ?? bin
 const binSHA256 = createHash('sha256').update(readFileSync(bin)).digest('hex')
+const legacyBinSHA256 = arg('--legacy-bin') ? createHash('sha256').update(readFileSync(resolve(arg('--legacy-bin')!))).digest('hex') : undefined
 const root = mkdtempSync(`/tmp/iap-installed-${runtime}-operators-`), home = join(root, 'home'), iap = join(root, 'iapeer')
 let personality = 'operator-proof', cwd = join(root, personality)
 mkdirSync(cwd, { recursive: true }); mkdirSync(home, { recursive: true })
@@ -256,7 +257,7 @@ try {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))
-    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, binSHA256, runtime, native, results }, null, 2) + '\n')
+    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, binSHA256, legacyBinSHA256, runtime, native, results }, null, 2) + '\n')
   }
   console.log(JSON.stringify({ success, runtime, results }, null, 2))
   await Bun.sleep(500); rmSync(root, { recursive: true, force: true })

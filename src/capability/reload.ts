@@ -3,7 +3,7 @@ import { isLaunchdManaged, isStopped, wakeOrSpawn, type LifecycleConfig } from '
 import { hostRunDir } from '../launch/ptyHost.ts'
 import { sessionAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
-import { completeReloads, pendingReloads, readReload, reloadIdentities, saveReload, type ReloadRequest } from './reloadStore.ts'
+import { completeReloads, gcReloads, pendingReloads, readReload, reloadIdentities, saveReload, type ReloadRequest } from './reloadStore.ts'
 
 export interface ReloadDeps {
   alive?: (identity: string) => boolean
@@ -54,11 +54,20 @@ export async function applyReloads(cfg: LifecycleConfig, identity: string, env: 
 }
 
 export function startCapabilityReloads(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): () => void {
-  let closed = false, running = false
+  let closed = false, running = false, lastGc = 0
   const tick = async (): Promise<void> => {
     if (closed || running) return
     running = true
     try {
+      if (Date.now() - lastGc >= 60_000) {
+        lastGc = Date.now()
+        const peers = readPeersIndex({ env }).peers
+        for (const id of reloadIdentities(cfg)) {
+          const exists = peers.some(p => p.runtimes.some(rt => `${rt}-${p.personality}` === id))
+          const n = gcReloads(cfg, id, exists)
+          if (n) appendLifecycleEvent(cfg.eventLogDir, { ev: 'capability-reload-gc', identity: id, removed: n, endpoint: exists ? 'present' : 'gone' }, { env })
+        }
+      }
       await Promise.all(reloadIdentities(cfg).map(async id => {
         const req = pendingReloads(cfg, id)
         if (!req.length || req.every(r => r.attemptAt && Date.now() - r.attemptAt < 3000)) return

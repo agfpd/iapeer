@@ -3,6 +3,7 @@
 // bun scripts/proof-installed-operators.ts --bin ~/.local/bin/iapeer --seed-config <SDK config dir>
 //   --artifacts <dir>
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { findSurfaceTool, proveReload, surfaceProofServer } from './reload-proof.ts'
@@ -12,6 +13,8 @@ const hostHome = homedir(), bin = resolve(arg('--bin') ?? join(hostHome, '.local
 const native = resolve(arg('--native') ?? join(hostHome, '.opencode/bin/opencode'))
 const artifacts = arg('--artifacts'), seed = arg('--seed-config')
 let cliBin = arg('--legacy-bin') ?? bin
+const sha256 = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex')
+const binSHA256 = sha256(bin), legacyBinSHA256 = arg('--legacy-bin') ? sha256(resolve(arg('--legacy-bin')!)) : undefined
 if (!seed) throw new Error('set --seed-config to an OpenCode config directory with the SDK installed')
 const root = mkdtempSync('/tmp/iap-installed-operators-'), home = join(root, 'home'), iap = join(root, 'iapeer')
 let personality = 'operator-proof', cwd = join(root, personality)
@@ -274,7 +277,7 @@ const path=join(dir,'surface-proof.json');if(kind==='off')rmSync(path,{force:tru
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))
-    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, native, results }, null, 2) + '\n')
+    writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, bin, binSHA256, legacyBinSHA256, native, results }, null, 2) + '\n')
   }
   console.log(JSON.stringify({ success, results }, null, 2))
   await Bun.sleep(500); rmSync(root, { recursive: true, force: true })

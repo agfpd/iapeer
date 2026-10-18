@@ -59,3 +59,16 @@ test('crash after retirement is recovered by exact resume, including after a fai
   } })
   expect(readReload(cfg, r).state).toBe('applied')
 })
+test('GC: applied requests are collected after the TTL, pending ones never; a gone endpoint takes its queue', async () => {
+  const { gcReloads, reloadDir, RELOAD_APPLIED_TTL_MS } = await import('./reloadStore.ts')
+  const { existsSync, readdirSync } = await import('node:fs')
+  const done = requestReload(cfg, 'probe', 'claude'), open = requestReload(cfg, 'probe', 'claude')
+  completeReloads(cfg, [done])
+  expect(gcReloads(cfg, 'claude-probe', true)).toBe(0) // fresh: the CLI may still read the outcome
+  expect(gcReloads(cfg, 'claude-probe', true, Date.now() + RELOAD_APPLIED_TTL_MS + 1000)).toBe(1)
+  expect(readdirSync(reloadDir(cfg, 'claude-probe'))).toEqual([`${open.id}.json`])
+  expect(pendingReloads(cfg, 'claude-probe').map(r => r.id)).toEqual([open.id])
+  expect(gcReloads(cfg, 'claude-probe', false)).toBe(1)
+  expect(existsSync(reloadDir(cfg, 'claude-probe'))).toBe(false)
+  expect(pendingReloads(cfg, 'claude-probe')).toEqual([])
+})
