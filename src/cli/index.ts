@@ -3006,6 +3006,16 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // see a dead session with no .new-eager → a plain reaped-gone (lazy fresh on the
         // next message), not the eager relaunch — degrade gracefully, never lose the mark.
         setNewEager(cfg, identity)
+        // The peer ends ITS OWN turn: tell the daemon's OC07 sweep this session ended itself, so the
+        // entries it had started are settled — not reported to their senders as INTERRUPTED.
+        try {
+          const { hostSessionToken } = await import('../launch/ptyHost.ts')
+          const { markSelfEnded } = await import('../lifecycle/inflight.ts')
+          const token = hostSessionToken(identity, env)
+          if (token) markSelfEnded(cfg.stateDir, identity, token)
+        } catch {
+          /* best-effort: without it the sender merely gets a false INTERRUPTED notice */
+        }
         out(`self-fresh: marked ${identity} for eager fresh re-launch; self-killing session\n`)
         const sock = buildSocketPath(addr.runtime, addr.personality, cfg.sockDir)
         killSession(sock, identity, env)

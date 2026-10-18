@@ -81,7 +81,7 @@ import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 import { randomBytes } from 'crypto'
-import { listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
+import { clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
 import { hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -321,13 +321,17 @@ export async function processInflight(
     }
   }
   for (const identity of listInflightIdentities(cfg.stateDir)) {
+    const selfEnded = readSelfEnded(cfg.stateDir, identity)
+    const current = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
     const n = sweepInflight(cfg.stateDir, identity, {
-      sessionToken: id => (hostSessionAlive(id, env) ? hostSessionToken(id, env) : null),
+      sessionToken: () => current,
+      selfEndedToken: selfEnded,
       processed,
       completed: seam.completed ?? ((e: InflightEntry) => deliveryCompleted(e, env)),
       landed: seam.landed ?? ((e: InflightEntry) => deliveryLanded(e, env)),
     })
     if (n > 0) appendLifecycleEvent(cfg.eventLogDir, { ev: 'inflight-orphaned', identity, count: n }, { env })
+    if (selfEnded && current !== selfEnded) clearSelfEnded(cfg.stateDir, identity) // that session is gone — settled
   }
   // A turn the session STARTED on a message but did not finish before dying: never redelivered (its side
   // effects may already have happened) — the sender is told explicitly that the result is not guaranteed.

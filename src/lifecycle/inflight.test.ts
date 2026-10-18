@@ -101,6 +101,27 @@ describe('interrupted turns (OC07 extension) — processed but unfinished: never
     appendFileSync(f, JSON.stringify({ type: 'assistant', message: { stop_reason: 'end_turn' } }) + '\n')
     expect(deliveryCompleted(probe, env)).toBe(true)
   })
+  test('deliveryCompleted: an operator interrupt ENDS the turn (claude marker line, codex turn_aborted) — no false INTERRUPTED later', () => {
+    const env = { HOME: root }
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 's.jsonl')
+    const probe = { runtime: 'claude', personality: 'bob', cwd, ts: Date.now() - 1000, rendered: ENV_BODY }
+    writeFileSync(f, JSON.stringify({ type: 'user', message: { content: ENV_BODY } }) + '\n')
+    appendFileSync(f, JSON.stringify({ type: 'assistant', message: { stop_reason: 'tool_use' } }) + '\n')
+    expect(deliveryCompleted(probe, env)).toBe(false)
+    appendFileSync(f, JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } }) + '\n')
+    expect(deliveryCompleted(probe, env)).toBe(true)
+  })
+  test('self-fresh: started entries of the session that ENDED ITSELF are settled, not interrupted; other sessions unaffected', () => {
+    recordInflight(state, entry({ id: 'self', sessionToken: 'host:1' }))
+    recordInflight(state, entry({ id: 'other', sessionToken: 'host:0' }))
+    sweepInflight(state, 'claude-bob', { sessionToken: () => null, processed: () => true, completed: () => false, selfEndedToken: 'host:1' })
+    expect(readInflight(state, 'claude-bob')).toEqual([])
+    expect(takeInterrupted(state, 'claude-bob').map(e => e.id)).toEqual(['other'])
+  })
 })
 
 describe('unconfirmed deliveries — the ledger, not the sender, decides', () => {

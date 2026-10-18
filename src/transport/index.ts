@@ -913,6 +913,13 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
  *   opencode — an assistant message for that user message with `time.completed` and a finish other
  *              than `tool-calls`.
  */
+/** claude's own record of an interrupted turn (user line whose text is the interrupt marker). */
+function isInterruptMarkerLine(o: { message?: unknown }): boolean {
+  const c = (o.message as { content?: unknown } | undefined)?.content
+  const texts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => String(b.text ?? '')) : []
+  return texts.some(t => /^\[Request interrupted by user/.test(t.trim()))
+}
+
 export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env): boolean {
   const needles = confirmNeedles(probe.rendered)
   if (!needles.length || needles.every(n => !n)) return false
@@ -968,6 +975,12 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       }
       if (o.type === 'assistant' && ['end_turn', 'stop_sequence', 'max_tokens'].includes(o.message?.stop_reason ?? '')) return true
       if (o.type === 'event_msg' && o.payload?.type === 'task_complete') return true
+      // An operator INTERRUPT ends the turn too (claude: a `[Request interrupted by user…]` user line,
+      // codex: `turn_aborted`). Not counting it, a turn the owner had stopped was later reported to its
+      // sender as «INTERRUPTED by the session's death» once the session died for an unrelated reason
+      // (live parity run 18.10). OpenCode's abort already closes the assistant message, so it was right.
+      if (o.type === 'event_msg' && o.payload?.type === 'turn_aborted') return true
+      if (o.type === 'user' && isInterruptMarkerLine(o)) return true
     }
   }
   return false

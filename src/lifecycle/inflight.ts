@@ -87,6 +87,9 @@ export function readInflight(stateDir: string, identity: string): InflightEntry[
 }
 
 export interface InflightSweepDeps {
+  /** Hosting token of a session that ENDED ITSELF (self-fresh) — its started entries are settled, not
+   *  reported interrupted. Absent → none. */
+  selfEndedToken?: string | null
   /** Current hosting token of the identity's session (null = no live session). */
   sessionToken: (identity: string) => string | null
   /** Did the receiving session answer this entry? */
@@ -138,6 +141,7 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
       // Answered but its turn did not finish: live → still working; gone → INTERRUPTED (side effects
       // may have happened — never redelivered, the sender is told).
       if (current !== null && current === e.sessionToken) keep.push(e)
+      else if (deps.selfEndedToken && e.sessionToken === deps.selfEndedToken) continue // the peer ended it itself
       else interrupted.push(e)
       continue
     }
@@ -206,4 +210,30 @@ export function purgeInflight(stateDir: string, identity: string): void {
   rmSync(inflightPath(stateDir, identity), { force: true })
   rmSync(orphansPath(stateDir, identity), { force: true })
   rmSync(interruptedPath(stateDir, identity), { force: true })
+}
+
+
+const selfEndedPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.self-ended`)
+
+/**
+ * self-fresh: the peer's OWN turn declares its work done and ends its session. The CLI only drops this
+ * marker (the hosting token of the session that chose to end); the DAEMON's sweep — the single writer
+ * of the ledger — then closes that session's started entries instead of reporting them INTERRUPTED
+ * (false: the peer itself ended; live parity run 18.10). Not-yet-started entries are untouched and are
+ * redelivered to the fresh session as usual. No read-modify-write of the ledger outside the daemon.
+ */
+export function markSelfEnded(stateDir: string, identity: string, sessionToken: string): void {
+  writeFileSync(selfEndedPath(stateDir, identity), `${sessionToken}\n`, { mode: 0o600 })
+}
+
+export function readSelfEnded(stateDir: string, identity: string): string | null {
+  try {
+    return readFileSync(selfEndedPath(stateDir, identity), 'utf8').trim() || null
+  } catch {
+    return null
+  }
+}
+
+export function clearSelfEnded(stateDir: string, identity: string): void {
+  rmSync(selfEndedPath(stateDir, identity), { force: true })
 }

@@ -1652,17 +1652,38 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
 export async function processEagerRelaunches(
   cfg: LifecycleConfig,
   outcomes: SuperviseOutcome[],
-  deps: WakeDeps & { wakeFn?: (args: WakeArgs, deps: WakeDeps) => Promise<WakeResult> } = {},
+  deps: WakeDeps & { wakeFn?: (args: WakeArgs, deps: WakeDeps) => Promise<WakeResult>; sessionAliveFn?: (identity: string) => boolean } = {},
 ): Promise<WakeResult[]> {
   const wake = deps.wakeFn ?? wakeOrSpawn
+  const env = deps.env ?? process.env
+  const alive = deps.sessionAliveFn ?? ((identity: string) => sessionAlive('', identity, env))
   const results: WakeResult[] = []
-  for (const o of outcomes) {
-    if (o.action !== 'needs-eager-fresh' || !o.personality) continue
+  const eager = outcomes.filter(o => o.action === 'needs-eager-fresh' && !!o.personality)
+  for (const o of eager) {
     clearNewEager(cfg, o.identity) // consume the eager mark — the relaunch is fresh by construction
+    // WHICH endpoint comes back. Two invariants meet here:
+    //  • H5 fleet-switch (12.06): a peer whose ONLY session self-freshes after `default-runtime` was
+    //    flipped must come back on the NEW default → re-resolve (no runtime pinned).
+    //  • Parallel endpoints (18.10): a peer live on several runtimes at once whose NON-default
+    //    endpoint self-freshes must get THAT endpoint back — re-resolving woke the default (already
+    //    live → no-op) and the claude endpoint of oc-test-nemo lay down.
+    // So: pin the dead endpoint's runtime when it is the default, or when the peer keeps another
+    // session (live now, or relaunched in this same batch); otherwise it was the peer's only
+    // session → re-resolve to the registry default.
+    let runtime: string | undefined
+    try {
+      const rec = findPeer(readPeersIndex({ env }), o.personality!)
+      const others = (rec?.runtimes ?? []).filter(rt => rt !== o.runtime)
+      const otherAlive = others.some(rt => alive(`${rt}-${o.personality}`))
+      const otherInBatch = eager.some(x => x !== o && x.personality === o.personality)
+      if (o.runtime && (o.runtime === rec?.runtime || otherAlive || otherInBatch)) runtime = o.runtime
+    } catch {
+      runtime = undefined // registry unreadable → the H5 default path
+    }
     try {
       results.push(
         await wake(
-          { personality: o.personality, task: '', resume: false },
+          { personality: o.personality!, ...(runtime ? { runtime } : {}), task: '', resume: false },
           { cfg, env: deps.env },
         ),
       )

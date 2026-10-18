@@ -212,16 +212,23 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
   session is gone or was replaced become orphans and are redelivered through the
   normal route as their original sender, prefixed `[redelivered by iapeer: …]`
   (wake-on-miss and the crash-loop guard apply). If redelivery fails, the sender
-  receives an explicit notice from `iapeer`. Logged as `ev=inflight-orphaned`
+  receives an explicit notice from the core identity `iapeer-system`. Logged as `ev=inflight-orphaned`
   (lifecycle.log) and `ev=inflight-redelivered|inflight-undelivered`
   (delivery.log).
 - A false «not processed» costs a visible duplicate, never a silent loss.
 - Interrupted turns. «Processed» (a model response began) is not «finished»: a
   turn killed mid-tool may already have had side effects, so it is never
   redelivered. The ledger keeps an entry until its turn finishes (claude: an
-  assistant record with a terminal `stop_reason`; codex: `task_complete`;
-  opencode: a completed assistant message for it with a finish other than
-  `tool-calls`); a finished later message covers earlier ones. If the session
+  assistant record with a terminal `stop_reason`, or claude's own interrupt
+  marker `[Request interrupted by user…]`; codex: `task_complete` or
+  `turn_aborted`; opencode: a completed assistant message for it with a finish
+  other than `tool-calls`); a finished later message covers earlier ones. An
+  operator interrupt is a finished turn, not a death (18.10: a turn the owner had
+  stopped was reported «INTERRUPTED» when the session later died for another
+  reason). A session that ends ITSELF (`self-fresh`) leaves a `<identity>.self-ended`
+  marker with its hosting token; the daemon's sweep settles that session's started
+  entries silently instead of notifying their senders (the peer declared the work
+  done); not-yet-started entries are redelivered to the fresh session as usual. If the session
   dies with the turn unfinished, the sender gets an explicit notice from iapeer
   («the turn was INTERRUPTED and its result is not guaranteed»), logged as
   `ev=inflight-interrupted`.
