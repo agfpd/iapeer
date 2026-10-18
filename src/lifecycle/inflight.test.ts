@@ -151,6 +151,67 @@ describe('unconfirmed deliveries — the ledger, not the sender, decides', () =>
 })
 
 describe('deliveryProcessed — recorded is NOT processed', () => {
+  test('native Claude out-of-order flush: UUID ancestry, not file order, proves started/finished', () => {
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude/projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 'native.jsonl')
+    const probe = entry({ cwd })
+    // Measured 18.10 on Claude 2.1.302: assistant first, then user, then its attachment chain.
+    const records = [
+      { type: 'assistant', uuid: 'a', parentUuid: 'snapshot', message: { stop_reason: 'tool_use' } },
+      { type: 'user', uuid: 'u', parentUuid: null, message: { content: ENV_BODY } },
+      { type: 'attachment', uuid: 'snapshot', parentUuid: 'env' },
+      { type: 'attachment', uuid: 'env', parentUuid: 'u' },
+    ]
+    const write = () => writeFileSync(f, records.map(r => JSON.stringify(r)).join('\n') + '\n')
+    write()
+    expect(deliveryProcessed(probe, { HOME: root })).toBe(true)
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(false)
+    records[0]!.message = { stop_reason: 'end_turn' }
+    write()
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(true)
+    recordInflight(state, probe)
+    expect(sweepInflight(state, probe.identity, {
+      sessionToken: () => null,
+      processed: e => deliveryProcessed(e, { HOME: root }),
+      completed: e => deliveryCompleted(e, { HOME: root }),
+    })).toBe(0)
+    expect(readInflight(state, probe.identity)).toEqual([])
+    expect(takeOrphans(state, probe.identity)).toEqual([])
+    expect(takeInterrupted(state, probe.identity)).toEqual([])
+  })
+
+  test('Claude UUID causality refuses unrelated terminals, absent ancestors and cycles despite later file position', () => {
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude/projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 'native.jsonl'), probe = entry({ cwd })
+    for (const parent of ['other-input', 'missing', 'cycle']) {
+      writeFileSync(f, [
+        { type: 'user', uuid: 'u', message: { content: ENV_BODY } },
+        { type: 'attachment', uuid: 'cycle', parentUuid: 'cycle' },
+        { type: 'assistant', uuid: 'a', parentUuid: parent, message: { stop_reason: 'end_turn' } },
+      ].map(r => JSON.stringify(r)).join('\n') + '\n')
+      expect(deliveryProcessed(probe, { HOME: root })).toBe(false)
+      expect(deliveryCompleted(probe, { HOME: root })).toBe(false)
+    }
+    writeFileSync(f, [
+      { type: 'attachment', uuid: 'snapshot', rendered: ENV_BODY },
+      { type: 'assistant', uuid: 'a', parentUuid: 'snapshot', message: { stop_reason: 'end_turn' } },
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    expect(deliveryProcessed(probe, { HOME: root })).toBe(false)
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(false)
+    // The native user interruption marker also follows semantic ancestry, even when flushed first.
+    writeFileSync(f, [
+      { type: 'user', uuid: 'interrupt', parentUuid: 'u', message: { content: '[Request interrupted by user]' } },
+      { type: 'user', uuid: 'u', message: { content: ENV_BODY } },
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    expect(deliveryCompleted(probe, { HOME: root })).toBe(true)
+  })
+
   test('claude: user record alone (the SIGKILL-mid-request case) → false; an assistant record after it → true; queue-operation never counts', () => {
     const env = { HOME: root }
     const cwd = join(root, 'bob')

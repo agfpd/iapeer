@@ -439,6 +439,36 @@ applicability (docs/21). `create` does NOT auto-add it as a secondary runtime
 explicit opt-in. The binary resolves from `IAPEER_OPENCODE_BIN`, else
 `~/.opencode/bin/opencode`, else `opencode` on PATH.
 
+## Installed lifecycle acceptance probes
+
+These manual probes do not belong to the automated suite and never stop the real
+fleet. Run them against the installed, published binary after its activation:
+
+- `bun scripts/proof-installed-sandbox.ts --bin ~/.local/bin/iapeer --artifacts <dir>`
+  exposes only its own sleep PID in a unique, socketless pidfile in the real
+  supervisor directory. The installed TEST_SANDBOX signal guard must refuse;
+  the sleep must survive. The pidfile and process are always removed.
+- `bun scripts/proof-installed-recovery.ts --bin ~/.local/bin/iapeer --legacy ~/.local/bin/iapeer.prev --artifacts <dir>`
+  compares a pre-readiness core with the new core in a disposable HOME/root:
+  native pre-main hang, false-live/false-ok legacy control, new booting/not-ok,
+  preserved ledger, automatic redelivery after restoring native Codex, then
+  finished-versus-interrupted native turns. Only auth.json is copied from the
+  host, only into the disposable HOME, and always removed. The legacy binary
+  must actually predate the readiness fix; `.prev` is not a permanent version pin.
+- `bun scripts/proof-installed-inflight.ts --runtime claude|opencode --bin ~/.local/bin/iapeer --artifacts <dir>`
+  runs the native client against a synthetic loopback provider, with the installed
+  daemon and supervisors: terminal completion then death produces no notice;
+  an unfinished turn then death produces one notice over two real daemon ticks.
+  For OpenCode, supply `--seed-config <dir with SDK node_modules>` as in the source
+  harnesses. No cloud credential or host data is needed.
+
+The installed probes use source code only for fixture setup and read-only native
+record checks. Routing, wake, readiness, teardown and ledger sweeps execute inside
+the installed binary. In contrast, `proof-fleet-isolation.ts --bin …` substitutes
+only the supervisors and stop CLI: its sweep is still source code. Keep these
+evidence boundaries explicit. `--artifacts` preserves raw logs/transcripts and a
+result before the disposable root is removed; it never exports auth.json.
+
 ## Delivery gate
 
 Source changes and isolated native artifacts are allowed. npm publication and host

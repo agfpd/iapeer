@@ -839,13 +839,60 @@ export interface ProcessedProbe {
 
 const PROCESSED_TAIL_BYTES = 16 * 1024 * 1024
 
+/** Claude's JSONL append order is not causal order: native 2.1.302 can flush a fast
+ * assistant before its user and intermediate attachments. UUID ancestry is authoritative.
+ * UUID-less historical records retain the legacy ordered scan; a broken UUID chain never does.
+ */
+function claudeDeliveryState(tail: string, needles: string[]): { processed: boolean; completed: boolean } | null {
+  interface Record { type?: string; uuid?: string; parentUuid?: string | null; message?: { stop_reason?: string; content?: unknown } }
+  const rows: Record[] = []
+  const byID = new Map<string, Record>()
+  const carried = new Set<string>()
+  for (const line of tail.split(/\r?\n/)) {
+    try {
+      const r: Record = JSON.parse(line)
+      rows.push(r)
+      if (r.uuid) byID.set(r.uuid, r)
+      // Only the actual input can establish causality, not its quoted prompt_snapshot or queue entry.
+      if (r.type === 'user' && r.uuid && jsonStringValuesContainAll(r.message, needles)) carried.add(r.uuid)
+    } catch { /* bounded tails may start with a torn record */ }
+  }
+  if (!carried.size) return rows.some(r => r.uuid && (r.type === 'user' || r.type === 'assistant'))
+    ? { processed: false, completed: false } : null
+  const ancestry = new Map<string, boolean>([...carried].map(id => [id, true]))
+  const descendsFromInput = (r: Record): boolean => {
+    let parent = r.parentUuid
+    const seen = new Set<string>()
+    const trail: string[] = []
+    let matched = false
+    while (parent && !seen.has(parent)) {
+      if (ancestry.has(parent)) { matched = ancestry.get(parent)!; break }
+      seen.add(parent)
+      trail.push(parent)
+      parent = byID.get(parent)?.parentUuid
+    }
+    for (const id of trail) ancestry.set(id, matched)
+    return matched
+  }
+  let processed = false, completed = false
+  for (const r of rows) {
+    if (!descendsFromInput(r)) continue
+    if (r.type === 'assistant') {
+      processed = true
+      if (['end_turn', 'stop_sequence', 'max_tokens'].includes(r.message?.stop_reason ?? '')) completed = true
+    }
+    if (r.type === 'user' && isInterruptMarkerLine(r)) completed = true
+  }
+  return { processed, completed }
+}
+
 /**
  * Did the receiving session ANSWER this delivery (OC07)? «Recorded» is not «processed»: measured
  * 18.10 on claude, a message SIGKILLed mid-request had its `user` record (and the API request blob)
  * in the transcript but no assistant record after it — the model never answered, and a fresh next
  * session would not see it. So the proof is a model response AFTER the record that carries the
  * envelope:
- *   claude — a `type:"assistant"` record after a non-queue-operation record carrying the needles;
+ *   claude — an assistant descended from the input's UUID (ordered scan for UUID-less legacy records);
  *   codex  — a non-user `response_item` (assistant message / function_call / reasoning) or an
  *            `agent_message` event after the user input carrying the needles;
  *   opencode — an assistant `message.updated` whose parentID is the user message whose text part
@@ -893,8 +940,13 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       continue
     }
     if (st.mtimeMs < probe.ts - 5000) continue
+    const tail = readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES))
+    if (probe.runtime === 'claude') {
+      const semantic = claudeDeliveryState(tail, needles)
+      if (semantic) { if (semantic.processed) return true; continue }
+    }
     let carried = false
-    for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
+    for (const line of tail.split(/\r?\n/)) {
       if (!line.trim()) continue
       let o: { type?: string; payload?: { type?: string; role?: string } }
       try {
@@ -971,8 +1023,13 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       continue
     }
     if (st.mtimeMs < probe.ts - 5000) continue
+    const tail = readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES))
+    if (probe.runtime === 'claude') {
+      const semantic = claudeDeliveryState(tail, needles)
+      if (semantic) { if (semantic.completed) return true; continue }
+    }
     let carried = false
-    for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
+    for (const line of tail.split(/\r?\n/)) {
       if (!line.trim()) continue
       let o: { type?: string; message?: { stop_reason?: string }; payload?: { type?: string } }
       try {
