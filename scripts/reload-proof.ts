@@ -220,7 +220,7 @@ async function proveEnable(d: ReloadProofDriver, url: string, until: Until): Pro
  *  exactly ONE reload, applied after the turn — and nothing more in the quiet period that follows. Counted
  *  from the stand daemon's own lifecycle.log, not inferred. */
 async function proveHandEdit(d: ReloadProofDriver, until: Until): Promise<void> {
-  const { appendFileSync, readFileSync } = await import('node:fs')
+  const { appendFileSync, mkdirSync, readFileSync } = await import('node:fs')
   const log = join(d.root, 'iapeer', 'logs', 'iapeer', 'lifecycle.log')
   const identity = `${d.runtime}-${d.cwd.split('/').pop()}`
   const file = d.runtime === 'codex' ? join(d.cwd, '.codex', 'config.toml') : join(d.cwd, '.mcp.json')
@@ -229,6 +229,7 @@ async function proveHandEdit(d: ReloadProofDriver, until: Until): Promise<void> 
     const rows = text.split('\n').filter(l => l.includes(`identity=${identity}`) && Date.parse(l.slice(3, 27)) >= since)
     return { changed: rows.filter(l => l.includes('ev=capability-surfaces-changed')).length, replacing: rows.filter(l => l.includes('ev=capability-reload') && l.includes('state=replacing')).length }
   }
+  mkdirSync(join(file, '..'), { recursive: true })
   const before = d.hosting(), start = Date.now()
   await d.beginBusy()
   for (let i = 0; i < 3; i++) {
