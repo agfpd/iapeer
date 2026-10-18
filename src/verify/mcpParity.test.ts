@@ -58,3 +58,33 @@ describe('MCP parity (verify)', () => {
     expect(mcpParity('impact-finder', cwd, ['claude', 'telegram'], { env })).toEqual([])
   })
 })
+
+describe('MCP parity — plugin-delivered servers are real (boris 18.10)', () => {
+  const codexPlugin = (home: string, key: string, servers: Record<string, unknown>, hostEnabled = true) => {
+    const [name, market] = key.split('@') as [string, string]
+    const root = join(home, '.codex', 'plugins', 'cache', market, name, '0.5.2')
+    mkdirSync(join(root, '.codex-plugin'), { recursive: true })
+    writeFileSync(join(root, '.codex-plugin', 'plugin.json'), JSON.stringify({ name, mcpServers: './.mcp.json' }))
+    writeFileSync(join(root, '.mcp.json'), JSON.stringify({ mcpServers: servers }))
+    if (hostEnabled) writeFileSync(join(home, '.codex', 'config.toml'), `[plugins."${key}"]\nenabled = true\n`)
+  }
+  test('voice-connect: claude declares it in .mcp.json, codex gets it from the ENABLED host plugin → no ✗', () => {
+    claude(['voice-connect'])
+    codex([])
+    codexPlugin(env.HOME!, 'voice-connect@agfpd', { 'voice-connect': { command: 'npx', args: ['-y', '@agfpd/voice-connect@latest'] } })
+    expect(mcpParity('impact-finder', cwd, ['claude', 'codex'], { env })).toEqual([])
+  })
+  test('a DISABLED plugin supplies nothing → the real ✗ stays (mergemind case)', () => {
+    claude(['MergeMind'])
+    codex([])
+    codexPlugin(env.HOME!, 'MergeMind@agfpd', { MergeMind: { command: 'x' } }, false)
+    writeFileSync(join(env.HOME!, '.codex', 'config.toml'), `[plugins."MergeMind@agfpd"]\nenabled = false\n`)
+    expect(mcpParity('impact-finder', cwd, ['claude', 'codex'], { env })).toEqual([{ server: 'MergeMind', presentIn: ['claude'], missingIn: ['codex'] }])
+  })
+  test('a server ONLY a host-wide plugin gives codex is a host decision, not peer drift → no ✗', () => {
+    claude([])
+    codex([])
+    codexPlugin(env.HOME!, 'figma@openai-curated', { figma: { type: 'http', url: 'https://x' } })
+    expect(mcpParity('impact-finder', cwd, ['claude', 'codex'], { env })).toEqual([])
+  })
+})

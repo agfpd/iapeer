@@ -21,6 +21,8 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { composeOpencodeConfig, hasExplicitModel, OPENCODE_AGENT, OPENCODE_PLUGIN_SOURCE, opencodePaths, writeOpencodePlugin } from '../../opencode/config.ts'
 import { opencodeControl } from '../../opencode/control.ts'
+import { syncOpencodePeerMcp } from '../../opencode/peerMcp.ts'
+import { findPeer, readPeersIndex } from '../../registry/index.ts'
 import { fileMtimeMs, readJournalFrom, readOpencodeState } from '../../opencode/journal.ts'
 import { resolveDaemonMcpUrl } from '../../storage/index.ts'
 import { resolveFleetBase } from '../../approval/brokerClient.ts'
@@ -80,6 +82,15 @@ export const opencodeAdapter: RuntimeAdapter = {
     const doctrine = readFileSync(spec.systemPromptFile, 'utf8')
     const p = paths(spec.personality, env)
     writeOpencodePlugin(spec.personality, OPENCODE_PLUGIN_SOURCE, { env })
+    // Re-project the peer's claude/codex MCP servers on every launch: the projection follows its
+    // sources (a server added to .mcp.json later reaches OpenCode on the next launch, no drift).
+    // Best-effort — a malformed source must not block the launch (verify reports the gap).
+    try {
+      const rec = findPeer(readPeersIndex({ env }), spec.personality)
+      syncOpencodePeerMcp(spec.personality, spec.cwd, rec?.runtimes ?? ['opencode'], { env })
+    } catch {
+      /* verify surfaces any resulting MCP gap */
+    }
     const config = composeOpencodeConfig(
       {
         personality: spec.personality,

@@ -123,6 +123,30 @@ Open core contracts this ABI depends on:
   provision/unprovision per peer and runtime, like the memory slot. Until it
   exists, a manual install is not reported as final.
 
+## Peer MCP — OpenCode sees the same servers as the peer's other runtimes
+
+Invariant (18.10.2026): after `add-runtime opencode` the peer on OpenCode has the same MCP set as on
+claude/codex, and `verify` is clean with no hand edit. The source of truth stays the peer's own
+declarations — claude `.mcp.json` + plugins enabled in the peer's `.claude/settings*.json`, codex
+`<cwd>/.codex/config.toml` `[mcp_servers]` + plugins enabled in the peer's codex config
+(`src/mcp/peerServers.ts`). OpenCode gets a core-owned **projection** in
+`<private dir>/peer-mcp.json` (0600 — env carries the servers' own secrets, as the sources do):
+
+- claude stdio `{command,args,env}` / codex `command,args,env` → `{type:"local", command:[…],
+  environment, enabled:true, timeout:30000}` (a first `npx -y` start blows OpenCode's 5 s default);
+- claude `http|sse` `{url,headers}` / codex `url, http_headers, env_http_headers,
+  bearer_token_env_var` → `{type:"remote", url, headers, enabled:true, oauth:false}`;
+- `${VAR}` / `${VAR:-default}` → `{env:VAR}` (OpenCode has no default syntax — the default is
+  dropped); `${CLAUDE_PLUGIN_ROOT}` → the plugin's install root.
+
+Regenerated on `add-runtime opencode`, on every OpenCode launch (follows its sources — a server added
+later reaches OpenCode on the next launch) and by `verify --fix` (one-shot alignment). Merged in
+`composeOpencodeConfig` right after the host default and BEFORE the peer's `opencode.json`, so an
+operator entry always wins. Not projected: the core `iapeer`; any name another OpenCode source
+already supplies (host default, peer config, memory/capability fragments — a deep merge of two
+definitions would mix their fields); servers a HOST-wide plugin gives every peer of one runtime
+(host decision, not the peer's). A live OpenCode session keeps its tools until its next launch.
+
 ## Launch self-check (OC04)
 
 OpenCode tolerates some broken surfaces silently: a fragment plugin whose file

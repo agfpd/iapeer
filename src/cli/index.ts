@@ -482,6 +482,13 @@ export async function addRuntime(
       const warns: string[] = []
       const repair = p.runtimes.includes(runtime as Runtime)
       await initPeer({ cwd: p.cwd, runtime: runtime as Runtime, env: cleanEnv, warn: m => warns.push(m) })
+      // OpenCode inherits the peer's MCP set from its claude/codex declarations (+ enabled plugins) —
+      // the same set, verify-clean, no hand edit (docs/20 §Peer MCP).
+      if (runtime === 'opencode') {
+        const { syncOpencodePeerMcp } = await import('../opencode/peerMcp.ts')
+        const r = syncOpencodePeerMcp(p.personality, p.cwd, [...p.runtimes, 'opencode'], { env: cleanEnv })
+        if (r.projected.length) warns.push(`MCP projected: ${r.projected.join(', ')}`)
+      }
       out.push({
         personality: p.personality,
         action: 'added',
@@ -2354,6 +2361,21 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // MCP parity across the peer's agent runtimes: a server on one endpoint and missing on another
         // leaves the SAME peer silently weaker there (incident 17.10 — domain MCPs only in codex config).
         const { mcpParity } = await import('../verify/mcpParity.ts')
+        // --fix: re-project every OpenCode endpoint's peer MCP from its claude/codex sources FIRST, so
+        // the parity report below is the post-fix truth (the one-shot alignment of peers whose opencode
+        // runtime predates the projection — boris 18.10). Sources are never edited.
+        if (flags.fix === true) {
+          const { syncOpencodePeerMcp } = await import('../opencode/peerMcp.ts')
+          for (const peer of index.peers) {
+            if (!peer.runtimes.includes('opencode')) continue
+            try {
+              const r = syncOpencodePeerMcp(peer.personality, peer.cwd, peer.runtimes, { env })
+              if (r.changed) out(`opencode MCP projected for ${peer.personality}: [${r.projected.join(', ')}] (takes effect on the next opencode launch)\n`)
+            } catch (e) {
+              errOut(`opencode MCP projection failed for ${peer.personality}: ${e instanceof Error ? e.message : String(e)}\n`)
+            }
+          }
+        }
         let mcpDrift = 0
         for (const peer of index.peers) {
           for (const issue of mcpParity(peer.personality, peer.cwd, peer.runtimes, { env })) {

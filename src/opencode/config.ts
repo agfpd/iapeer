@@ -11,6 +11,8 @@ import { listCapabilities } from '../capability/index.ts'
 export const OPENCODE_AGENT = 'iapeer'
 /** The memory provider's private fragment stem (docs/20 §Memory-provider ABI). */
 export const OPENCODE_MEMORY_FRAGMENT = 'iapeer-memory'
+/** The core-owned projection of the peer's claude/codex MCP servers (docs/20 §Peer MCP). */
+export const OPENCODE_PEER_MCP_FRAGMENT = 'peer-mcp'
 type JsonObject = Record<string, unknown>
 
 export function opencodePaths(personality: string, options: StorageOptions = {}) {
@@ -22,6 +24,7 @@ export function opencodePaths(personality: string, options: StorageOptions = {})
     state: join(dir, 'state.json'),
     events: join(dir, 'events.jsonl'),
     config: join(dir, 'opencode.json'), // optional operator-owned provider/model config
+    peerMcp: join(dir, `${OPENCODE_PEER_MCP_FRAGMENT}.json`), // core-owned projection, regenerated
   }
 }
 
@@ -121,6 +124,9 @@ export function composeOpencodeConfig(input: ComposeOpencodeConfigInput, options
   // Host default first (docs/20 §Host-default provider), then the peer's own config overrides it.
   const hostPath = opencodeHostConfigPath(options)
   let result: JsonObject = existsSync(hostPath) ? object(JSON.parse(readFileSync(hostPath, 'utf8')), hostPath) : {}
+  // The peer's own MCP servers projected from its claude/codex declarations — BEFORE the peer's
+  // opencode config, so an operator's explicit entry always wins over the projection.
+  if (existsSync(paths.peerMcp)) result = mergeOpencodeConfig(result, readOpencodeExtension(paths.peerMcp))
   if (existsSync(paths.config)) result = mergeOpencodeConfig(result, object(JSON.parse(readFileSync(paths.config, 'utf8')), paths.config))
   if (input.inline !== undefined) result = mergeOpencodeConfig(result, object(JSON.parse(input.inline), 'OPENCODE_CONFIG_CONTENT'))
   // Fragment owners: the memory provider + every REGISTERED capability (docs/21) — never a
