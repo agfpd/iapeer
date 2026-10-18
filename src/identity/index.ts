@@ -677,6 +677,16 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
     // preserved). resolvedIntelligence validates the explicit against the runtime's allowed set.
     intelligence = resolvedIntelligence(options.runtime)
   }
+  // OC01 — an EXPLICIT runtime the peer's nature does not allow is refused LOUDLY, exactly as on the
+  // new-profile branch (create). Before this, add-runtime <agentic> on a natural peer passed: the
+  // gate exempts the explicit runtime by design (an operator command is not discovery), so a human
+  // peer got an agent endpoint while its other agentic runtimes were dropped (linus 18.10).
+  if (!isIntelligenceAllowedForRuntime(options.runtime, intelligence)) {
+    throw new IapError(
+      `runtime "${options.runtime}" requires intelligence ∈ {${allowedIntelligencesForRuntime(options.runtime).join(', ')}}, ` +
+        `peer "${existing.personality}" is ${intelligence} — refusing to attach it`,
+    )
+  }
   // Merge AFTER the intelligence is final, and GATE the WHOLE merged set (not just the
   // fresh discoveries): for a natural/absent peer this both blocks a new agentic pickup
   // AND heals a previously-leaked one (the arthur claude-leak class) on the next
@@ -688,6 +698,13 @@ export function ensurePeerProfile(options: EnsurePeerProfileOptions): PeerProfil
     options.warn,
   )
   ensureLocalRuntimeScopes(cwd, mergedRuntimes)
+  const defaultRt = existing.runtime // the normalized default_runtime
+  if (defaultRt && !mergedRuntimes.includes(defaultRt)) {
+    options.warn?.(
+      `default_runtime "${defaultRt}" of "${existing.personality}" is not among its runtimes [${mergedRuntimes.join(', ')}] — ` +
+        `sends without a runtime will fail; set it with \`iapeer default-runtime <rt> --peer ${existing.personality}\``,
+    )
+  }
   // В36 — an explicit description on RE-provision updates the local profile too (H1 in
   // writePeerProfileAtomic still guards: absent/empty never wipes an existing value).
   const explicitDescription = options.description?.trim()

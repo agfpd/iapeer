@@ -180,7 +180,7 @@ describe('provisionPeer ephemeral warnings', () => {
       JSON.stringify({
         personality: 'wtg',
         runtime: 'claude',
-        intelligence: 'natural',
+        intelligence: 'artificial', // claude is artificial-only (OC01 refuses a natural claude attach)
         interfaces: { telegram: { user_id: 1 } },
         wake_policy: 'ephemeral',
       }),

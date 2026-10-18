@@ -423,6 +423,33 @@ describe('ensurePeerProfile create-peer → always-on plist (infra only)', () =>
     expect(existsSync(join(peerCwd, '.claude'))).toBe(true) // robust to the artifact's presence
   })
 
+  test('OC01: an EXPLICIT agentic runtime on a natural peer is REFUSED loudly; the profile is untouched', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'hum')
+    mkdirSync(join(peerCwd, '.iapeer'), { recursive: true })
+    const profile = { personality: 'hum', default_runtime: 'codex', runtimes: ['codex'], intelligence: 'natural', description: 'h' }
+    writeFileSync(join(peerCwd, '.iapeer', 'peer-profile.json'), JSON.stringify(profile))
+    for (const rt of ['opencode', 'claude', 'codex']) {
+      expect(() => ensurePeerProfile({ cwd: peerCwd, env, runtime: rt, personality: 'hum' })).toThrow(/requires intelligence .*artificial.*natural/)
+    }
+    const onDisk = JSON.parse(readFileSync(join(peerCwd, '.iapeer', 'peer-profile.json'), 'utf8')) as { runtimes: string[]; default_runtime: string }
+    expect(onDisk.runtimes).toEqual(['codex'])
+    expect(onDisk.default_runtime).toBe('codex')
+  })
+
+  test('a default_runtime that is not among the gated runtimes is warned about, never silently kept', () => {
+    const env = laEnv()
+    const peerCwd = join(root, 'hum3')
+    mkdirSync(join(peerCwd, '.iapeer'), { recursive: true })
+    writeFileSync(
+      join(peerCwd, '.iapeer', 'peer-profile.json'),
+      JSON.stringify({ personality: 'hum3', default_runtime: 'claude', runtimes: ['telegram', 'claude'], intelligence: 'natural' }),
+    )
+    const warns: string[] = []
+    ensurePeerProfile({ cwd: peerCwd, env, runtime: 'web', personality: 'hum3', warn: m => warns.push(m) })
+    expect(warns.join('\n')).toMatch(/default_runtime "claude" .* not among its runtimes/)
+  })
+
   test('DISCOVERY GATE does not touch ARTIFICIAL peers: .codex marker still attaches codex', () => {
     const env = laEnv()
     const peerCwd = join(root, 'worker2')
