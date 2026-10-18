@@ -469,6 +469,18 @@ only the supervisors and stop CLI: its sweep is still source code. Keep these
 evidence boundaries explicit. `--artifacts` preserves raw logs/transcripts and a
 result before the disposable root is removed; it never exports auth.json.
 
+`bun scripts/proof-installed-operators.ts --bin ~/.local/bin/iapeer --seed-config <SDK config dir> --artifacts <dir>`
+runs the native OpenCode TUI against a loopback synthetic provider with the installed
+daemon, CLI and supervisors. It exercises real terminal attach, human input and detach;
+native interrupt and compaction; refresh through a natural idle reap; `/new` with
+different session/launch IDs and hosting PID, old hosting dead, new hosting ready,
+and an unrelated hosting unchanged; gated/yolo `--now` including exit 1 on an actual
+invalid-config launch failure; a native bash `self-fresh` and eager daemon relaunch;
+rename and remove guards and private-state cleanup. The provider drives native tool
+calls deterministically; this is not evidence of a cloud model's task performance.
+Passing the repository's `bin/iapeer` instead is a source-only development check,
+not installed acceptance.
+
 ## Delivery gate
 
 Source changes and isolated native artifacts are allowed. npm publication and host

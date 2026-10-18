@@ -639,7 +639,7 @@ export interface NewPeerOutcome {
 export async function newPeer(
   personality: string,
   runtime: string | undefined,
-  opts: CliEnvOptions & { wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: false }) => Promise<WakeResult> } = {},
+  opts: CliEnvOptions & { wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: false; restart: true }) => Promise<WakeResult> } = {},
 ): Promise<NewPeerOutcome> {
   const env = opts.env ?? process.env
   const cfg = loadLifecycleConfig(env)
@@ -675,18 +675,17 @@ export async function newPeer(
     }
   }
   const identity = buildProcessAddress(rt, personality)
-  const sock = buildSocketPath(rt, personality, cfg.sockDir)
   // Fresh slate: an explicit operator /new outranks a C1 park (it demands a live
   // fresh session NOW) and any stale death/fresh markers (the wake below is fresh
   // by construction — markers must not leak into a LATER wake's decision).
   clearStopped(cfg, identity)
   clearIdleReaped(cfg, identity)
   clearNewEager(cfg, identity)
-  killSession(sock, identity, env, 'new') // canary-clean deliberate teardown; no-op when dead
-  removeSessionState(cfg, identity) // never a death class — supervise stays silent
+  // Lifecycle retires the hosting under the same lock as bring-up, and waits for asynchronous
+  // supervisor teardown before testing readiness (a dying old host must never win the wake).
   const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
-  const r = await wake({ personality, runtime: rt, task: '', resume: false })
-  if (r.status !== 'READY') {
+  const r = await wake({ personality, runtime: rt, task: '', resume: false, restart: true })
+  if (r.status !== 'READY' || !r.woke) {
     return { personality, runtime: rt, action: 'failed', reason: r.reason ?? 'wake failed' }
   }
   return { personality, runtime: rt, action: 'fresh' }
@@ -1627,6 +1626,7 @@ const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   'no-setup',
   'no-telegram',
   'no-voice',
+  'now',
   'npx',
   'plugin-only',
   'remove-codesign-identity',
@@ -3302,6 +3302,10 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         out(r.text)
         if (r.code === 0 && modeArg && flags.now === true) {
           const o = await newPeer(peer, undefined, { env })
+          if (o.action !== 'fresh') {
+            errOut(`approval-mode: saved ${modeArg}, but apply now failed: ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+            return 1
+          }
           out(`applied now: fresh session (${o.action})\n`)
         }
         return r.code

@@ -43,7 +43,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 |---|---|
 | `stop <peer> [runtime] \| --all` | Agent: stop flag + close the session (the daemon won't wake it). Infra: remove from launchd. `--all` — all peers. |
 | `start <peer> [runtime] \| --all` | Clear the stop flag (the session comes up on the first message). Infra: load into launchd. |
-| `new <peer> [runtime]` | An unconditional fresh restart — the emergency lever for a hung/dead session, around the agent. Code 0 = a fresh session is up and ready. |
+| `new <peer> [runtime]` | An unconditional fresh restart — the emergency lever for a hung/dead session, around the agent. Teardown and bring-up share the wake lock; code 0 means the old hosting is gone and a new fresh session is up and ready. |
 | `refresh <peer> [runtime] \| --all` | A lazy "soft restart": an agent peer comes up fresh (re-reads the doctrine/fragments from disk) on its NEXT natural wake. Doesn't kill a live session, doesn't wake the rest, doesn't do an immediate restart — only sets a marker. Routers (notifier/telegram) and absent runtimes are skipped (they have no doctrine). `--all` — all peers. |
 | `remove <peer> [--force]` | Delete the registry entry (doesn't touch the peer's folder). Refuses a live peer without `--force`. Idempotent. |
 | `attach <peer> [runtime]` | Bring up (if asleep), resume the conversation, open the session under the supervisor in the terminal (detach — `Ctrl-]`). |

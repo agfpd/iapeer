@@ -767,7 +767,7 @@ describe('new (unconditional fresh restart)', () => {
     // a parked peer with stale markers — /new must override ALL of it
     setStopped(cfg, 'claude-alpha')
     setIdleReaped(cfg, 'claude-alpha')
-    const calls: Array<{ personality: string; runtime: string; task: string; resume: boolean }> = []
+    const calls: Array<{ personality: string; runtime: string; task: string; resume: boolean; restart: boolean }> = []
     const o = await newPeer('alpha', undefined, {
       env: e,
       wakeFn: async args => {
@@ -777,7 +777,7 @@ describe('new (unconditional fresh restart)', () => {
     })
     expect(o.action).toBe('fresh')
     expect(o.runtime).toBe('claude')
-    expect(calls).toEqual([{ personality: 'alpha', runtime: 'claude', task: '', resume: false }])
+    expect(calls).toEqual([{ personality: 'alpha', runtime: 'claude', task: '', resume: false, restart: true }])
     expect(isStopped(cfg, 'claude-alpha')).toBe(false) // un-parked: /new outranks the C1 stop
     expect(hasIdleReaped(cfg, 'claude-alpha')).toBe(false) // stale marker cleared
   })
@@ -790,6 +790,29 @@ describe('new (unconditional fresh restart)', () => {
     })
     expect(o.action).toBe('failed')
     expect(o.reason).toBe('boot hang')
+  })
+
+  test('a reused old hosting is never reported as a successful fresh restart', async () => {
+    await register('not-fresh')
+    const o = await newPeer('not-fresh', undefined, {
+      env: env(),
+      wakeFn: async () => ({ status: 'READY', woke: false }),
+    })
+    expect(o.action).toBe('failed')
+  })
+
+  test('approval-mode --now propagates restart failure (saved mode is not applied mode)', async () => {
+    const name = 'apply-now-failure', cwd = join(root, name)
+    mkdirSync(cwd)
+    const { readPeerProfile, writePeerProfileAtomic } = await import('../identity/index.ts')
+    writePeerProfileAtomic(cwd, { personality: name, runtime: 'claude', runtimes: ['claude'], intelligence: 'artificial' })
+    await upsertPeer({ personality: name, runtime: 'claude', cwd, intelligence: 'artificial' }, { env: env() })
+    // Deterministic refusal before bring-up: exercise error propagation, not a native boot timeout.
+    writeFileSync(launchdPlistPath(name, env()), '<plist><dict></dict></plist>')
+    const code = await runCli(['approval-mode', name, 'gated', '--now'],
+      { ...env(), HOME: join(root, 'home') })
+    expect(code).toBe(1)
+    expect(readPeerProfile(cwd)?.approval_mode).toBe('gated')
   })
 
   test('refusals are explicit: foreign launchd / infra runtime / undeclared runtime / unknown peer', async () => {

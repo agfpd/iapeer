@@ -65,8 +65,8 @@ export function markHostReady(identity: string, env: NodeJS.ProcessEnv = process
   writeFileSync(readyPath(identity, env), `${token}\n`, { mode: 0o600 })
 }
 
-export function clearHostReady(identity: string, env: NodeJS.ProcessEnv = process.env): void {
-  rmSync(readyPath(identity, env), { force: true })
+export function clearHostReady(identity: string, env: NodeJS.ProcessEnv = process.env, runDir = hostRunDir(env)): void {
+  rmSync(join(runDir, `${identity}.ready`), { force: true })
 }
 
 /** When this hosting started (its supervisor pid-file mtime), or null. */

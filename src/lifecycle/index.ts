@@ -51,7 +51,7 @@ import {
   type LaunchSpec,
 } from '../launch/index.ts'
 import { composeSystemPrompt, gatherPromptInput } from '../launch/composeSystemPrompt.ts'
-import { hostSessionAlive, hostSessionReady, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
+import { clearHostReady, hostRunDir, hostSessionAlive, hostSessionReady, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
 import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 
@@ -983,6 +983,8 @@ export interface WakeArgs {
   resume?: boolean
   /** Explicit "continue THIS work" intent — see resolveWakeMode `continueWork`. */
   continueWork?: boolean
+  /** Operator /new: retire the old hosting INSIDE the wake lock, then launch fresh. Not an IAP flag. */
+  restart?: boolean
 }
 
 export interface WakeResult {
@@ -1072,7 +1074,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
   // ЖЦ §stop, Демон §stopped). Unlike idle-reap (temporary), `stop` is an operator
   // halt: refuse with stopped:true so the sender gets an explicit "stopped" error,
   // not a generic "offline" — and no message is queued. `start` clears the flag.
-  if (isStopped(cfg, identity)) {
+  if (isStopped(cfg, identity) && !args.restart) {
     logWake({ identity, runtime, mode: 'refused', cause: 'stopped' })
     return {
       status: 'FAILED',
@@ -1090,13 +1092,31 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // could be spawned live-but-flagged. These re-checks are fail-SAFE (they only add a
     // refusal). A stop racing DURING the spawn is a narrower window the wake-lock does not
     // cover (stop does not take this lock).
-    if (isStopped(cfg, identity)) {
+    if (isStopped(cfg, identity) && !args.restart) {
       logWake({ identity, runtime, mode: 'refused', cause: 'stopped-mid-wake' })
       return { status: 'FAILED', woke: false, runtime, stopped: true, reason: `"${args.personality}" (${runtime}) is stopped and not accepting messages; start it to resume` }
     }
     if (isLaunchdManaged(args.personality, env)) {
       logWake({ identity, runtime, mode: 'refused', cause: 'launchd-managed-mid-wake' })
       return { status: 'FAILED', woke: false, runtime, reason: `"${args.personality}" became launchd-managed mid-wake; the daemon does not wake it` }
+    }
+    if (args.restart) {
+      // /new is a replacement, not a wake of an existing host. SIGTERM is asynchronous: without
+      // awaiting teardown the fast path below can reuse the dying hosting and report a false READY.
+      // Serialize teardown AND bring-up with other wakes; a timeout fails loud, never reuses it.
+      clearStopped(cfg, identity)
+      clearIdleReaped(cfg, identity)
+      clearNewEager(cfg, identity)
+      removeSessionState(cfg, identity)
+      const runDir = cfg.supervisorRunDir ?? hostRunDir(env)
+      clearHostReady(identity, env, runDir)
+      killPtyHost(identity, env, { reason: 'new' }, runDir)
+      const deadline = Date.now() + 5000
+      while (hostDaemonAlive(runDir, identity) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50))
+      if (hostDaemonAlive(runDir, identity)) {
+        logWake({ identity, runtime, mode: 'refused', cause: 'restart-teardown-timeout' })
+        return { status: 'FAILED', woke: false, runtime, reason: 'old hosting did not terminate; fresh restart not performed' }
+      }
     }
     // Idempotent fast path inside the lock: a live session wins (a concurrent
     // wake already brought it up) — no second spawn.
@@ -1147,7 +1167,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       cfg,
       identity,
       cwd,
-      args.resume,
+      args.restart ? false : args.resume,
       c => adapter.resolveResume(c, { personality: args.personality, env }),
       args.topic,
       f => consumeOnUp.push(f),

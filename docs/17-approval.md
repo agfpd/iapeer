@@ -139,7 +139,7 @@ The approval surface is served on both daemon listeners under `/fleet/v1`, same 
 - `iapeer approvals [--json]` — the pending queue: personality · runtime · kind · **the verbatim command/content** · age · id.
 - `iapeer approve <id> [--approver <peer>]` — allow.
 - `iapeer deny <id> [reason] [--approver <peer>]` — deny with a reason (delivered to the model).
-- `iapeer approval-mode <peer> [gated|yolo] [--now]` — read the current mode (omit the mode), or flip it: persists the field, idempotently brings the runtime surfaces to the mode, and reports the application moment. `--now` also starts a fresh session so the mode takes effect immediately.
+- `iapeer approval-mode <peer> [gated|yolo] [--now]` — read the current mode (omit the mode), or flip it: persists the field, idempotently brings the runtime surfaces to the mode, and reports the application moment. `--now` also starts a fresh session so the mode takes effect immediately. If that restart fails, the mode stays saved but the command returns exit 1 and explicitly reports that it was not applied; saving a mode alone is not successful immediate application.
 
 `approve` / `deny` / `approvals` reach the in-daemon broker over the Fleet API (like the tray), not in-process — the queue lives in the live daemon.
 
