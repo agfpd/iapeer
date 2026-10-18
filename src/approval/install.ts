@@ -161,6 +161,10 @@ export function removeCodexApproval(cwd: string, env: NodeJS.ProcessEnv = proces
     return path
   }
   writeFileAtomic(path, `${JSON.stringify(obj, null, 2)}\n`, 0o644)
+  // The trust wipe above is cwd-wide (codex keys state POSITIONALLY, so removing our group shifts the
+  // others' keys). Re-seed whatever hooks REMAIN — the memory provider's among them — or the next codex
+  // boot stops at «hooks need review» (incident 18.10).
+  preSeedCodexHooksTrust(path, env)
   return path
 }
 

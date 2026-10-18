@@ -77,7 +77,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 |---|---|
 | `enable <plugin> [peer] [--no-setup]` | Install and enable a capability plugin for a peer (across runtimes), run its setup step. |
 | `native-memory <off\|on> (--peer <p> \| --all)` | Turn off/restore a peer's runtimes' native memory. |
-| `trust-hooks <hooks.json> [--check]` | Pre-trust codex hooks from a file (without the modal). `--check` — a divergence report. |
+| `trust-hooks <hooks.json> [--check]` | Pre-trust codex hooks from a file (without the modal). `--check` — a divergence report. The core also re-asserts the trust of `<cwd>/.codex/hooks.json` on EVERY codex launch (idempotent), and `rename` / `approval-mode yolo` restore what must stay trusted — a codex peer boots to its input with no human even after its trust was wiped (18.10). |
 
 ## Agent self-calls
 

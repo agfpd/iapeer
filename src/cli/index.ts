@@ -1439,9 +1439,13 @@ export async function renamePeerCli(
       const { preTrustCodexCwd, removeCodexCwdTrust } = await import('../launch/nativeMemory.ts')
       preTrustCodexCwd(newCwd, env)
       removeCodexCwdTrust(oldCwd, env)
-      const { removeCodexHooksTrustUnder } = await import('../launch/codexHooksTrust.ts')
+      const { removeCodexHooksTrustUnder, preSeedCodexHooksTrust } = await import('../launch/codexHooksTrust.ts')
       removeCodexHooksTrustUnder(oldCwd, env)
-      sideEffects.push('codex-trust: re-trusted new cwd + cleaned old')
+      // Hooks trust is keyed by the hooks.json PATH, so it must move with the cwd — without this a
+      // rename round-trip (a→b→a) wiped it entirely and codex stopped at «hooks need review» (18.10).
+      const newHooks = join(newCwd, '.codex', 'hooks.json')
+      if (existsSync(newHooks)) preSeedCodexHooksTrust(newHooks, env)
+      sideEffects.push('codex-trust: re-trusted new cwd (+ hooks) + cleaned old')
     } catch (e) {
       sideEffects.push(`codex-trust: failed (${e instanceof Error ? e.message : String(e)})`)
     }

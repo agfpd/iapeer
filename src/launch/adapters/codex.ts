@@ -41,10 +41,11 @@
 
 import { homedir } from 'os'
 import { join } from 'path'
-import { readdirSync, realpathSync, statSync } from 'fs'
+import { existsSync, readdirSync, realpathSync, statSync } from 'fs'
+import { preSeedCodexHooksTrust } from '../codexHooksTrust.ts'
 import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
 import { detectNumberedModal } from './modalDetect.ts'
-import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, PreparedLaunch, RuntimeAdapter } from '../types.ts'
 
 /**
  * The `/goal` subcommands we will type into a live codex session (see executeControl → 'goal').
@@ -169,6 +170,27 @@ export const codexAdapter: RuntimeAdapter = {
   runtime: 'codex',
   kind: 'tui',
   usesDoctrine: true,
+
+  /**
+   * Hooks trust, re-asserted on EVERY launch (incident 18.10: oc-test-nemo/codex stopped at «PostToolUse
+   * hooks — 1 hook needs review» after a rename round-trip had wiped its `[hooks.state]` — a fresh codex
+   * that meets an untrusted hook waits for a human forever). The invariant «a codex peer boots to its
+   * input with no human» therefore lives HERE, not only at provision time: whatever erased the trust
+   * (rename, an approval-mode flip, a hand edit of config.toml), the next launch restores it. The peer's
+   * `.codex/hooks.json` is operator/provider-owned configuration, trusted like its `.mcp.json`.
+   * Idempotent (no write when the hashes already match); a failure is a launch WARNING, never a block —
+   * the modal is still better than no session, and the warning names it.
+   */
+  prepareLaunch(spec, _baseEnv, cfg): PreparedLaunch {
+    const env = cfg.env ?? process.env
+    const hooks = join(spec.cwd, '.codex', 'hooks.json')
+    const warnings: string[] = []
+    if (existsSync(hooks)) {
+      const t = preSeedCodexHooksTrust(hooks, env)
+      if (t.state === 'failed') warnings.push(`codex hooks trust not seeded (${t.detail ?? 'unknown'}) — a review modal may block the boot`)
+    }
+    return { env: {}, ...(warnings.length ? { warnings } : {}) }
+  },
 
   /**
    * Delivery markers for submitIntoTui (docs/Рантайм codex "Доставка"):
