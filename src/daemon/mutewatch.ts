@@ -86,6 +86,8 @@ const TAIL_BYTES = 256 * 1024
 /** Overlap added to the since-boundary so an event landing between two sweeps is never
  *  missed. Re-detections are free: the board's dedup folds them into the live notice. */
 const SCAN_OVERLAP_MS = 15_000
+/** Startup catch-up horizon for limit parks — the limit-hold bound (lifecycle/limitpark.ts LIMIT_MAX_HOLD_MS). */
+const CATCH_UP_HORIZON_MS = 6 * 60 * 60_000
 /** Walk depth for the codex YYYY/MM/DD tree (3 levels + the file). */
 const CODEX_WALK_DEPTH = 3
 
@@ -106,7 +108,10 @@ export interface MuteDetection {
   file?: string
 }
 
-type RawDetection = Omit<MuteDetection, 'personality' | 'runtime' | 'file'>
+type RawDetection = Omit<MuteDetection, 'personality' | 'runtime' | 'file'> & {
+  /** Codex ≥0.160: the runtime's own refusal text (`error.message`) — the last-resort reset source. */
+  refusalMessage?: string
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure parsers — string in, detection out (fs-free: tests need no temp tree)
@@ -261,6 +266,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
         completed_at?: unknown
         info?: { total_token_usage?: { total_tokens?: unknown } } | null
         rate_limits?: Record<string, unknown>
+        error?: { message?: unknown; codex_error_info?: unknown } | null
       }
     }
     try {
@@ -289,7 +295,11 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
       // `=== null` (strict): the field is PRESENT and null in every real death; a turn that
       // produced a message carries the message. The conjunction with refusalPending is what
       // keeps docs/19 §8 honest — null alone is an absence, not a signal.
-      const died = refusalPending && p.last_agent_message === null
+      // Path (c), codex ≥0.160 (real bytes 18.10.2026, linus): the dead turn's task_complete carries
+      // the runtime's OWN typed error — `error.codex_error_info` ("usage_limit_exceeded") plus its
+      // message. Structural, so it stands on its own; path (b) stays for older codex.
+      const typed = p.error && typeof p.error.codex_error_info === 'string' && p.error.codex_error_info ? p.error.codex_error_info : undefined
+      const died = typed !== undefined || (refusalPending && p.last_agent_message === null)
       refusalPending = false
       if (!died) continue
       // Event time = completed_at (epoch s), NOT the line timestamp: a resumed session
@@ -305,7 +315,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
         .filter((n): n is number => n !== null)
       // usage_limit_exceeded = codex's own error-code vocabulary (0.144.1 binary), applied
       // only when an exhausted window evidences the class; else our honest fallback.
-      const errorType = exhausted.length ? 'usage_limit_exceeded' : 'api-refusal'
+      const errorType = typed ?? (exhausted.length ? 'usage_limit_exceeded' : 'api-refusal')
       const parts = lastWindowed
         ? [describeWindow('primary', lastWindowed.primary ?? {}), describeWindow('secondary', lastWindowed.secondary ?? {})].filter(Boolean)
         : []
@@ -318,6 +328,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
         sessionId,
         atMs,
         cwd,
+        ...(typed && typeof p.error?.message === 'string' ? { refusalMessage: p.error.message } : {}),
       }
       continue
     }
@@ -363,6 +374,66 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
     }
   }
   return found
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reset resolution for a codex death whose OWN session carries no current window
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Incident 18.10.2026 (linus): a session resumed hours after its last turn hit the account limit on
+// its FIRST call. Its own newest windowed snapshot was from 10:35 (primary 93%) — before the account
+// was exhausted by OTHER sessions — so no exhausted window, no reset, no limit-park, and nobody would
+// have returned linus to its message after the reset. The account is host-wide (one ~/.codex), so
+// the freshest snapshot any session took is evidence about the same windows.
+
+/** How far back the account snapshot search looks (a 5 h primary window, with margin). */
+const ACCOUNT_SNAPSHOT_LOOKBACK_MS = 8 * 60 * 60_000
+
+/** The freshest EXHAUSTED window any codex session on this host observed before `atMs`, whose reset is
+ *  still ahead of `atMs` — the account's own statement of when the refused call may succeed. */
+export function codexAccountResetsAtMs(sessionsDir: string, atMs: number): number | undefined {
+  let best: { seenMs: number; resetsMs: number } | undefined
+  for (const file of changedJsonl(sessionsDir, atMs - ACCOUNT_SNAPSHOT_LOOKBACK_MS, CODEX_WALK_DEPTH)) {
+    const t = readSessionSlices(file, TAIL_BYTES)
+    if (!t) continue
+    for (const line of t.tail.split('\n')) {
+      if (!line.includes('rate_limits') || !line.includes('used_percent')) continue
+      let d: { timestamp?: unknown; payload?: { rate_limits?: Record<string, unknown> } }
+      try { d = JSON.parse(line) } catch { continue }
+      const seenMs = toMs(d.timestamp)
+      const rl = d.payload?.rate_limits
+      if (seenMs === null || !rl || seenMs > atMs) continue
+      for (const w of [asWindow(rl.primary), asWindow(rl.secondary)]) {
+        if (!w || typeof w.used_percent !== 'number' || w.used_percent < 100 || typeof w.resets_at !== 'number') continue
+        const resetsMs = w.resets_at * 1000
+        if (resetsMs <= atMs) continue
+        if (!best || seenMs > best.seenMs || (seenMs === best.seenMs && resetsMs > best.resetsMs)) best = { seenMs, resetsMs }
+      }
+    }
+  }
+  return best?.resetsMs
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** Last resort: codex's own refusal text — "…try again at 10:23 PM." or "…try again at Oct 21st, 2026
+ *  10:23 PM." — rendered in the HOST's local time zone (the runtime runs here). A bare time means its
+ *  next occurrence after the event. Unparseable → undefined (never a guess). */
+export function parseCodexRetryAt(message: string, atMs: number): number | undefined {
+  const m = /try again at (?:([A-Z][a-z]{2})[a-z]* (\d{1,2})(?:st|nd|rd|th)?,? (\d{4}),? )?(\d{1,2}):(\d{2})\s?([AP]M)/.exec(message)
+  if (!m) return undefined
+  let h = Number(m[4]) % 12
+  if (m[6] === 'PM') h += 12
+  const min = Number(m[5])
+  if (m[1]) {
+    const mon = MONTHS.indexOf(m[1])
+    if (mon < 0) return undefined
+    const t = new Date(Number(m[3]), mon, Number(m[2]), h, min).getTime()
+    return t > atMs ? t : undefined
+  }
+  const d = new Date(atMs)
+  let t = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, min).getTime()
+  if (t <= atMs) t += 24 * 60 * 60_000
+  return t
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,7 +552,19 @@ export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[]
     if (!raw) return
     const personality = deps.peerByCwd(raw.cwd)
     if (!personality) return // not a peer's session (a human's own shell) — never notify
-    out.push({ ...raw, personality, runtime, file })
+    const { refusalMessage, ...det } = raw
+    if (runtime === 'codex' && det.resetsAtMs === undefined) {
+      // Own windows stale (resumed session, first call refused): ask the account, then the runtime's text.
+      const account = codexAccountResetsAtMs(deps.codexSessionsDir, det.atMs)
+      const text = account === undefined && refusalMessage ? parseCodexRetryAt(refusalMessage, det.atMs) : undefined
+      const resetsAtMs = account ?? text
+      if (resetsAtMs !== undefined) {
+        det.resetsAtMs = resetsAtMs
+        if (det.errorType === 'api-refusal' && account !== undefined) det.errorType = 'usage_limit_exceeded' // an exhausted account window evidences the class
+        det.content += ` — resets ${new Date(resetsAtMs).toISOString()} (${account !== undefined ? 'account window seen by another session' : 'runtime refusal text'})`
+      }
+    }
+    out.push({ ...det, personality, runtime, file })
   }
   // claude: ~/.claude/projects/<slug>/<sessionId>.jsonl — one level of slug dirs.
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
@@ -605,6 +688,8 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
   let listPeers = opts.listPeers
   let since = now()
   let running = false
+  /** Catch-up owed on the first sweep (see below). */
+  let catchUp = true
 
   const sweep = async (): Promise<void> => {
     if (running) return // a slow sweep must never overlap itself into a stampede
@@ -636,6 +721,22 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
               const model = readOpencodeState(join(dir, 'state.json'))?.model
               return [{ personality: r.personality, events: join(dir, 'events.jsonl'), ...(model ? { model } : {}) }]
             }),
+      }
+      // STARTUP CATCH-UP (incident 18.10.2026, linus): the live boundary starts at daemon start, so a
+      // limit that hit while the daemon was down/restarting — or before this binary could read it —
+      // never became a limit-park, and nobody continued the peer after its reset. Once per start, feed
+      // the park writer every event of the max-hold horizon whose reset is STILL AHEAD. Parks only —
+      // no notices (the human already saw them or the moment passed); recordLimitPark dedups the same
+      // event, and the resume pass drops a park whose session has progressed since.
+      if (catchUp) {
+        catchUp = false
+        const t = now()
+        if (opts.onLimit) {
+          for (const d of scanMuteEvents(deps, t - CATCH_UP_HORIZON_MS)) {
+            if (d.resetsAtMs === undefined || d.resetsAtMs <= t) continue
+            try { opts.onLimit(d) } catch (e) { opts.onError?.(e) }
+          }
+        }
       }
       since = muteWatchTick(deps, since).sinceMs
     } catch (e) {

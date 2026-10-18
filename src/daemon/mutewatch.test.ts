@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NoticeBoard } from './notices.ts'
-import { modelFromClaudeText, muteWatchTick, parseClaudeTranscript, parseCodexRollout, resolveMuteWatchPaths, scanMuteEvents } from './mutewatch.ts'
+import { codexAccountResetsAtMs, modelFromClaudeText, muteWatchTick, parseClaudeTranscript, parseCodexRetryAt, parseCodexRollout, resolveMuteWatchPaths, scanMuteEvents } from './mutewatch.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REAL BYTES. This is the transcript line claude actually wrote on 15.07.2026 when the
@@ -481,5 +481,87 @@ describe('opencode source (docs/20 OC13)', () => {
     )
     expect(out).toEqual([expect.objectContaining({ personality: 'oc', runtime: 'opencode', errorType: 'ProviderAuthError', content: 'invalid key', model: 'nvidia/x' })])
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+// ── Real bytes, 18.10.2026 (codex 0.160.1): linus resumed hours after its last turn and its FIRST call
+// was refused — the account was exhausted meanwhile by OTHER sessions. Own newest window: 10:35, 93%.
+const LINUS_META = JSON.stringify({ timestamp: '2026-10-18T09:38:33.544Z', type: 'session_meta', payload: { session_id: '01a14e60-8b06-7820-8033-ae49a4171c18', id: '01a14e60-8b06-7820-8033-ae49a4171c18', cwd: '/Users/macmini/Peers/linus' } })
+const LINUS_OWN_WINDOW = "{\"timestamp\":\"2026-10-18T10:35:21.783Z\",\"ordinal\":431,\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4529209,\"cached_input_tokens\":4406784,\"cache_write_input_tokens\":0,\"output_tokens\":18473,\"reasoning_output_tokens\":8395,\"total_tokens\":4547682},\"last_token_usage\":{\"input_tokens\":132284,\"cached_input_tokens\":131200,\"cache_write_input_tokens\":0,\"output_tokens\":101,\"reasoning_output_tokens\":95,\"total_tokens\":132385},\"model_context_window\":475000},\"rate_limits\":{\"limit_id\":\"codex\",\"limit_name\":null,\"primary\":{\"used_percent\":93.0,\"window_minutes\":300,\"resets_at\":1792332882},\"secondary\":{\"used_percent\":15.0,\"window_minutes\":10080,\"resets_at\":1792919682},\"credits\":{\"has_credits\":false,\"unlimited\":false,\"balance\":\"0\"},\"individual_limit\":null,\"spend_control_reached\":null,\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}"
+const LINUS_REFUSAL_TOKEN_COUNT = "{\"timestamp\":\"2026-10-18T16:32:28.542Z\",\"ordinal\":440,\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4529209,\"cached_input_tokens\":4406784,\"cache_write_input_tokens\":0,\"output_tokens\":18473,\"reasoning_output_tokens\":8395,\"total_tokens\":4547682},\"last_token_usage\":{\"input_tokens\":132284,\"cached_input_tokens\":131200,\"cache_write_input_tokens\":0,\"output_tokens\":101,\"reasoning_output_tokens\":95,\"total_tokens\":132385},\"model_context_window\":475000},\"rate_limits\":{\"limit_id\":\"premium\",\"limit_name\":null,\"primary\":null,\"secondary\":null,\"credits\":{\"has_credits\":false,\"unlimited\":false,\"balance\":\"0\"},\"individual_limit\":null,\"spend_control_reached\":null,\"plan_type\":null,\"rate_limit_reached_type\":null}}}"
+const LINUS_TYPED_DEATH = "{\"timestamp\":\"2026-10-18T16:32:28.546Z\",\"ordinal\":441,\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"01a14fdb-728c-7aa1-aadd-d2e532082b51\",\"last_agent_message\":null,\"error\":{\"message\":\"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 10:23 PM.\",\"codex_error_info\":\"usage_limit_exceeded\"},\"started_at\":1792341144,\"completed_at\":1792341148,\"duration_ms\":4337}}"
+/** Another session's snapshot 15:20:48Z: primary 100%, resets 19:23:05Z (= «10:23 PM» MSK). */
+const ACCOUNT_EXHAUSTED = "{\"timestamp\":\"2026-10-18T15:20:48.235Z\",\"ordinal\":355,\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5912947,\"cached_input_tokens\":5722240,\"cache_write_input_tokens\":0,\"output_tokens\":38258,\"reasoning_output_tokens\":12970,\"total_tokens\":5951205},\"last_token_usage\":{\"input_tokens\":190846,\"cached_input_tokens\":188672,\"cache_write_input_tokens\":0,\"output_tokens\":279,\"reasoning_output_tokens\":41,\"total_tokens\":191125},\"model_context_window\":475000},\"rate_limits\":{\"limit_id\":\"codex\",\"limit_name\":null,\"primary\":{\"used_percent\":100.0,\"window_minutes\":300,\"resets_at\":1792351385},\"secondary\":{\"used_percent\":31.0,\"window_minutes\":10080,\"resets_at\":1792919682},\"credits\":{\"has_credits\":false,\"unlimited\":false,\"balance\":\"0\"},\"individual_limit\":null,\"spend_control_reached\":null,\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}"
+const LINUS_DEATH_AT_MS = 1792341148000
+const ACCOUNT_RESET_MS = 1792351385000
+
+describe('codex limit on the FIRST call of a resumed session (incident 18.10.2026, linus)', () => {
+  const seq = [LINUS_META, LINUS_OWN_WINDOW, LINUS_REFUSAL_TOKEN_COUNT, LINUS_TYPED_DEATH].join('\n')
+  const tree = (files: Record<string, string>) => {
+    const home = mkdtempSync(join(tmpdir(), 'iapeer-mutefirst-'))
+    const paths = resolveMuteWatchPaths({ HOME: home } as unknown as NodeJS.ProcessEnv)
+    mkdirSync(join(paths.codexSessionsDir, '2026', '10', '18'), { recursive: true })
+    for (const [n, body] of Object.entries(files)) writeFileSync(join(paths.codexSessionsDir, '2026', '10', '18', n), body + '\n')
+    return paths
+  }
+  test('the typed task_complete error (codex ≥0.160) is the death, with codex\'s own error class', () => {
+    const d = parseCodexRollout(seq, 0)
+    expect(d?.errorType).toBe('usage_limit_exceeded')
+    expect(d?.atMs).toBe(LINUS_DEATH_AT_MS)
+    expect(d?.resetsAtMs).toBeUndefined() // own window (10:35, 93%) is stale — no reset from it
+    // Structural on its own: no refusal-shaped token_count needed.
+    expect(parseCodexRollout([LINUS_META, LINUS_TYPED_DEATH].join('\n'), 0)?.errorType).toBe('usage_limit_exceeded')
+  })
+  test('THE MISS: the reset comes from the account window another session observed → onLimit gets a reset', () => {
+    const paths = tree({ 'rollout-linus.jsonl': seq, 'rollout-other.jsonl': [LINUS_META.replace('/linus', '/iapeer'), ACCOUNT_EXHAUSTED].join('\n') })
+    const found = scanMuteEvents({ ...paths, peerByCwd: cwd => (cwd === '/Users/macmini/Peers/linus' ? 'linus' : undefined) }, 0)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.resetsAtMs).toBe(ACCOUNT_RESET_MS)
+    expect(found[0]!.content).toContain('account window')
+  })
+  test('no account snapshot → the runtime\'s own refusal text, in host local time; nothing parseable → no guess', () => {
+    const found = scanMuteEvents({ ...tree({ 'rollout-linus.jsonl': seq }), peerByCwd: () => 'linus' }, 0)
+    const at = new Date(LINUS_DEATH_AT_MS)
+    let expected = new Date(at.getFullYear(), at.getMonth(), at.getDate(), 22, 23).getTime()
+    if (expected <= LINUS_DEATH_AT_MS) expected += 86_400_000
+    expect(found[0]!.resetsAtMs).toBe(expected)
+    expect(parseCodexRetryAt('try again at Oct 21st, 2026 10:23 PM.', LINUS_DEATH_AT_MS)).toBe(new Date(2026, 9, 21, 22, 23).getTime())
+    expect(parseCodexRetryAt('try again later', LINUS_DEATH_AT_MS)).toBeUndefined()
+    const noText = LINUS_TYPED_DEATH.replace(/try again at [^.]*\./, 'try again later.')
+    const none = scanMuteEvents({ ...tree({ 'rollout-linus.jsonl': [LINUS_META, LINUS_OWN_WINDOW, noText].join('\n') }), peerByCwd: () => 'linus' }, 0)
+    expect(none[0]!.resetsAtMs).toBeUndefined()
+  })
+  test('an account window that already reset before the event is not evidence', () => {
+    const paths = tree({ 'rollout-linus.jsonl': [LINUS_META, LINUS_OWN_WINDOW, LINUS_REFUSAL_TOKEN_COUNT, LINUS_TYPED_DEATH.replace(/try again at [^.]*\./, 'x.')].join('\n'), 'rollout-other.jsonl': ACCOUNT_EXHAUSTED })
+    expect(codexAccountResetsAtMs(paths.codexSessionsDir, ACCOUNT_RESET_MS + 1000)).toBeUndefined()
+    expect(codexAccountResetsAtMs(paths.codexSessionsDir, LINUS_DEATH_AT_MS)).toBe(ACCOUNT_RESET_MS)
+  })
+})
+
+describe('startup catch-up — a limit that hit before this daemon started still gets its park', () => {
+  test('pre-start event with a reset ahead → onLimit (park), no re-raised notice; a passed reset → nothing', async () => {
+    const { startMuteWatch } = await import('./mutewatch.ts')
+    const home = mkdtempSync(join(tmpdir(), 'iapeer-mutecatch-'))
+    const paths = resolveMuteWatchPaths({ HOME: home } as unknown as NodeJS.ProcessEnv)
+    mkdirSync(join(paths.codexSessionsDir, '2026', '10', '18'), { recursive: true })
+    writeFileSync(join(paths.codexSessionsDir, '2026', '10', '18', 'rollout-linus.jsonl'), [LINUS_META, LINUS_OWN_WINDOW, LINUS_REFUSAL_TOKEN_COUNT, LINUS_TYPED_DEATH].join('\n') + '\n')
+    writeFileSync(join(paths.codexSessionsDir, '2026', '10', '18', 'rollout-other.jsonl'), ACCOUNT_EXHAUSTED + '\n')
+    const run = async (nowMs: number) => {
+      const board = new NoticeBoard({})
+      const parks: number[] = []
+      const stop = startMuteWatch({} as never, board, {
+        paths, intervalMs: 20, now: () => nowMs,
+        listPeers: () => [{ personality: 'linus', cwd: '/Users/macmini/Peers/linus', runtimes: ['codex'] }],
+        onLimit: d => { if (d.resetsAtMs !== undefined) parks.push(d.resetsAtMs) },
+      })
+      await Bun.sleep(150); stop()
+      return { parks, notices: board.list(nowMs).length }
+    }
+    // The daemon (re)started 10 min after linus's refused first call, reset still 2.6 h ahead.
+    const r = await run(LINUS_DEATH_AT_MS + 10 * 60_000)
+    expect(r.parks[0]).toBe(ACCOUNT_RESET_MS)
+    expect(r.notices).toBe(0)
+    // Started after the reset: nothing is owed.
+    expect((await run(ACCOUNT_RESET_MS + 60_000)).parks).toEqual([])
   })
 })
