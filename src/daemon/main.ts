@@ -56,6 +56,7 @@ import type { ResolvedCaller } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import {
   createComposerDeliveryQueue,
+  deliveryCompleted,
   deliveryLanded,
   deliveryProcessed,
   routeSend,
@@ -78,7 +79,7 @@ import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 import { randomBytes } from 'crypto'
-import { listInflightIdentities, listOrphanIdentities, recordInflight, sweepInflight, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
+import { listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
 import { hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -272,6 +273,16 @@ export function redeliveryMessage(e: InflightEntry): string {
   return `${REDELIVERY_PREFIX} ${why}; originally sent ${e.sentAt}]\n${e.message}`
 }
 
+/** Body of the interrupted-turn notice (OC07 extension): processed, but the turn died mid-work. */
+export function interruptedNotice(e: InflightEntry): string {
+  return (
+    `iapeer: your message to "${e.personality}" (${e.runtime}), sent ${e.sentAt}${e.topic ? ` topic=${e.topic}` : ''}, ` +
+    `was being worked on when the receiving session died — the turn was INTERRUPTED and its result is not guaranteed ` +
+    `(it is NOT redelivered: side effects may already have happened). Check its state and resend if needed. ` +
+    `First line: ${e.message.split('\n')[0]!.slice(0, 200)}`
+  )
+}
+
 /** Body of the explicit non-delivery notice to the original sender. */
 export function undeliveredNotice(e: InflightEntry, reason: string): string {
   return (
@@ -292,17 +303,39 @@ export async function processInflight(
   cfg: LifecycleConfig,
   env: NodeJS.ProcessEnv,
   routeDeps: RouteDeps,
-  seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean; landed?: (e: InflightEntry) => boolean } = {},
+  seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean; landed?: (e: InflightEntry) => boolean; completed?: (e: InflightEntry) => boolean } = {},
 ): Promise<void> {
   const processed = seam.processed ?? ((e: InflightEntry) => deliveryProcessed(e, env))
   const send = seam.send ?? routeSend
+  /** A notice FROM iapeer to the entry's original sender (skipped when the sender is iapeer itself). */
+  const notifySender = async (e: InflightEntry, message: string): Promise<string> => {
+    try {
+      const index = readPeersIndex({ env })
+      const self = findPeer(index, 'iapeer')
+      if (!self || `${e.caller.runtime}-${e.caller.personality}` === `${self.runtime}-iapeer`) return 'skipped'
+      const sender = resolveCallerIdentity({ personality: 'iapeer', runtime: self.runtime }, index)
+      const n = await send(sender, { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, routeDeps)
+      return String(n.ok)
+    } catch {
+      return 'false'
+    }
+  }
   for (const identity of listInflightIdentities(cfg.stateDir)) {
     const n = sweepInflight(cfg.stateDir, identity, {
       sessionToken: id => (hostSessionAlive(id, env) ? hostSessionToken(id, env) : null),
       processed,
+      completed: seam.completed ?? ((e: InflightEntry) => deliveryCompleted(e, env)),
       landed: seam.landed ?? ((e: InflightEntry) => deliveryLanded(e, env)),
     })
     if (n > 0) appendLifecycleEvent(cfg.eventLogDir, { ev: 'inflight-orphaned', identity, count: n }, { env })
+  }
+  // A turn the session STARTED on a message but did not finish before dying: never redelivered (its side
+  // effects may already have happened) — the sender is told explicitly that the result is not guaranteed.
+  for (const identity of listInterruptedIdentities(cfg.stateDir)) {
+    for (const e of takeInterrupted(cfg.stateDir, identity)) {
+      const notified = await notifySender(e, interruptedNotice(e))
+      appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-interrupted', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', notified })
+    }
   }
   for (const identity of listOrphanIdentities(cfg.stateDir)) {
     for (const e of takeOrphans(cfg.stateDir, identity)) {
@@ -327,18 +360,7 @@ export async function processInflight(
         reason = x instanceof Error ? x.message : String(x)
       }
       // Redelivery failed → the sender must learn it explicitly.
-      let notified = 'false'
-      try {
-        const self = findPeer(index, 'iapeer')
-        const callerAddr = `${e.caller.runtime}-${e.caller.personality}`
-        if (self && callerAddr !== `${self.runtime}-iapeer`) {
-          const sender = resolveCallerIdentity({ personality: 'iapeer', runtime: self.runtime }, index)
-          const n = await send(sender, { personality: e.caller.personality, runtime: e.caller.runtime, message: undeliveredNotice(e, reason), topic: e.topic ?? 'delivery-failed' }, routeDeps)
-          notified = String(n.ok)
-        }
-      } catch {
-        notified = 'false'
-      }
+      const notified = await notifySender(e, undeliveredNotice(e, reason))
       appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-undelivered', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', err: reason.slice(0, 300), notified })
     }
   }

@@ -175,6 +175,15 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
   (lifecycle.log) and `ev=inflight-redelivered|inflight-undelivered`
   (delivery.log).
 - A false «not processed» costs a visible duplicate, never a silent loss.
+- Interrupted turns. «Processed» (a model response began) is not «finished»: a
+  turn killed mid-tool may already have had side effects, so it is never
+  redelivered. The ledger keeps an entry until its turn finishes (claude: an
+  assistant record with a terminal `stop_reason`; codex: `task_complete`;
+  opencode: a completed assistant message for it with a finish other than
+  `tool-calls`); a finished later message covers earlier ones. If the session
+  dies with the turn unfinished, the sender gets an explicit notice from iapeer
+  («the turn was INTERRUPTED and its result is not guaranteed»), logged as
+  `ev=inflight-interrupted`.
 - Unknown is not failed. When a live receiver's acceptance record does not appear
   within the confirm window (a busy claude records a queued message late), the
   send returns `ok` with `unconfirmed: true` instead of «NOT delivered» — the

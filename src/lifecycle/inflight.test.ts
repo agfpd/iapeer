@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeOrphans, type InflightEntry } from './inflight.ts'
-import { deliveryLanded, deliveryProcessed } from '../transport/index.ts'
+import { listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
+import { deliveryCompleted, deliveryLanded, deliveryProcessed } from '../transport/index.ts'
 import { processInflight, redeliveryMessage } from '../daemon/main.ts'
 import { ok, err } from '../core/errors.ts'
 import { upsertPeer } from '../registry/index.ts'
@@ -48,6 +48,43 @@ describe('inflight ledger (OC07)', () => {
     expect(listOrphanIdentities(state)).toEqual(['claude-bob'])
     expect(takeOrphans(state, 'claude-bob').map(e => e.id).sort()).toEqual(['old', 'pending'])
     expect(listOrphanIdentities(state)).toEqual([])
+  })
+})
+
+describe('interrupted turns (OC07 extension) — processed but unfinished: never redelivered, the sender is told', () => {
+  test('gone session: unprocessed → orphan, processed-unfinished → interrupted, finished → dropped; a later finished turn covers earlier entries', () => {
+    recordInflight(state, entry({ id: 'early', ts: 1 }))
+    recordInflight(state, entry({ id: 'fin', ts: 2 }))
+    recordInflight(state, entry({ id: 'mid', ts: 3 }))
+    recordInflight(state, entry({ id: 'fresh', ts: 4 }))
+    const n = sweepInflight(state, 'claude-bob', {
+      sessionToken: () => null,
+      processed: e => e.id === 'mid' || e.id === 'fin' || e.id === 'early',
+      completed: e => e.id === 'fin',
+    })
+    expect(n).toBe(2)
+    expect(takeInterrupted(state, 'claude-bob').map(e => e.id)).toEqual(['mid']) // 'early' is covered by the later finished 'fin'
+    expect(takeOrphans(state, 'claude-bob').map(e => e.id)).toEqual(['fresh'])
+  })
+  test('live session: a processed-unfinished turn is still working → kept', () => {
+    recordInflight(state, entry({ id: 'working' }))
+    expect(sweepInflight(state, 'claude-bob', { sessionToken: () => 'host:1', processed: () => true, completed: () => false })).toBe(0)
+    expect(readInflight(state, 'claude-bob').map(e => e.id)).toEqual(['working'])
+  })
+  test('deliveryCompleted (claude): assistant tool_use is not finished; end_turn is', () => {
+    const env = { HOME: root }
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 's.jsonl')
+    const probe = { runtime: 'claude', personality: 'bob', cwd, ts: Date.now() - 1000, rendered: ENV_BODY }
+    writeFileSync(f, JSON.stringify({ type: 'user', message: { content: ENV_BODY } }) + '\n')
+    appendFileSync(f, JSON.stringify({ type: 'assistant', message: { stop_reason: 'tool_use' } }) + '\n')
+    expect(deliveryProcessed(probe, env)).toBe(true)
+    expect(deliveryCompleted(probe, env)).toBe(false)
+    appendFileSync(f, JSON.stringify({ type: 'assistant', message: { stop_reason: 'end_turn' } }) + '\n')
+    expect(deliveryCompleted(probe, env)).toBe(true)
   })
 })
 
@@ -129,6 +166,22 @@ describe('processInflight — redeliver, or the sender learns', () => {
     expect(sends[0]).toMatchObject({ from: 'alice', to: 'bob' })
     expect(sends[0]!.message).toBe(redeliveryMessage(entry()))
     expect(listOrphanIdentities(state)).toEqual([])
+  })
+
+  test('interrupted turn → an explicit notice from iapeer to the sender, NO redelivery', async () => {
+    recordInflight(state, entry())
+    const calls: Array<{ route: string; message: string }> = []
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, {
+      processed: () => true,
+      completed: () => false,
+      send: (async (caller: { personality: string }, input: { personality: string; message: string }) => {
+        calls.push({ route: `${caller.personality}->${input.personality}`, message: input.message })
+        return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: false, ts: 'x' })
+      }) as never,
+    })
+    expect(calls.map(c => c.route)).toEqual(['iapeer->alice'])
+    expect(calls[0]!.message).toMatch(/INTERRUPTED.*not guaranteed/)
+    expect(listInterruptedIdentities(state)).toEqual([])
   })
 
   test('ONE redelivery per message: an orphan that was already redelivered goes to the sender as a notice', async () => {

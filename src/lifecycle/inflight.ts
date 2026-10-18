@@ -42,6 +42,7 @@ export const UNLANDED_AFTER_MS = 120_000
 
 const inflightPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.inflight.jsonl`)
 const orphansPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.orphans.jsonl`)
+const interruptedPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.interrupted.jsonl`)
 
 function readJsonl(path: string): InflightEntry[] {
   if (!existsSync(path)) return []
@@ -90,6 +91,8 @@ export interface InflightSweepDeps {
   sessionToken: (identity: string) => string | null
   /** Did the receiving session answer this entry? */
   processed: (entry: InflightEntry) => boolean
+  /** Did the turn this entry started FINISH? Absent → processed counts as finished (legacy). */
+  completed?: (entry: InflightEntry) => boolean
   /** Did the entry land in the session at all? Only consulted for `unconfirmed` entries. */
   landed?: (entry: InflightEntry) => boolean
   now?: number
@@ -106,14 +109,35 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
   const current = deps.sessionToken(identity)
   const keep: InflightEntry[] = []
   const orphaned: InflightEntry[] = []
-  for (const e of entries) {
-    let done = false
+  const interrupted: InflightEntry[] = []
+  const safe = (f: ((e: InflightEntry) => boolean) | undefined, e: InflightEntry, dflt: boolean): boolean => {
+    if (!f) return dflt
     try {
-      done = deps.processed(e)
+      return f(e)
     } catch {
-      done = false
+      return false
     }
-    if (done) continue
+  }
+  // A session works its input in order: a FINISHED turn for a later message means every earlier one
+  // was handled too (bounds the ledger when a turn-end record is missed).
+  let finishedUpTo = -Infinity
+  const finished = new Set<string>()
+  for (const e of entries) {
+    if (safe(deps.completed, e, false) || (!deps.completed && safe(deps.processed, e, false))) {
+      finished.add(e.id)
+      finishedUpTo = Math.max(finishedUpTo, e.ts)
+    }
+  }
+  for (const e of entries) {
+    if (finished.has(e.id) || e.ts < finishedUpTo) continue
+    const done = safe(deps.processed, e, false)
+    if (done) {
+      // Answered but its turn did not finish: live → still working; gone → INTERRUPTED (side effects
+      // may have happened — never redelivered, the sender is told).
+      if (current !== null && current === e.sessionToken) keep.push(e)
+      else interrupted.push(e)
+      continue
+    }
     if (current !== null && current === e.sessionToken) {
       // Unknown landing (confirm window ran out): once seen in the session it is a normal pending entry;
       // still unseen after UNLANDED_AFTER_MS → the paste was swallowed → orphan (redeliver once).
@@ -134,7 +158,8 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
   }
   writeJsonl(inflightPath(stateDir, identity), keep)
   if (orphaned.length) for (const o of orphaned) appendFileSync(orphansPath(stateDir, identity), JSON.stringify(o) + '\n', { mode: 0o600 })
-  return orphaned.length
+  if (interrupted.length) for (const o of interrupted) appendFileSync(interruptedPath(stateDir, identity), JSON.stringify(o) + '\n', { mode: 0o600 })
+  return orphaned.length + interrupted.length
 }
 
 export function listOrphanIdentities(stateDir: string): string[] {
@@ -155,8 +180,27 @@ export function takeOrphans(stateDir: string, identity: string): InflightEntry[]
   return entries
 }
 
+export function listInterruptedIdentities(stateDir: string): string[] {
+  let names: string[]
+  try {
+    names = readdirSync(stateDir)
+  } catch {
+    return []
+  }
+  return names.filter(n => n.endsWith('.interrupted.jsonl')).map(n => n.slice(0, -'.interrupted.jsonl'.length))
+}
+
+/** Take (and remove) an identity's interrupted entries — the caller notifies each sender. */
+export function takeInterrupted(stateDir: string, identity: string): InflightEntry[] {
+  const path = interruptedPath(stateDir, identity)
+  const entries = readJsonl(path)
+  rmSync(path, { force: true })
+  return entries
+}
+
 /** Remove an identity's ledger + orphans (peer removal). */
 export function purgeInflight(stateDir: string, identity: string): void {
   rmSync(inflightPath(stateDir, identity), { force: true })
   rmSync(orphansPath(stateDir, identity), { force: true })
+  rmSync(interruptedPath(stateDir, identity), { force: true })
 }

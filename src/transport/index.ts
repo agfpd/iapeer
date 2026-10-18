@@ -904,6 +904,76 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
 }
 
 /**
+ * Did the receiving session FINISH the turn this delivery started (OC07 extension)? Processed (a model
+ * response began) is not finished: a SIGKILL mid-tool leaves a processed-but-unfinished turn whose side
+ * effects may have happened — it must not be redelivered, and its sender must be told. Proof of a
+ * finished turn after the envelope's record:
+ *   claude — an assistant record with a terminal stop_reason (end_turn / stop_sequence / max_tokens);
+ *   codex  — an `event_msg` `task_complete`;
+ *   opencode — an assistant message for that user message with `time.completed` and a finish other
+ *              than `tool-calls`.
+ */
+export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env): boolean {
+  const needles = confirmNeedles(probe.rendered)
+  if (!needles.length || needles.every(n => !n)) return false
+  if (getAdapter(probe.runtime).deliveryConfirm === 'structural') {
+    const dir = endpointPrivateDir(probe.runtime, probe.personality, { env })
+    if (!dir) return false
+    const path = join(dir, 'events.jsonl')
+    let size = 0
+    try {
+      size = statSync(path).size
+    } catch {
+      return false
+    }
+    const userIDs = new Set<string>()
+    for (const line of readFileTailFrom(path, Math.max(0, size - PROCESSED_TAIL_BYTES)).split('\n')) {
+      if (!line.trim()) continue
+      let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { role?: string; parentID?: string; finish?: string; time?: { completed?: number } } } }
+      try {
+        e = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const part = e.properties?.part
+      if (e.type === 'message.part.updated' && part?.type === 'text' && typeof part.text === 'string' && part.messageID) {
+        const text = part.text.replace(/\r/g, '')
+        if (needles.every(n => text.includes(n))) userIDs.add(part.messageID)
+      }
+      const info = e.properties?.info
+      if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID) && info.time?.completed && info.finish !== 'tool-calls') return true
+    }
+    return false
+  }
+  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+    let st
+    try {
+      st = statSync(path)
+    } catch {
+      continue
+    }
+    if (st.mtimeMs < probe.ts - 5000) continue
+    let carried = false
+    for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
+      if (!line.trim()) continue
+      let o: { type?: string; message?: { stop_reason?: string }; payload?: { type?: string } }
+      try {
+        o = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (!carried) {
+        if (o.type !== 'queue-operation' && jsonStringValuesContainAll(o, needles)) carried = true
+        continue
+      }
+      if (o.type === 'assistant' && ['end_turn', 'stop_sequence', 'max_tokens'].includes(o.message?.stop_reason ?? '')) return true
+      if (o.type === 'event_msg' && o.payload?.type === 'task_complete') return true
+    }
+  }
+  return false
+}
+
+/**
  * Did the envelope LAND in the receiving session at all (any record carrying it, including claude's
  * queue-operation for a busy session)? Weaker than deliveryProcessed — it separates «queued / being
  * worked on» from «the paste was swallowed and nothing will ever see it». Structural runtimes (opencode)
