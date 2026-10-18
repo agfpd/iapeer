@@ -481,6 +481,24 @@ calls deterministically; this is not evidence of a cloud model's task performanc
 Passing the repository's `bin/iapeer` instead is a source-only development check,
 not installed acceptance.
 
+For Claude/Codex operator parity, run
+`bun scripts/proof-installed-legacy-operators.ts --runtime claude|codex --bin ~/.local/bin/iapeer --artifacts <dir>`
+once per runtime. This uses its native TUI and a disposable HOME with a loopback
+Anthropic/Responses provider, without copying cloud credentials. It exercises the
+same attach, interrupt, compact, natural refresh, new, approval-mode, native
+self-fresh, rename and remove paths. Native session IDs are ordered by record
+timestamps, not directory enumeration; fresh/resume checks must follow the actual
+latest dialogue. Raw transcripts, request bodies, CLI results and the tested binary's
+SHA256 are preserved. Like the OpenCode probe, this tests the installed core's
+control plane, not the cloud model's reasoning or approval-broker decisions.
+
+The OpenCode probe's `--surfaces-only` mode checks live capability provision and
+unprovision. It registers a disposable capability through the installed CLI, then
+checks native MCP discovery and a real tool call before and after unregister.
+Explicit `/new` calls supply positive/negative controls for the same configuration;
+they do not count as automatic application. The probe fails if either live endpoint
+keeps the old tool set, even when both installer commands returned success.
+
 ## Delivery gate
 
 Source changes and isolated native artifacts are allowed. npm publication and host

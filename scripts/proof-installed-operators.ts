@@ -18,14 +18,28 @@ cpSync(seed, join(home, 'config/opencode'), { recursive: true })
 const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { return '' } }
 const files = (dir: string): string[] => existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]) : []
 const wire: any[] = [], results: any[] = []
-let hanging = false, selfFresh = false
+let hanging = false, selfFresh = false, useSurface = false, surfaceCalls = 0
 const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   const body: any = await req.json().catch(() => ({}))
   wire.push({ time: Date.now(), path: new URL(req.url).pathname, body })
+  if (new URL(req.url).pathname === '/mcp-surface') {
+    if (req.method !== 'POST') return new Response('', { status: 405 })
+    if (body.id === undefined) return new Response(null, { status: 202 })
+    let result: unknown
+    if (body.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'surface-proof', version: '1' } }
+    else if (body.method === 'tools/list') result = { tools: [{ name: 'surface_ping', description: 'Isolated lifecycle proof', inputSchema: { type: 'object', properties: {} } }] }
+    else if (body.method === 'tools/call') { surfaceCalls++; result = { content: [{ type: 'text', text: 'SURFACE_PONG' }] } }
+    else return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: -32601, message: 'method not found' } })
+    return Response.json({ jsonrpc: '2.0', id: body.id, result })
+  }
   const id = wire.length
   const chunk = (delta: unknown, finish: string | null) => 'data: ' + JSON.stringify({ id: `chatcmpl-${id}`, object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n'
   let first: string, finish = 'stop'
-  if (selfFresh) {
+  const surfaceTool = (body.tools ?? []).find((t: any) => t.function?.name?.includes('surface_ping'))?.function?.name
+  if (useSurface && surfaceTool) {
+    useSurface = false; finish = 'tool_calls'
+    first = chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${id}`, type: 'function', function: { name: surfaceTool, arguments: '{}' } }] }, null)
+  } else if (selfFresh) {
     selfFresh = false; finish = 'tool_calls'
     first = chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${id}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `${JSON.stringify(bin)} self-fresh`, description: 'Restart this isolated test session', timeout: 10000 }) } }] }, null)
   } else first = chunk({ role: 'assistant', content: hanging ? 'STILL_WORKING' : `PROBE_REPLY_${id}` }, null)
@@ -101,7 +115,42 @@ try {
   await turn('FIRST_OPERATOR_PROOF')
   const original = state()!
   record('cold-turn', original)
-  if (process.argv.includes('--new-only')) {
+  if (process.argv.includes('--surfaces-only')) {
+    // Real capability installer argv, real register/unregister sweeps, real MCP
+    // discovery/calls. A manual /new is the positive/negative control, not the fix.
+    const fixture = join(root, 'surface-lifecycle.ts'), declaration = join(root, 'surface-proof.json')
+    writeFileSync(fixture, `import {mkdirSync,writeFileSync,rmSync} from 'node:fs';import {join} from 'node:path';
+const [kind,dir,personality]=process.argv.slice(2);if(!personality)throw new Error('personality required');
+const path=join(dir,'surface-proof.json');if(kind==='off')rmSync(path,{force:true});else{mkdirSync(dir,{recursive:true});writeFileSync(path,JSON.stringify({mcp:{surfaceproof:{type:'remote',url:${JSON.stringify(provider.url.origin + '/mcp-surface')},enabled:true,oauth:false}}}));}`)
+    writeFileSync(declaration, JSON.stringify({ schema: 1, capability: 'surface-proof', runtimes: ['opencode'],
+      provision: { command: process.execPath, args: [fixture, 'on', '{privateDir}', '{personality}'] },
+      unprovision: { command: process.execPath, args: [fixture, 'off', '{privateDir}', '{personality}'] },
+    }))
+    const probe = async (message: string) => {
+      const start = wire.length, calls = surfaceCalls
+      useSurface = true
+      try { await turn(message) } finally { useSurface = false }
+      const offered = wire.slice(start).some(w => (w.body.tools ?? []).some((t: any) => t.function?.name?.includes('surface_ping')))
+      return { offered, nativeCalls: surfaceCalls - calls, hosting: hosting(), sessionID: state()?.sessionID }
+    }
+    const before = hosting()
+    await must('capability', 'register', declaration)
+    const liveProvision = await probe('AFTER_LIVE_PROVISION')
+    record('surface-provision-observed', { before, ...liveProvision })
+    await must('new', personality, 'opencode')
+    const afterNewOn = await probe('AFTER_NEW_PROVISION_CONTROL')
+    if (!afterNewOn.offered || afterNewOn.nativeCalls !== 1) throw new Error('provision control: native MCP tool not discovered/called after new')
+    record('surface-provision-new-positive-control', afterNewOn)
+    await must('capability', 'unregister', 'surface-proof')
+    const liveUnprovision = await probe('AFTER_LIVE_UNPROVISION')
+    record('surface-unprovision-observed', liveUnprovision)
+    await must('new', personality, 'opencode')
+    const afterNewOff = await probe('AFTER_NEW_UNPROVISION_CONTROL')
+    if (afterNewOff.offered || afterNewOff.nativeCalls) throw new Error('unprovision control: removed native MCP tool survived new')
+    record('surface-unprovision-new-negative-control', afterNewOff)
+    if (!liveProvision.offered || liveProvision.nativeCalls !== 1 || liveUnprovision.offered || liveUnprovision.nativeCalls) throw new Error('live capability lifecycle left the native endpoint on stale tools')
+    success = true
+  } else if (process.argv.includes('--new-only')) {
     await checkNew(original, sentinelPid)
     success = true
   } else {
