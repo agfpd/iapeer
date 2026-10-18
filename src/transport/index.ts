@@ -1080,12 +1080,31 @@ export interface ControlResult {
  * "specify runtime"). The clean-slash control namespace (interrupt/compact/…) is the
  * caller's; /alias_* expansions are message, not control (docs/Control §namespace).
  */
+/**
+ * Which session an operator control (interrupt / compact / …) WITHOUT a runtime acts on. An operator
+ * commands the DIALOGUE they see, not a session they must name: the dialogue a runtime-less send
+ * reaches is the peer's default_runtime (config-anchored, resolvePeerDeliveryTarget), so a LIVE
+ * default wins even when other runtimes are live too (incident 18.10: /stop on a peer with claude AND
+ * opencode live answered «specify runtime» while the opencode turn ran on). A dead default with
+ * exactly one live endpoint → that one (the only running session). Only a dead default with SEVERAL
+ * live endpoints stays ambiguous → explicit refusal. An explicit runtime is exact.
+ */
+export function resolveControlTarget(personality: string, runtime: string | undefined, env: NodeJS.ProcessEnv = process.env): Result<DeliveryTarget> {
+  if (runtime) return resolveDeliveryTarget({ personality, runtime, env })
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (peer) {
+    const anchored = resolveDeliveryTarget({ personality, runtime: peer.runtime, env })
+    if (anchored.ok) return anchored
+  }
+  return resolveDeliveryTarget({ personality, env })
+}
+
 export async function routeControl(personality: string, runtime: string | undefined, command: ControlCommand): Promise<Result<ControlResult>> {
   if (!isValidName(personality)) {
     return err(`invalid personality "${personality}" — must match /^[a-z][a-z0-9-]{0,31}$/`)
   }
   if (runtime && !isRuntime(runtime)) return err(`invalid runtime "${runtime}"`)
-  const target = resolveDeliveryTarget({ personality, runtime })
+  const target = resolveControlTarget(personality, runtime)
   if (!target.ok) return err(`cannot control "${personality}": ${target.error.message}`)
   const done = await executeControlOnTarget(target.value, command)
   if (!done.ok) return done

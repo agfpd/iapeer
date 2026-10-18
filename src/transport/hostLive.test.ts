@@ -55,3 +55,47 @@ describe('isPeerLive — host-aware (spawn-flip Ф0b-3), env-isolated', () => {
     }
   })
 })
+
+describe('resolveControlTarget — an operator command addresses the DIALOGUE (default_runtime), not «specify runtime»', () => {
+  async function sandbox(defaultRt: string, runtimes: string[], live: string[]) {
+    const root = mkdtempSync(join(tmpdir(), 'iapeer-ctl-'))
+    const env = { ...process.env, IAPEER_ROOT: root }
+    const { upsertPeer } = await import('../registry/index.ts')
+    await upsertPeer({ personality: 'duo', runtime: defaultRt, runtimes, cwd: join(root, 'duo'), intelligence: 'artificial' } as never, { rootDir: root })
+    const runDir = hostRunDir(env)
+    mkdirSync(runDir, { recursive: true })
+    for (const rt of live) {
+      writeFileSync(join(runDir, `${rt}-duo.sock`), '')
+      writeFileSync(join(runDir, `${rt}-duo.pid`), String(process.pid))
+    }
+    return { env, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  }
+  test('two live runtimes, no runtime given → the live default (the incident: /stop answered «specify runtime»)', async () => {
+    const { resolveControlTarget } = await import('./index.ts')
+    const { env, cleanup } = await sandbox('opencode', ['opencode', 'claude'], ['opencode', 'claude'])
+    try {
+      const t = resolveControlTarget('duo', undefined, env)
+      expect(t.ok && t.value.runtime).toBe('opencode')
+      const explicit = resolveControlTarget('duo', 'claude', env)
+      expect(explicit.ok && explicit.value.runtime).toBe('claude') // explicit stays exact
+    } finally {
+      cleanup()
+    }
+  })
+  test('default asleep, exactly one other live → that session; default asleep + several live → explicit refusal', async () => {
+    const { resolveControlTarget } = await import('./index.ts')
+    const a = await sandbox('codex', ['codex', 'opencode'], ['opencode'])
+    try {
+      const t = resolveControlTarget('duo', undefined, a.env)
+      expect(t.ok && t.value.runtime).toBe('opencode')
+    } finally {
+      a.cleanup()
+    }
+    const b = await sandbox('codex', ['codex', 'opencode', 'claude'], ['opencode', 'claude'])
+    try {
+      expect(resolveControlTarget('duo', undefined, b.env).ok).toBe(false)
+    } finally {
+      b.cleanup()
+    }
+  })
+})
