@@ -900,6 +900,117 @@ export async function compactPeer(
 // ephemeral zombie records a retired spawn leaves behind.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// remove-runtime — the symmetric undo of add-runtime (one endpoint, not the peer)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RemoveRuntimeOutcome {
+  personality: string
+  runtime: string
+  action: 'removed' | 'absent' | 'refused-default' | 'refused-last' | 'refused-live' | 'refused-infra'
+  reason?: string
+  /** What was undone, one line per surface. */
+  steps?: string[]
+}
+
+/**
+ * Detach ONE runtime from a peer (OC14-2 — the pilot rollback of `add-runtime --all`). Undoes what
+ * add-runtime did for that endpoint, in this order: refuse unsafe cases (the default runtime, the last
+ * runtime, a live session unless --force, an infra channel — its plist teardown is `remove`'s job);
+ * unprovision the memory slot and every capability for THIS runtime (occasion=remove); runtime cleanup
+ * (opencode: its core private dir; codex: cwd trust); park the cwd discovery markers (`.claude`/`.codex`
+ * and `.iapeer/runtimes/<rt>`) as `<name>.removed-<ts>` so re-provision does not rediscover the
+ * runtime — data is kept, nothing is deleted from the peer folder; drop it from the local profile
+ * (source of truth) and re-project the registry; purge the endpoint's lifecycle state.
+ */
+export async function removeRuntimeCli(
+  runtime: string,
+  opts: CliEnvOptions & { peer: string; force?: boolean },
+): Promise<RemoveRuntimeOutcome> {
+  const env = opts.env ?? process.env
+  const personality = opts.peer
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) throw new Error(`peer "${personality}" is not registered`)
+  if (!peer.runtimes.includes(runtime)) return { personality, runtime, action: 'absent', reason: `"${personality}" does not declare ${runtime}` }
+  if (isInfraRuntime(runtime)) {
+    return { personality, runtime, action: 'refused-infra', reason: `"${runtime}" is an always-on channel (launchd plist) — not supported by remove-runtime yet` }
+  }
+  if (peer.runtimes.length === 1) {
+    return { personality, runtime, action: 'refused-last', reason: `${runtime} is the only runtime of "${personality}" — use \`iapeer remove ${personality}\`` }
+  }
+  if (peer.runtime === runtime) {
+    return {
+      personality,
+      runtime,
+      action: 'refused-default',
+      reason: `${runtime} is the default runtime of "${personality}" — switch it first: iapeer default-runtime <other> --peer ${personality}`,
+    }
+  }
+  const cfg = loadLifecycleConfig(env)
+  const identity = buildProcessAddress(runtime as Runtime, personality)
+  const steps: string[] = []
+  if (isPeerLive(runtime, personality, cfg.sockDir, env)) {
+    if (!opts.force) {
+      return { personality, runtime, action: 'refused-live', reason: `${identity} is LIVE — stop it first (iapeer stop ${personality} ${runtime}) or pass --force` }
+    }
+    const { killPtyHost } = await import('../launch/ptyHost.ts')
+    killPtyHost(identity, env)
+    steps.push('live session stopped (--force)')
+  }
+  // Slots for THIS endpoint (provider + capabilities), while the peer's state is still consistent.
+  try {
+    const slot = readMemoryProvider(env)
+    if (slot?.unprovision) {
+      const { runProvisionCommand } = await import('../enable/provisionCommand.ts')
+      const o = runProvisionCommand({ block: slot.unprovision, cwd: peer.cwd, runtime, personality, occasion: 'remove', env })
+      steps.push(`memory unprovision: ${o.state}${o.state !== 'ok' && o.detail ? ` (${o.detail})` : ''}`)
+    }
+  } catch (e) {
+    steps.push(`memory unprovision: failed (${e instanceof Error ? e.message : String(e)})`)
+  }
+  try {
+    const { runCapabilityLifecycle } = await import('../capability/index.ts')
+    for (const run of runCapabilityLifecycle({ kind: 'unprovision', personality, cwd: peer.cwd, runtimes: [runtime], occasion: 'remove', env })) {
+      steps.push(`capability ${run.capability} unprovision: ${run.outcome.state}`)
+    }
+  } catch (e) {
+    steps.push(`capabilities: failed (${e instanceof Error ? e.message : String(e)})`)
+  }
+  if (runtime === 'opencode') {
+    const { opencodePaths } = await import('../opencode/config.ts')
+    const dir = opencodePaths(personality, { env }).dir
+    if (existsSync(dir)) {
+      rmSync(dir, { recursive: true, force: true })
+      steps.push(`opencode private dir removed: ${dir}`)
+    }
+  }
+  if (runtime === 'codex') {
+    try {
+      const { removeCodexCwdTrust } = await import('../launch/nativeMemory.ts')
+      steps.push(`codex cwd trust: ${removeCodexCwdTrust(peer.cwd, env).state}`)
+    } catch (e) {
+      steps.push(`codex cwd trust: failed (${e instanceof Error ? e.message : String(e)})`)
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '')
+  for (const marker of [join(peer.cwd, `.${runtime}`), join(peer.cwd, '.iapeer', 'runtimes', runtime)]) {
+    if (!existsSync(marker)) continue
+    const parked = `${marker}.removed-${stamp}`
+    renameSync(marker, parked)
+    steps.push(`marker parked (data kept): ${parked}`)
+  }
+  const profile = readPeerProfile(peer.cwd)
+  if (profile) {
+    writePeerProfileAtomic(peer.cwd, { ...profile, runtimes: profile.runtimes.filter(r => r !== runtime) })
+    steps.push('local profile: runtime removed')
+  }
+  const { reindexFromLocals } = await import('../identity/profileStandard.ts')
+  await reindexFromLocals({ env })
+  const purged = purgeIdentityState(cfg, identity)
+  if (purged.length) steps.push(`lifecycle state purged: ${purged.join(', ')}`)
+  return { personality, runtime, action: 'removed', steps }
+}
+
 export interface RemoveOutcome {
   personality: string
   action: 'removed' | 'absent' | 'refused-live' | 'refused-foreign-launchd'
@@ -1605,6 +1716,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'tray install|uninstall|render [--stream]|cmd <c> <peer>|approve <id>|deny <id> [reason]|status',
     desc: 'the macOS menu-bar fleet dashboard (SwiftBar plugin) — first external Fleet API client; renders the approval queue (badge + Allow/Deny), install activates it (installs SwiftBar when absent). See docs/16.',
   },
+  { sig: 'remove-runtime <runtime> --peer <p> [--force]', desc: 'detach ONE agentic runtime from a peer (the undo of add-runtime): unprovision memory + capabilities for it, runtime cleanup (opencode private dir, codex trust), park its cwd markers as *.removed-<ts> (data kept), drop it from the profile + registry, purge its lifecycle state. Refuses the default runtime, the last runtime, a live session (unless --force) and infra channels' },
   { sig: 'private-dir <peer> [--runtime r]', desc: 'print the core-owned private directory of a peer endpoint (docs/20: opencode journal/state/fragments). The ONLY way a process not launched by the core gets the path — never derive the layout. Without --runtime: the single declared runtime that has one. Exit 1 when none' },
   { sig: 'approval-mode <peer> [gated|yolo]', desc: 'read/flip a peer\'s human-approval mode (docs/17): yolo=current bypass; gated=blocking runtime approvals routed to a human. Persists + brings runtime surfaces to the mode; applies on next fresh session' },
   { sig: 'approvals [--json]', desc: 'list pending human-approval requests (verbatim action content); the host answer channel to the daemon broker' },
@@ -2309,6 +2421,15 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         }
         out(`${endpointPrivateDir(candidates[0]!, name, { env })}\n`)
         return 0
+      }
+      case 'remove-runtime': {
+        const rt = positionals[0]
+        const peerName = typeof flags.peer === 'string' ? flags.peer : undefined
+        if (!rt || !peerName) return argErr(errOut, 'remove-runtime needs a runtime and a peer — usage: iapeer remove-runtime <runtime> --peer <p> [--force]')
+        const o = await removeRuntimeCli(rt, { peer: peerName, force: flags.force === true, env })
+        out(`${o.personality}: ${o.runtime} ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        for (const step of o.steps ?? []) out(`  ${step}\n`)
+        return o.action === 'removed' || o.action === 'absent' ? 0 : 1
       }
       case 'default-runtime': {
         // The PRIMARY flip (routing/wake default) — the fleet-switch moment itself.

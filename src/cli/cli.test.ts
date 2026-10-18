@@ -354,6 +354,32 @@ describe('remove (registry record via the locked writer)', () => {
     expect(await runCli(['private-dir', 'ghost'], e)).toBe(1)
   })
 
+  test('remove-runtime: detaches ONE runtime (profile + registry + private dir + parked markers); refuses default/last/undeclared', async () => {
+    const e = { ...env(), HOME: join(root, 'home') }
+    const { initPeer } = await import('../init/index.ts')
+    const { removeRuntimeCli } = await import('./index.ts')
+    const cwd = join(root, 'duo')
+    mkdirSync(cwd, { recursive: true })
+    await initPeer({ cwd, runtime: 'claude', env: e })
+    await initPeer({ cwd, runtime: 'opencode', env: e })
+    const { opencodePaths } = await import('../opencode/config.ts')
+    mkdirSync(opencodePaths('duo', { env: e }).dir, { recursive: true })
+    expect(readPeersIndex({ env: e }).peers.find(p => p.personality === 'duo')!.runtimes).toContain('opencode')
+
+    expect((await removeRuntimeCli('claude', { peer: 'duo', env: e })).action).toBe('refused-default')
+    expect((await removeRuntimeCli('codex', { peer: 'duo', env: e })).action).toBe('absent')
+    const o = await removeRuntimeCli('opencode', { peer: 'duo', env: e })
+    expect(o.action).toBe('removed')
+    expect(readPeersIndex({ env: e }).peers.find(p => p.personality === 'duo')!.runtimes).toEqual(['claude'])
+    expect(existsSync(opencodePaths('duo', { env: e }).dir)).toBe(false)
+    expect(existsSync(join(cwd, '.iapeer', 'runtimes', 'opencode'))).toBe(false)
+    expect(readdirSync(join(cwd, '.iapeer', 'runtimes')).some(n => n.startsWith('opencode.removed-'))).toBe(true) // parked, not deleted
+    // re-provisioning the peer must NOT rediscover the removed runtime
+    await initPeer({ cwd, runtime: 'claude', env: e })
+    expect(readPeersIndex({ env: e }).peers.find(p => p.personality === 'duo')!.runtimes).toEqual(['claude'])
+    expect((await removeRuntimeCli('claude', { peer: 'duo', env: e })).action).toBe('refused-last')
+  })
+
   test('remove purges the OpenCode private state dir (outside the cwd)', async () => {
     await register('ocgone')
     const e = env()
