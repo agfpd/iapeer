@@ -648,12 +648,17 @@ export function resolveWakeMode(
   argsResume: boolean | undefined,
   resolveResume: (cwd: string) => { ok: boolean; ref?: string; reason?: string },
   incomingTopic?: string,
+  /** OC14-1 — marker CONSUMPTION is deferred to the caller: a failed bring-up must not change the
+   *  next resume/fresh decision (a crash-looping binary used to eat .idle-reaped, and after the fix the
+   *  peer came back FRESH, its context lost). Absent → consume immediately (legacy/test callers). */
+  defer?: (consume: () => void) => void,
 ): WakeMode {
+  const done = defer ?? ((f: () => void) => f())
   // 1. folder-launch → always fresh. Consume a standing .new-eager too — the mark's
   // promise ("next bring-up is FRESH") is fulfilled by this launch; leaving it would
   // leak an eager relaunch into a LATER, unrelated death.
   if (argsResume === false) {
-    clearNewEager(cfg, identity)
+    done(() => clearNewEager(cfg, identity))
     return { resume: false, cause: 'folder-launch' }
   }
   // 1.5 — a standing .new-eager OUTRANKS EVERYTHING below, including attach-resume
@@ -664,8 +669,8 @@ export function resolveWakeMode(
   // finds it must honor it. Consume-on-fire + clear .idle-reaped (mirror .fresh-next
   // hygiene: a stale clean-park marker must not make a later crash read as resume).
   if (hasNewEager(cfg, identity)) {
-    clearNewEager(cfg, identity)
-    clearIdleReaped(cfg, identity)
+    done(() => clearNewEager(cfg, identity))
+    done(() => clearIdleReaped(cfg, identity))
     return { resume: false, cause: 'self-fresh-eager' }
   }
   // 2. attach → resume, fail-loud if nothing to resume.
@@ -682,8 +687,8 @@ export function resolveWakeMode(
   // .fresh-next AND .idle-reaped (mirror the ephemeral hygiene below — else a stale .idle-reaped would make
   // a later CRASH read as a clean park in 3b → RESUME a killed context, exactly the 3a hazard).
   if (hasFreshNext(cfg, identity)) {
-    clearFreshNext(cfg, identity)
-    clearIdleReaped(cfg, identity)
+    done(() => clearFreshNext(cfg, identity))
+    done(() => clearIdleReaped(cfg, identity))
     return { resume: false, cause: 'soft-reload' }
   }
   // 3. default (a message woke a dead/asleep peer): decide by the death cause.
@@ -692,7 +697,7 @@ export function resolveWakeMode(
   // Consume a stray .idle-reaped marker so it does not accumulate (it has no effect for
   // an ephemeral peer, which never resumes, but keep state tidy).
   if (isEphemeralPeer(cwd)) {
-    clearIdleReaped(cfg, identity)
+    done(() => clearIdleReaped(cfg, identity))
     return { resume: false, cause: 'ephemeral-policy' }
   }
   // 3a. NOT parked-clean → FRESH either way, but tell the two cases apart in the
@@ -705,7 +710,7 @@ export function resolveWakeMode(
       : { resume: false, cause: 'first-wake' }
   }
   // 3b. idle-reaped → resume-eligible. Consume the marker now (it has done its job).
-  clearIdleReaped(cfg, identity)
+  done(() => clearIdleReaped(cfg, identity))
   // human-conversational dialogue never auto-freshes; only an explicit /new resets it.
   if (isHumanConversational(cwd)) {
     const r = resolveResume(cwd)
@@ -1107,7 +1112,27 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // by the death cause (.idle-reaped marker) + peer-type/topic. An EXPLICIT resume
     // that finds nothing to resume fails loud. incomingTopic (args.topic) is the
     // executor discriminator.
-    const mode = resolveWakeMode(cfg, identity, cwd, args.resume, c => adapter.resolveResume(c, { personality: args.personality, env }), args.topic)
+    // OC14-1 — marker consumption is applied only once the session is actually up (see below): a
+    // failed bring-up leaves .idle-reaped / .fresh-next / .new-eager intact for the next attempt.
+    const consumeOnUp: Array<() => void> = []
+    const mode = resolveWakeMode(
+      cfg,
+      identity,
+      cwd,
+      args.resume,
+      c => adapter.resolveResume(c, { personality: args.personality, env }),
+      args.topic,
+      f => consumeOnUp.push(f),
+    )
+    const applyConsumed = (): void => {
+      for (const f of consumeOnUp.splice(0)) {
+        try {
+          f()
+        } catch {
+          /* best-effort marker hygiene — never fails a wake */
+        }
+      }
+    }
     // The bring-up decision is the durable trace — log it BEFORE launch (the decision
     // stands regardless of whether the subsequent launch succeeds). resolveWakeMode has
     // already consumed any .idle-reaped marker, so `cause` is now its only record.
@@ -1193,6 +1218,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       // must still hear FAILED; we only make the live remnant supervised. Best-effort: a write
       // hiccup must not mask the original FAILED reason.
       if (sessionAlive(sock, identity, env)) {
+        applyConsumed() // a live remnant IS this bring-up's session — its markers are spent
         try {
           writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
         } catch { /* keep the original FAILED reason — enroll is best-effort */ }
@@ -1207,6 +1233,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       }
       return { status: 'FAILED', woke: false, runtime, reason: result.reason }
     }
+    applyConsumed()
     // The session is up and the message delivered. Recording supervise-state must not
     // turn a successful wake into a failure (audit #18): log loudly rather than throw
     // past a live spawn. NB since 0.2.55 (self-TTL removed) the session-state file IS

@@ -560,6 +560,30 @@ describe('resolveWakeMode (TARGET: death-cause + peer-type/topic)', () => {
     expect(resolveWakeMode(cfg(), 'claude-p', cwd(), true, hasTranscript)).toEqual({ resume: true, resumeRef: 'uuid-1', cause: 'attach' })
   })
 
+  // OC14-1 (linus): a FAILED bring-up must not change the next resume/fresh decision.
+  test('deferred consumption: the decision is the same on every retry until the bring-up succeeds', () => {
+    const c = cfg()
+    setIdleReaped(c, 'claude-p')
+    const dir = cwd()
+    const pending: Array<() => void> = []
+    const first = resolveWakeMode(c, 'claude-p', dir, undefined, hasTranscript, 'thread-a', f => pending.push(f))
+    expect(hasIdleReaped(c, 'claude-p')).toBe(true) // NOT consumed — the launch has not succeeded
+    pending.length = 0 // the launch failed: drop the deferred consumption
+    const retry = resolveWakeMode(c, 'claude-p', dir, undefined, hasTranscript, 'thread-a', f => pending.push(f))
+    expect(retry.cause).toBe(first.cause) // same decision on the retry (was: crash-or-self-close → fresh)
+    for (const f of pending) f() // the retry succeeded
+    expect(hasIdleReaped(c, 'claude-p')).toBe(false)
+  })
+  test('deferred consumption also keeps .fresh-next and .new-eager until a successful bring-up', () => {
+    const c = cfg()
+    setNewEager(c, 'claude-p')
+    const pending: Array<() => void> = []
+    expect(resolveWakeMode(c, 'claude-p', cwd(), undefined, hasTranscript, undefined, f => pending.push(f)).cause).toBe('self-fresh-eager')
+    expect(hasNewEager(c, 'claude-p')).toBe(true)
+    for (const f of pending) f()
+    expect(hasNewEager(c, 'claude-p')).toBe(false)
+  })
+
   // ── branch 1.5: a standing .new-eager OUTRANKS everything (live incident 03.07:
   // an orphaned self-fresh was then ATTACH-resumed onto the old context) ──────────
   test('.new-eager + attach → FRESH (self-fresh-eager outranks attach-resume), mark consumed', () => {
