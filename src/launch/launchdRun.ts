@@ -165,7 +165,7 @@ export async function runAlwaysOn(personality: string, runtime: string, cwd: str
   // kill the supervisor daemon (SIGTERM → hard teardown of its PTY-owned tree + sock/pid/serve cleanup)
   // so the detached child does not outlive bootout holding stale in-memory state. A NATURAL death
   // (stop=false) skips this: nothing to tear down, exit 0 → KeepAlive respawns a fresh bring-up.
-  if (stop) killPtyHost(identity, env)
+  if (stop) killPtyHost(identity, env, { reason: 'run-infra-shutdown' })
   return 0
 }
 

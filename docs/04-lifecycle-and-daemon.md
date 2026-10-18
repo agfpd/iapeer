@@ -23,11 +23,12 @@ Once a minute the daemon runs a supervisory pass. In one tick it sleeps agents i
 
 ## Peer states
 
-A claude/codex agent is, at any moment, in one of three states:
+A hosted agent is, at any moment, in one of four states:
 
 | State | What it means | Marker in `iapeer list` |
 |---|---|---|
 | **alive** | the session is running and answering | `●` |
+| **booting** | the supervisor is up, but this runtime hosting has not passed readiness | `◐` |
 | **asleep** | no session, the peer is ready to wake on a message | `○` |
 | **stopped** | the operator set a stop flag; the daemon won't wake it | `✕` |
 
@@ -101,6 +102,24 @@ So `stop`, `start`, `new` refuse to touch foreign launchd peers — for those th
 ### Process ownership at teardown
 
 Closing a hosted session is a **hard teardown**, not the MCP client's graceful stdin/EOF shutdown.
+Core-controlled termination first fsyncs a write-ahead `termination-request` (or a multi-target
+`termination-batch`) to `<supervisorRunDir>/terminations.log`, with caller identity/UID, caller PID
+and parent PID, target identity/PID/start token and reason. Failure to persist the audit refuses the
+signal. Stop-all, uninstall and infra-update record their scope before the first termination.
+Signals from external programs bypass this primitive: `shutdown-sigterm` in `exits.log` alone does
+not identify their sender. The supervisor's JavaScript signal handler cannot recover that attribution.
+
+The supervision process namespace is bound to `LifecycleConfig.supervisorRunDir`, not re-resolved
+from an invocation's environment. A partial config without that path uses a private subdirectory of
+its own `stateDir`. Under `IAPEER_TEST_SANDBOX=1`, the signal primitive also refuses the real host's
+supervisor run-dir (including symlink aliases).
+
+Readiness is specific to one hosting token. A never-ready process is not deliverable, even if its
+TTY echoes input. The launcher tears it down on its readiness deadline; a later message can replace
+an abandoned never-ready hosting under the wake lock. Process-control verbs can still address it.
+Migration of existing agent sessions checks their current host emulator (or native control ping),
+not old pane-log bytes and not merely a live PID.
+
 Before killing the runtime, the supervisor snapshots its descendants and kills those still attached
 to its controlling PTY, including stdio MCP launchers in separate process groups. Each PID's start
 token and terminal are re-checked before signalling; unrelated processes and detached daemon branches

@@ -12,7 +12,7 @@
 // peer row hands off to `iapeer attach`, the terminal-handoff the API deliberately
 // keeps client-side).
 
-const GLYPH: Record<'live' | 'asleep' | 'stopped', string> = { live: '●', asleep: '○', stopped: '✕' }
+const GLYPH: Record<'live' | 'booting' | 'asleep' | 'stopped', string> = { live: '●', booting: '◐', asleep: '○', stopped: '✕' }
 
 const COLOR = {
   meta: '#8b949e',
@@ -31,7 +31,7 @@ const APPROVAL_CONTENT_MAX_CHARS = 8000
 
 export interface TrayRuntime {
   runtime: string
-  status: 'live' | 'asleep' | 'stopped'
+  status: 'live' | 'booting' | 'asleep' | 'stopped'
   attached?: boolean
 }
 
@@ -134,13 +134,14 @@ export function fmtClock(now: number): string {
 
 // ── peer status aggregation ─────────────────────────────────────────────────────
 
-function aggregate(p: TrayPeer): 'live' | 'asleep' | 'stopped' {
+function aggregate(p: TrayPeer): 'live' | 'booting' | 'asleep' | 'stopped' {
   if (p.runtimes.some(r => r.status === 'live')) return 'live'
+  if (p.runtimes.some(r => r.status === 'booting')) return 'booting'
   if (p.runtimes.some(r => r.status === 'asleep')) return 'asleep'
   return 'stopped'
 }
 
-const RANK: Record<'live' | 'asleep' | 'stopped', number> = { live: 0, asleep: 1, stopped: 2 }
+const RANK: Record<'live' | 'booting' | 'asleep' | 'stopped', number> = { live: 0, booting: 1, asleep: 2, stopped: 3 }
 
 // 🔒 launchd-managed peers (the human channel + service infra — arthur/timer/watcher) are
 // NON-clickable status rows. They form ONE contiguous block at the very TOP, before the first

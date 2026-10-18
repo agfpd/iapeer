@@ -31,6 +31,8 @@ import {
 import { buildProcessAddress } from '../core/socket.ts'
 import { peerLogsDir } from '../storage/index.ts'
 import { IapError } from '../core/errors.ts'
+import { auditTermination } from '../supervisor/index.ts'
+import { defaultRunDir } from '../supervisor/paths.ts'
 
 const DEFAULT_THROTTLE_SECS = 10
 
@@ -556,6 +558,7 @@ export function cycleLaunchdJob(
   const uid = currentUid()
   return cycleLaunchdJobCore(uid, label, plistPath, {
     run: args => {
+      if (args[0] === 'bootout') auditTermination(defaultRunDir(env), [label], { reason: 'launchd-cycle', caller: env.PEER_IDENTITY })
       const r = spawnSync('launchctl', args, { encoding: 'utf8' })
       return { status: r.status, stderr: r.stderr ?? '' }
     },
@@ -610,6 +613,7 @@ export function bootoutLaunchdJob(label: string, env: NodeJS.ProcessEnv = proces
   }
   const uid = currentUid()
   if (!isLaunchdLoaded(label, uid)) return { state: 'not-loaded' }
+  auditTermination(defaultRunDir(env), [label], { reason: 'launchd-bootout', caller: env.PEER_IDENTITY })
   const r = spawnSync('launchctl', ['bootout', `gui/${uid}/${label}`], { encoding: 'utf8' })
   return r.status === 0 ? { state: 'booted-out' } : { state: 'failed', detail: (r.stderr ?? '').trim() || `exit ${r.status}` }
 }

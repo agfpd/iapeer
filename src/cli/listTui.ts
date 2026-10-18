@@ -12,7 +12,7 @@ import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the su
 import { runSupervisorClient } from '../supervisor/client.ts'
 import { listPeers, type PeerListing } from './index.ts'
 
-const GLYPH: Record<'live' | 'asleep' | 'stopped', string> = { live: '●', asleep: '○', stopped: '✕' }
+const GLYPH: Record<'live' | 'booting' | 'asleep' | 'stopped', string> = { live: '●', booting: '◐', asleep: '○', stopped: '✕' }
 
 // ─── pure render ─────────────────────────────────────────────────────────────
 

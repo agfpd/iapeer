@@ -98,6 +98,7 @@ describe('implicit runtime routing — default_runtime overrides live non-defaul
     mkdirSync(hostRunDir(process.env), { recursive: true })
     writeFileSync(sock, '')
     writeFileSync(pid, String(process.pid))
+    writeFileSync(join(hostRunDir(process.env), `${runtime}-${MULTI_TARGET}.ready`), `host:${process.pid}`)
   }
   const clear = (runtime: string): void => {
     for (const path of sessionFiles(runtime)) {

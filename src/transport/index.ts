@@ -53,6 +53,7 @@ import {
   hostGeometry,
   hostRunDir,
   hostSessionAlive,
+  hostSessionReady,
   hostSessionToken,
   listHostedPeers,
   resubmitHosted,
@@ -103,22 +104,29 @@ function monotonicMs(): number {
 }
 
 function sessionAlive(_sock: string, address: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  // pty-only: a peer's liveness is its supervisor daemon (a cheap pid-file check). `address` IS the
-  // identity. (`_sock` is retained for call-site compatibility; tmux sockets no longer exist.)
-  // env sandboxes the run-dir — an env-injected verb must not read the real fleet's liveness.
-  return hostSessionAlive(address, env)
+  // DELIVERY liveness = the hosting is alive AND its runtime reached its ready surface (incident
+  // 18.10: a codex hung before main lived under a healthy supervisor and took a message with a false
+  // ok). A not-yet-ready session routes as a MISS → the wake path, which waits on the in-flight
+  // bring-up (wake.lock) or replaces a failed one. `address` IS the identity; `_sock` is legacy.
+  return hostSessionReady(address, env)
 }
 
-/** Is the (runtime,personality) endpoint live right now? Public liveness predicate. */
-export function isPeerLive(runtime: string, personality: string, sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): boolean {
-  const socketPath = buildSocketPath(runtime, personality, sockDir)
-  return sessionAlive(socketPath, buildProcessAddress(runtime, personality), env)
+/** Is the (runtime,personality) endpoint's PROCESS up right now (ready or not)? The operator-verb
+ *  guard (stop/remove/rename must still reach a hung process) — NOT a delivery predicate. */
+export function isPeerLive(runtime: string, personality: string, _sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): boolean {
+  return hostSessionAlive(buildProcessAddress(runtime, personality), env)
+}
+
+/** Is the endpoint up AND its runtime ready (accepts input)? — what `list` shows as ●. */
+export function isPeerReady(runtime: string, personality: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return hostSessionReady(buildProcessAddress(runtime, personality), env)
 }
 
 export function listOnlinePeers(_sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): OnlinePeer[] {
   // pty-only: every live peer is a supervisor-hosted session (no tmux sockets to scan).
   const out = new Map<string, OnlinePeer>()
   for (const h of listHostedPeers(env)) {
+    // Operator discovery includes booting/hung processes so interrupt/stop can still address them.
     out.set(buildProcessAddress(h.runtime, h.personality), { personality: h.personality, runtime: h.runtime })
   }
   return Array.from(out.values()).sort(
@@ -132,6 +140,8 @@ export function resolveDeliveryTarget(args: {
   sockDir?: string
   /** Б7 — injected env sandboxes the liveness reads (supervisor run-dir); default process.env (prod). */
   env?: NodeJS.ProcessEnv
+  /** Operator control can address a hung/booting process; delivery cannot. */
+  processOnly?: boolean
 }): Result<DeliveryTarget> {
   const env = args.env ?? process.env
   const sockDir = args.sockDir ?? resolveSockDir(env)
@@ -143,12 +153,13 @@ export function resolveDeliveryTarget(args: {
     const runtime = args.runtime
     const socketPath = buildSocketPath(runtime, args.personality, sockDir)
     const address = buildProcessAddress(runtime, args.personality)
-    if (!sessionAlive(socketPath, address, env)) {
+    if (!(args.processOnly ? hostSessionAlive(address, env) : sessionAlive(socketPath, address, env))) {
       return err(`peer offline: ${args.personality} (${args.runtime})`)
     }
     return ok({ runtime, personality: args.personality, address, socketPath })
   }
-  const matches = listOnlinePeers(sockDir, env).filter(peer => peer.personality === args.personality)
+  const matches = listOnlinePeers(sockDir, env).filter(peer => peer.personality === args.personality &&
+    (args.processOnly || hostSessionReady(buildProcessAddress(peer.runtime, peer.personality), env)))
   if (matches.length === 0) return err(`peer offline: ${args.personality}`)
   if (matches.length > 1) {
     return err(
@@ -1220,13 +1231,13 @@ export interface ControlResult {
  * live endpoints stays ambiguous → explicit refusal. An explicit runtime is exact.
  */
 export function resolveControlTarget(personality: string, runtime: string | undefined, env: NodeJS.ProcessEnv = process.env): Result<DeliveryTarget> {
-  if (runtime) return resolveDeliveryTarget({ personality, runtime, env })
+  if (runtime) return resolveDeliveryTarget({ personality, runtime, env, processOnly: true })
   const peer = findPeer(readPeersIndex({ env }), personality)
   if (peer) {
-    const anchored = resolveDeliveryTarget({ personality, runtime: peer.runtime, env })
+    const anchored = resolveDeliveryTarget({ personality, runtime: peer.runtime, env, processOnly: true })
     if (anchored.ok) return anchored
   }
-  return resolveDeliveryTarget({ personality, env })
+  return resolveDeliveryTarget({ personality, env, processOnly: true })
 }
 
 export async function routeControl(personality: string, runtime: string | undefined, command: ControlCommand): Promise<Result<ControlResult>> {

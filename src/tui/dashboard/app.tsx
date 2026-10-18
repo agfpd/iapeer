@@ -23,8 +23,8 @@ const POLL_MS = 2000
 const HOST_POLL_MS = 10_000
 const LOG_LIMIT = 12
 
-const STATUS_GLYPH: Record<RuntimeLiveness, string> = { live: '●', asleep: '○', stopped: '✕' }
-const STATUS_COLOR: Record<RuntimeLiveness, string | undefined> = { live: 'green', asleep: undefined, stopped: 'red' }
+const STATUS_GLYPH: Record<RuntimeLiveness, string> = { live: '●', booting: '◐', asleep: '○', stopped: '✕' }
+const STATUS_COLOR: Record<RuntimeLiveness, string | undefined> = { live: 'green', booting: 'yellow', asleep: undefined, stopped: 'red' }
 
 function RuntimeCells({ row }: { row: PeerListing }): React.ReactElement {
   return (

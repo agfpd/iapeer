@@ -232,6 +232,10 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
   dies with the turn unfinished, the sender gets an explicit notice from iapeer
   («the turn was INTERRUPTED and its result is not guaranteed»), logged as
   `ev=inflight-interrupted`.
+  Several messages injected into one unfinished hosting are summarized in one notice per original
+  sender endpoint, listing every affected delivery; different hosting tokens and senders remain
+  separate. An outbound reply alone is not a terminal boundary. Completed native turns are removed
+  from the ledger before notification grouping, so destroying a finished session emits no notice.
 - Unknown is not failed. When a live receiver's acceptance record does not appear
   within the confirm window (a busy claude records a queued message late), the
   send returns `ok` with `unconfirmed: true` instead of «NOT delivered» — the

@@ -82,7 +82,8 @@ export const FLEET_API_VERSION = 1
 
 export interface FleetRuntimeStatus {
   runtime: string
-  status: 'live' | 'asleep' | 'stopped'
+  /** `booting` — process up, runtime not (yet / ever) ready: not deliverable (18.10). */
+  status: 'live' | 'booting' | 'asleep' | 'stopped'
   /** AGENT-ENDPOINT discovery (docs/15 §Agent endpoints): true iff this declared runtime is an
    *  agent runtime THIS core can host (`host.agent_runtimes`). A channel offers exactly the
    *  `agent:true` runtimes of a personality — never a consumer-side hardcode or `Bun.which`.

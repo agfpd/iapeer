@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, statSync } from 'fs'
 import { dirname } from 'path'
 import { type Runtime } from '../core/constants.ts'
 import { buildLaunchInvocation } from './invocation.ts'
-import { deliverHosted, hostSessionAlive, startPtyHost, waitHostReady } from './ptyHost.ts'
+import { deliverHosted, hostSessionAlive, hostSessionToken, killPtyHost, markHostReady, startPtyHost, waitHostReady } from './ptyHost.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
@@ -236,15 +236,24 @@ export const launch: LaunchFn = async (
       // router's <iap>-marker stdin reader). So confirm the hosted session is live and return ready —
       // no waitHostReady (would load @xterm for nothing), no first-message deliver, no ready-gate.
       if (adapter.kind === 'router') {
-        if (hostSessionAlive(identity, env)) return ready(identity)
+        if (hostSessionAlive(identity, env)) {
+          markHostReady(identity, env) // a router is up the instant its child serves
+          return ready(identity)
+        }
         return fail(identity, 'hosted router session not alive immediately after bringup')
       }
+      const hostingToken = hostSessionToken(identity, env)
       // STRUCTURAL runtime (opencode): readiness = the runtime's own ready record for THIS launch, and
       // the first message goes through the adapter's deliver, whose ack means THIS message is persisted
       // natively (a durable native queue) — so there is no pane gate and no activity ready-gate.
       if (adapter.structuralReady && readyToken) {
         const r = await adapter.structuralReady(spec, readyToken, Date.now() + cfg.bootDeadlineSecs * 1000, () => hostSessionAlive(identity, env), env)
-        if (!r.ok) return fail(identity, `never-became-ready (structural: ${r.reason ?? 'unknown'})`)
+        if (!r.ok) {
+          // A bring-up that never reached ready must not linger as a live-looking host (incident 18.10).
+          killPtyHost(identity, env, { reason: 'launch-structural-never-ready' })
+          return fail(identity, `never-became-ready (structural: ${r.reason ?? 'unknown'})`)
+        }
+        markHostReady(identity, env, hostingToken)
         for (const w of r.warnings ?? []) {
           if (!loggedWarnings.has(w)) appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: w }, { env })
         }
@@ -261,7 +270,15 @@ export const launch: LaunchFn = async (
         { identity, logDir: cfg.logDir, adapter, bootDeadlineSecs: cfg.bootDeadlineSecs, paneLogStartByte, approvalMode: spec.approvalMode, env },
         sleep,
       )
-      if (!isReady) return fail(identity, 'never-became-ready (hosted: supervisor input surface not ready)')
+      if (!isReady) {
+        // Tear the host down: a process that never painted its input surface (hung before main —
+        // codex in dyld, 18.10) otherwise lived on under a healthy supervisor, read as ● by list and
+        // «live» by delivery, and swallowed a message with a false ok. Gone, the ledger redelivers its
+        // entries to the next session.
+        killPtyHost(identity, env, { reason: 'launch-never-ready' })
+        return fail(identity, 'never-became-ready (hosted: supervisor input surface not ready)')
+      }
+      markHostReady(identity, env, hostingToken)
       if (firstMessage.trim().length === 0) return ready(identity) // bare bring-up — no message to deliver
       // В18 — snap the ready-gate baseline AFTER boot, not before. newestActivityMtime is a raw
       // transcript-file mtime that BOOT ITSELF advances: codex writes its rollout-jsonl on start,

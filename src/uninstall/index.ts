@@ -226,9 +226,12 @@ async function waitJobGone(run: SysRunner, uid: number, label: string, timeoutMs
  *  wait for its pidfile-liveness to drop). Best-effort per session; reports laggards. */
 async function stopHostedSessions(env: NodeJS.ProcessEnv, timeoutMs = 8000): Promise<{ stopped: string[]; stuck: string[] }> {
   const identities = listHostedPeers(env).map(h => buildProcessAddress(h.runtime, h.personality))
+  const { auditTermination } = await import('../supervisor/index.ts')
+  const { hostRunDir } = await import('../launch/ptyHost.ts')
+  if (identities.length) auditTermination(hostRunDir(env), identities, { reason: 'uninstall-hosted-sessions', caller: env.PEER_IDENTITY, sandbox: env.IAPEER_TEST_SANDBOX === '1' })
   for (const id of identities) {
     try {
-      killPtyHost(id, env)
+      killPtyHost(id, env, { reason: 'uninstall-hosted-sessions' })
     } catch {
       /* verified-dead / permission — the wait below reports it */
     }
@@ -258,6 +261,10 @@ export async function executeUninstall(opts: UninstallOptions = {}): Promise<Uni
   }
 
   const uid = process.getuid?.() ?? 0
+  const { auditTermination } = await import('../supervisor/index.ts')
+  const { hostRunDir } = await import('../launch/ptyHost.ts')
+  const targets = plan.items.filter(i => i.present && i.action === 'bootout-remove-plist').map(i => i.path ?? i.what)
+  if (targets.length) auditTermination(hostRunDir(env), targets, { reason: 'uninstall', caller: env.PEER_IDENTITY, sandbox: env.IAPEER_TEST_SANDBOX === '1' })
   // Set when a launchd job survived bootout (В56) — ~/.iapeer must NOT be removed
   // from under a job launchd may respawn (KeepAlive) into the deleted tree.
   let jobStillLoaded: string | undefined

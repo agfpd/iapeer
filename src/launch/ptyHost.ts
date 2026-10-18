@@ -10,11 +10,12 @@
 //   - the deliver client is a pure-protocol leaf (no @xterm);
 //   - sessionAlive comes from client.ts (no @xterm);
 //   - readiness reuses paneLogViewport, whose @xterm import is dynamic and only loads flag-on.
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { deliverToHost, sendControlToHost, type DeliverResult } from '../supervisor/deliver.ts'
 import { attachedPath, defaultRunDir, pidPath, readGeometry } from '../supervisor/paths.ts'
 import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
-import { killSession as killSupervisorSession, listSessions as listSupervisorSessions } from '../supervisor/index.ts'
+import { killSession as killSupervisorSession, listSessions as listSupervisorSessions, type TerminationContext } from '../supervisor/index.ts'
 import { parseSessionName } from '../core/socket.ts'
 import type { TmuxRuntime } from '../core/constants.ts'
 import { paneLogViewport } from './readyGateModel.ts'
@@ -45,10 +46,83 @@ export function hostSessionAlive(identity: string, env: NodeJS.ProcessEnv = proc
   return hostDaemonAlive(hostRunDir(env), identity)
 }
 
+// ─── Runtime READINESS (incident 18.10) ──────────────────────────────────────
+// «Alive» (the supervisor daemon's pid) is not «the runtime is up». A codex process hung before main
+// (dyld, after a cask update) lived under a healthy supervisor for 35 min: `list` showed ●, a send
+// went «live» and was confirmed ok (the cooked tty echoed the paste into the pane-log), and the ledger
+// held the message as in-progress. The invariant: a session that never reached its runtime's ready
+// surface is NOT live for delivery/list. Operator controls still address the hung process.
+// The launch writes this marker (the hosting token) the moment its ready-gate passes; a marker from
+// another hosting (a replaced session) does not count.
+
+function readyPath(identity: string, env: NodeJS.ProcessEnv): string {
+  return join(hostRunDir(env), `${identity}.ready`)
+}
+
+/** Record that THIS hosting of the identity reached its runtime's ready surface. */
+export function markHostReady(identity: string, env: NodeJS.ProcessEnv = process.env, token = hostSessionToken(identity, env)): void {
+  if (!token || token !== hostSessionToken(identity, env)) throw new Error(`hosting changed before ready: ${identity}`)
+  writeFileSync(readyPath(identity, env), `${token}\n`, { mode: 0o600 })
+}
+
+export function clearHostReady(identity: string, env: NodeJS.ProcessEnv = process.env): void {
+  rmSync(readyPath(identity, env), { force: true })
+}
+
+/** When this hosting started (its supervisor pid-file mtime), or null. */
+export function hostStartedMs(identity: string, env: NodeJS.ProcessEnv = process.env, runDir = hostRunDir(env)): number | null {
+  try {
+    return statSync(pidPath(runDir, identity)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
+/** Alive AND this very hosting reached ready. */
+export function hostSessionReady(identity: string, env: NodeJS.ProcessEnv = process.env, runDir = hostRunDir(env)): boolean {
+  if (!hostDaemonAlive(runDir, identity)) return false
+  const token = hostSessionToken(identity, env, runDir)
+  try {
+    return !!token && readFileSync(join(runDir, `${identity}.ready`), 'utf8').trim() === token
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One-time compatibility for sessions that were already running when the readiness marker was
+ * introduced. Prove readiness in each current host, without trusting historical pane-log frames.
+ */
+export async function backfillHostReady(env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
+  const out: string[] = []
+  for (const h of listHostedPeers(env)) {
+    const id = `${h.runtime}-${h.personality}`
+    if (existsSync(readyPath(id, env))) continue
+    const token = hostSessionToken(id, env)
+    // Migration must prove readiness too: blindly stamping legacy pids re-labels a dyld hang as live.
+    const { getAdapter } = await import('./index.ts')
+    const adapter = getAdapter(h.runtime)
+    if (h.runtime === 'opencode') {
+      const { opencodeControl } = await import('../opencode/control.ts')
+      const { opencodePaths } = await import('../opencode/config.ts')
+      const ping = await opencodeControl(join(opencodePaths(h.personality, { env }).dir, 'control.sock'), { op: 'ping' }, 1000)
+      if (!ping.ok) continue
+    } else if (adapter.kind !== 'router') {
+      const { captureHostViewport } = await import('../supervisor/capture.ts')
+      const view = await captureHostViewport(hostRunDir(env), id)
+      if (!view || !adapter.isInputReady(view, 'gated')) continue
+    }
+    markHostReady(id, env, token)
+    out.push(id)
+  }
+  return out
+}
+
 /** Reap a hosted session: SIGTERM the supervisor daemon (hard-kills its PTY-owned tree + cleans up).
  *  env sandboxes the run-dir: a test with an injected root must NEVER SIGTERM a real fleet peer. */
-export function killPtyHost(identity: string, env: NodeJS.ProcessEnv = process.env): void {
-  killSupervisorSession(hostRunDir(env), identity)
+export function killPtyHost(identity: string, env: NodeJS.ProcessEnv = process.env, context: TerminationContext = {}, runDir = hostRunDir(env)): void {
+  killSupervisorSession(runDir, identity, { ...context, sandbox: context.sandbox || env.IAPEER_TEST_SANDBOX === '1',
+    caller: context.caller ?? env.PEER_IDENTITY ?? (env.PEER_PERSONALITY ? `${env.PEER_RUNTIME ?? 'unknown'}-${env.PEER_PERSONALITY}` : undefined) })
 }
 
 /**
@@ -78,9 +152,9 @@ export function hostGeometry(identity: string, env: NodeJS.ProcessEnv = process.
  * session FAILS rather than landing in a fresh same-named session — the host equivalent of the tmux
  * `session_id:pane_id` token. null when no daemon pid is readable.
  */
-export function hostSessionToken(identity: string, env: NodeJS.ProcessEnv = process.env): string | null {
+export function hostSessionToken(identity: string, env: NodeJS.ProcessEnv = process.env, runDir = hostRunDir(env)): string | null {
   try {
-    const pid = readFileSync(pidPath(hostRunDir(env), identity), 'utf8').trim()
+    const pid = readFileSync(pidPath(runDir, identity), 'utf8').trim()
     return pid ? `host:${pid}` : null
   } catch {
     return null
@@ -93,9 +167,9 @@ export function hostSessionToken(identity: string, env: NodeJS.ProcessEnv = proc
  * scan (and the no-runtime delivery resolve) include hosted peers. Empty + cheap when flag-off (the
  * run-dir is empty).
  */
-export function listHostedPeers(env: NodeJS.ProcessEnv = process.env): Array<{ runtime: TmuxRuntime; personality: string }> {
+export function listHostedPeers(env: NodeJS.ProcessEnv = process.env, runDir = hostRunDir(env)): Array<{ runtime: TmuxRuntime; personality: string }> {
   const out: Array<{ runtime: TmuxRuntime; personality: string }> = []
-  for (const s of listSupervisorSessions(hostRunDir(env))) {
+  for (const s of listSupervisorSessions(runDir)) {
     if (!s.alive) continue
     const p = parseSessionName(s.session)
     if (p) out.push({ runtime: p.runtime, personality: p.personality })
@@ -205,4 +279,18 @@ export function deliverHosted(identity: string, message: string, env: NodeJS.Pro
  */
 export function resubmitHosted(identity: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
   return sendControlToHost(hostRunDir(env), identity, [Buffer.from('\r', 'utf8')])
+}
+
+/** Run backfillHostReady exactly once per host (sentinel in the run-dir). Every later hosting is a
+ *  launch that writes its own marker, so a repeat backfill could only mask a never-ready host. */
+export async function backfillHostReadyOnce(env: NodeJS.ProcessEnv = process.env): Promise<string[] | null> {
+  const sentinel = join(hostRunDir(env), 'ready-backfill.v1')
+  if (existsSync(sentinel)) return null
+  const stamped = await backfillHostReady(env)
+  try {
+    writeFileSync(sentinel, `${new Date().toISOString()} ${stamped.join(',')}\n`, { mode: 0o600 })
+  } catch {
+    /* best-effort */
+  }
+  return stamped
 }

@@ -51,7 +51,8 @@ import {
   type LaunchSpec,
 } from '../launch/index.ts'
 import { composeSystemPrompt, gatherPromptInput } from '../launch/composeSystemPrompt.ts'
-import { hostSessionAlive, killPtyHost } from '../launch/ptyHost.ts'
+import { hostSessionAlive, hostSessionReady, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
+import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +60,8 @@ import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface LifecycleConfig {
+  /** Process-control namespace, bound when cfg is loaded; never re-resolve it from deps.env. */
+  supervisorRunDir?: string
   claudeBin: string
   codexBin: string
   /** OpenCode native binary (docs/20). Optional so hand-built test configs stay valid. */
@@ -110,6 +113,7 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
     return Number.isFinite(n) && n > 0 ? n : dflt
   }
   return {
+    supervisorRunDir: join(root, STATE_DIR, 'supervisor'),
     claudeBin: env.IAPEER_CLAUDE_BIN ?? join(home, '.local', 'bin', 'claude'),
     codexBin: env.IAPEER_CODEX_BIN ?? 'codex',
     // The official installer's location is not on launchd's PATH; prefer it over a bare name.
@@ -1096,6 +1100,17 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     }
     // Idempotent fast path inside the lock: a live session wins (a concurrent
     // wake already brought it up) — no second spawn.
+    // ALIVE but NOT READY while we hold the wake lock = no bring-up is in flight for it, yet it never
+    // reached its ready surface (a hung-before-main process, an abandoned bring-up). Not a session —
+    // replace it rather than report READY into a process that will never take input (18.10).
+    if (sessionAlive(sock, identity, env) && !hostSessionReady(identity, env)) {
+      killPtyHost(identity, env, { reason: 'wake-replace-never-ready' })
+      logWake({ identity, runtime, mode: 'replace', cause: 'alive-never-ready' })
+      // SIGTERM is asynchronous — wait (bounded) for the host to be gone, so the fast path below does
+      // not read the dying process as the live winner.
+      for (let i = 0; i < 25 && sessionAlive(sock, identity, env); i++) await new Promise(r => setTimeout(r, 200))
+      if (sessionAlive(sock, identity, env)) return { status: 'FAILED', woke: false, runtime, reason: 'never-ready host did not terminate; retry after recovery' }
+    }
     if (sessionAlive(sock, identity, env)) {
       writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
       // taskDelivered:false — the winning concurrent wake delivered ITS OWN task as
@@ -1302,12 +1317,12 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
 // Reap — kill a session (used by idle-reap / supervise; H4-guarded by callers)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function killSession(_sock: string, identity: string, env: NodeJS.ProcessEnv = process.env): void {
+export function killSession(_sock: string, identity: string, env: NodeJS.ProcessEnv = process.env, reason = 'lifecycle-kill'): void {
   // pty-only: SIGTERM the supervisor daemon — its shutdown kills the PTY-owned tree and removes the
   // sock/pid/serve-spec/markers. Idempotent if the session is already gone. (`_sock` retained for
   // call-site compatibility; no tmux sockets exist.) env sandboxes the run-dir — a test with an
   // injected root must NEVER SIGTERM a real fleet peer's supervisor.
-  killPtyHost(identity, env)
+  killPtyHost(identity, env, { reason })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1348,6 +1363,9 @@ export interface SuperviseDeps {
   /** Liveness seam (default: the real `sessionAlive` = pty-host pid-file check). Tests inject a fixed
    *  verdict so the idle path is exercised hermetically — no live pty session needed. */
   sessionAlive?: (sock: string, identity: string) => boolean
+  /** Readiness seam (default: launch's ready marker for THIS hosting; with only sessionAlive injected,
+   *  ready ≡ alive). */
+  sessionReady?: (identity: string) => boolean
   /** Reap seam (default: the real `killSession` = SIGTERM the supervisor daemon). Tests inject a no-op
    *  so exercising the reap path NEVER SIGTERMs a real process — the destructive-kill isolation guard. */
   killSession?: (sock: string, identity: string) => void
@@ -1361,7 +1379,9 @@ interface SuperviseCtx {
   lastTurnMt: (runtime: string, cwd: string, personality?: string) => number | null
   childActivityMt: (runtime: string, cwd: string) => number | null
   isAlive: (sock: string, identity: string) => boolean
-  kill: (sock: string, identity: string) => void
+  /** Has THIS hosting reached its runtime's ready surface (launch's ready marker)? */
+  isReady: (identity: string) => boolean
+  kill: (sock: string, identity: string, reason: string) => void
   verbose: boolean
   trace: (fields: Record<string, string | number | undefined>) => void
 }
@@ -1374,7 +1394,7 @@ interface SuperviseCtx {
  * returns exactly one outcome; the trace side-effects mirror the prior inline behaviour.
  */
 function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome {
-  const { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace } = ctx
+  const { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, isReady, kill, verbose, trace } = ctx
   // H4 — FIRST, before any reap. A launchd-managed peer is read-only: never wake,
   // never kill, never sweep its PROCESS. Its stale `.session` however is the
   // DAEMON'S own supervisory record (written back when the peer was daemon-owned),
@@ -1448,12 +1468,26 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // cleared above; no legitimate alive+stopped state exists. Park like the stop verb (.idle-reaped is
   // idempotent with it) — .stopped keeps the peer down until `start`, .idle-reaped makes it resume-clean.
   if (isStopped(cfg, s.identity)) {
-    kill(sock, s.identity)
+    kill(sock, s.identity, 'supervise-stop-enforced')
     setIdleReaped(cfg, s.identity)
     clearEphemeralArmed(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-idle', reason: 'alive-but-stopped', outcome: 'operator-halt-enforced' })
     return { identity: s.identity, action: 'reaped-idle', reason: 'live session carried .stopped — operator halt enforced (stop-vs-wake race)' }
+  }
+  // NEVER-READY (incident 18.10): a process that never reached its runtime's ready surface well past
+  // the boot + ready-gate deadlines is not a session — a codex hung before main lived 35 min under a
+  // healthy supervisor. Launch now tears such a host down itself; this is the backstop for a bring-up
+  // the launcher could not finish (daemon restarted mid-boot, a launcher crash). Reaped as a FAULT
+  // (recordDeath → the crash-loop guard bounds a boot that keeps hanging); its ledger entries then
+  // orphan and are redelivered to the next session.
+  const boundMs = (cfg.bootDeadlineSecs + cfg.readyGateSecs + 60) * 1000
+  if (!isReady(s.identity) && nowMs - s.wokeAt > boundMs) {
+    kill(sock, s.identity, 'supervise-never-ready')
+    recordDeath(cfg, s.identity, nowMs)
+    removeSessionState(cfg, s.identity)
+    trace({ identity: s.identity, action: 'reaped-gone', reason: 'never-ready', age: `${Math.floor((nowMs - s.wokeAt) / 1000)}s`, outcome: 'fresh-next-msg' })
+    return { identity: s.identity, action: 'reaped-gone', reason: 'alive but never reached its ready surface' }
   }
   // Idle accounting via the LAST MEANINGFUL TRANSCRIPT ENTRY's content-timestamp (adapter.lastTurnMtime)
   // — the only RELIABLE idle signal. The two raw mtimes both report FALSE freshness for an idle session:
@@ -1495,7 +1529,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // Deliberate, policy-driven death: NO .idle-reaped (an ephemeral peer never resumes)
   // and NO recordDeath (the crash-loop ring counts faults, not policy reaps).
   if (ephemeral && hasEphemeralArmed(cfg, s.identity) && ageSecs > cfg.ephemeralQuietSecs) {
-    kill(sock, s.identity)
+    kill(sock, s.identity, 'supervise-ephemeral-done')
     clearEphemeralArmed(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-done' })
@@ -1521,7 +1555,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
   // tool, no reply yet) keeps the pane-log fresh via the TUI render, so it is no longer
   // reaped mid-task — only a genuinely idle/wedged unarmed session crosses this bound.
   if (ephemeral && ageSecs > cfg.ephemeralUnarmedIdleSecs) {
-    kill(sock, s.identity)
+    kill(sock, s.identity, 'supervise-ephemeral-unarmed')
     clearEphemeralArmed(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-ephemeral', age: `${ageSecs}s`, outcome: 'ephemeral-unarmed-bound' })
@@ -1550,7 +1584,7 @@ function superviseOnePeer(s: SessionState, ctx: SuperviseCtx): SuperviseOutcome 
     // INITIATES. Its presence on the next wake = the session was parked cleanly =
     // RESUME-eligible (resolveWakeMode branch 3b). A crash/self-close (the dead
     // branch above) never writes it → that wakes FRESH (branch 3a).
-    kill(sock, s.identity)
+    kill(sock, s.identity, 'supervise-idle')
     setIdleReaped(cfg, s.identity)
     removeSessionState(cfg, s.identity)
     trace({ identity: s.identity, action: 'reaped-idle', age: `${ageSecs}s`, outcome: 'resume-eligible' })
@@ -1567,6 +1601,8 @@ const limitHoldTraced = new Set<string>()
 
 export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): SuperviseOutcome[] {
   const env = deps.env ?? process.env
+  // Legacy partial cfgs get a PRIVATE namespace, not the invoking host's fleet.
+  const runDir = cfg.supervisorRunDir ?? join(cfg.stateDir, 'supervisor')
   const nowMs = deps.nowMs ?? Date.now()
   const lastTurnMt =
     deps.lastTurnMtime ??
@@ -1574,8 +1610,12 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
   const childActivityMt =
     deps.childActivityMtime ?? ((rt: string, c: string) => getAdapter(rt as Runtime).childActivityMtime?.(c) ?? null)
   // Default seams bind the injected env so a sandboxed tick never reads/kills the real fleet.
-  const isAlive = deps.sessionAlive ?? ((sock: string, identity: string) => sessionAlive(sock, identity, env))
-  const kill = deps.killSession ?? ((sock: string, identity: string) => killSession(sock, identity, env))
+  const isAlive = deps.sessionAlive ?? ((_sock: string, identity: string) => hostDaemonAlive(runDir, identity))
+  // Readiness seam. A test that injects ONLY sessionAlive gets ready ≡ alive (its fixtures predate the
+  // marker); production reads launch's ready marker for this very hosting.
+  const isReady =
+    deps.sessionReady ?? (deps.sessionAlive ? (identity: string) => deps.sessionAlive!('', identity) : (identity: string) => hostSessionReady(identity, env, runDir))
+  const kill = deps.killSession ?? ((_sock: string, identity: string, reason: string) => killPtyHost(identity, env, { reason }, runDir))
   const verbose = superviseLogVerbose(env)
   // Pane-log volume ROTATION (launch/cmdlog.ts capPaneLogs): the per-identity pane-log
   // (<logDir>/<identity>.log) is the RAW TUI byte stream pipe-pane/the supervisor
@@ -1613,7 +1653,7 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
     })
   }
   const out: SuperviseOutcome[] = []
-  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, kill, verbose, trace }
+  const ctx: SuperviseCtx = { cfg, env, nowMs, lastTurnMt, childActivityMt, isAlive, isReady, kill, verbose, trace }
   for (const s of readSessionStates(cfg)) {
     // Per-peer ISOLATION: a throw while evaluating ONE peer must NOT abort the whole sweep — that is
     // the silent fleet-wide reap-outage class (one malformed peer-state and NO peer gets reaped, the
@@ -1625,6 +1665,30 @@ export function superviseTick(cfg: LifecycleConfig, deps: SuperviseDeps = {}): S
       const reason = e instanceof Error ? e.message : String(e)
       out.push({ identity: s.identity, action: 'skipped-error', reason })
       trace({ identity: s.identity, action: 'skipped-error', reason, outcome: 'peer-error-isolated' })
+    }
+  }
+  // NEVER-READY hosts with NO `.session` (18.10): the session state is written only AFTER a successful
+  // bring-up, so a bring-up that hung and was then abandoned (the launcher died mid-boot, a daemon
+  // restart) leaves a live host the loop above never sees — exactly how codex-linus, hung in dyld,
+  // stayed ● for 35 min. Walk the run-dir itself. H4: never a launchd-managed peer's host.
+  if (!deps.sessionAlive) {
+    const known = new Set(out.map(o => o.identity))
+    const boundMs = (cfg.bootDeadlineSecs + cfg.readyGateSecs + 60) * 1000
+    for (const h of listHostedPeers(env, runDir)) {
+      const identity = `${h.runtime}-${h.personality}`
+      if (known.has(identity)) continue
+      try {
+        if (isLaunchdManaged(h.personality, env)) continue
+        if (hostSessionReady(identity, env, runDir)) continue
+        const started = hostStartedMs(identity, env, runDir)
+        if (started === null || nowMs - started <= boundMs) continue
+        kill('', identity, 'supervise-never-ready-unsupervised')
+        recordDeath(cfg, identity, nowMs)
+        trace({ identity, action: 'reaped-gone', reason: 'never-ready-unsupervised', age: `${Math.floor((nowMs - started) / 1000)}s`, outcome: 'fresh-next-msg' })
+        out.push({ identity, action: 'reaped-gone', reason: 'unsupervised host never reached its ready surface' })
+      } catch {
+        /* per-host isolation, like the loop above */
+      }
     }
   }
   return out

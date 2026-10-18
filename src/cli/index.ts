@@ -26,9 +26,11 @@ import { cascadeTail, recycleFoundationOwnedInfraJobs, updateIapeer, waitForDaem
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
 import { ensureGlobalIapScaffold } from '../storage/index.ts'
 import { findPeer, readPeersIndex, removePeer, type PeerRecord } from '../registry/index.ts'
+import { auditTermination } from '../supervisor/index.ts'
 import {
   compactDoneBaseline,
   isPeerLive,
+  isPeerReady,
   purgeAttachmentInbox,
   routeControl,
   routeSend,
@@ -106,7 +108,9 @@ function infraRecycleFailed(infra: readonly { state: string }[] | undefined): bo
 // list — registry + per-runtime liveness (contract Примитивы §list)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type RuntimeLiveness = 'live' | 'asleep' | 'stopped'
+/** `booting` — the process is up but its runtime never reached its ready surface (yet, or ever: a
+ *  process hung before main, 18.10). Not deliverable; not ●. */
+export type RuntimeLiveness = 'live' | 'booting' | 'asleep' | 'stopped'
 export interface RuntimeStatus {
   runtime: Runtime
   status: RuntimeLiveness
@@ -145,9 +149,11 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
   return index.peers.map(peer => {
     const runtimes: RuntimeStatus[] = peer.runtimes.map(rt => ({
       runtime: rt,
-      status: isPeerLive(rt, peer.personality, cfg.sockDir, env)
+      status: isPeerReady(rt, peer.personality, env)
         ? 'live'
-        : isStopped(cfg, buildProcessAddress(rt, peer.personality))
+        : isPeerLive(rt, peer.personality, cfg.sockDir, env)
+          ? 'booting'
+          : isStopped(cfg, buildProcessAddress(rt, peer.personality))
           ? 'stopped'
           : 'asleep',
     }))
@@ -177,7 +183,7 @@ export function listPeers(opts: CliEnvOptions = {}): PeerListing[] {
   })
 }
 
-const GLYPH: Record<RuntimeLiveness, string> = { live: '●', asleep: '○', stopped: '✕' }
+const GLYPH: Record<RuntimeLiveness, string> = { live: '●', booting: '◐', asleep: '○', stopped: '✕' }
 
 /** Render the scriptable list table (non-tty default). Columns are PADDED to align
  *  (name · [default] · nature · liveness) — a ragged table reads as noise. The
@@ -260,7 +266,9 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
     return [{ personality, runtime: peer.runtime, action: 'refused-foreign-launchd', reason: `"${personality}" is managed by persistent-peer (foreign launchd plist) — the foundation does not stop it` }]
   }
   const out: StopStartOutcome[] = []
-  for (const rt of targetRuntimes(peer, runtime)) {
+  const targets = targetRuntimes(peer, runtime)
+  auditTermination(hostRunDir(env), targets.map(rt => buildProcessAddress(rt, personality)), { reason: 'stop', caller: env.PEER_IDENTITY, sandbox: env.IAPEER_TEST_SANDBOX === '1' })
+  for (const rt of targets) {
     const identity = buildProcessAddress(rt, personality)
     const sock = buildSocketPath(rt, personality, cfg.sockDir)
     if (isInfraRuntime(rt)) {
@@ -276,7 +284,7 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // below still tears the session down.
       const target = resolveAlwaysOnTarget(personality, rt, env)
       const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${target.label}`], { encoding: 'utf8' })
-      killSession(sock, identity, env)
+      killSession(sock, identity, env, 'stop')
       const stderrText = (r.stderr ?? '').trim()
       const benign = r.status === 0 || r.status === 3 || /No such process/i.test(stderrText)
       const reason = benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`
@@ -290,7 +298,7 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // no reaped-gone death class for a state the daemon knows 100%).
       setStopped(cfg, identity)
       setIdleReaped(cfg, identity)
-      killSession(sock, identity, env)
+      killSession(sock, identity, env, 'stop')
       removeSessionState(cfg, identity)
       out.push({ personality, runtime: rt, action: 'stopped' })
       // Durable trace (fleet-API follow-up): the verb was SILENT in lifecycle.log — a
@@ -674,7 +682,7 @@ export async function newPeer(
   clearStopped(cfg, identity)
   clearIdleReaped(cfg, identity)
   clearNewEager(cfg, identity)
-  killSession(sock, identity, env) // canary-clean deliberate teardown; no-op when dead
+  killSession(sock, identity, env, 'new') // canary-clean deliberate teardown; no-op when dead
   removeSessionState(cfg, identity) // never a death class — supervise stays silent
   const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
   const r = await wake({ personality, runtime: rt, task: '', resume: false })
@@ -961,7 +969,7 @@ export async function removeRuntimeCli(
       return { personality, runtime, action: 'refused-live', reason: `${identity} is LIVE — stop it first (iapeer stop ${personality} ${runtime}) or pass --force` }
     }
     const { killPtyHost } = await import('../launch/ptyHost.ts')
-    killPtyHost(identity, env)
+    killPtyHost(identity, env, { reason: 'remove-runtime-force' })
     steps.push('live session stopped (--force)')
   }
   // Slots for THIS endpoint (provider + capabilities), while the peer's state is still consistent.
@@ -1114,6 +1122,7 @@ export async function removePeerCli(
         if (env.IAPEER_TEST_SANDBOX === '1') {
           bootoutNote = 'skipped-sandbox'
         } else {
+          auditTermination(hostRunDir(env), [entry.label], { reason: 'remove', caller: env.PEER_IDENTITY })
           const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${entry.label}`], { encoding: 'utf8' })
           // bootout exits non-zero when the job was already unloaded — benign for a teardown.
           bootoutNote = r.status === 0 ? 'bootout' : `bootout (exit ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''})`
@@ -2431,6 +2440,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             ? [positionals[0]]
             : null
         if (!peers) return argErr(errOut, 'stop needs a peer or --all — usage: iapeer stop <peer> [runtime] | --all')
+        if (flags.all === true) auditTermination(hostRunDir(env), peers, { reason: 'stop-all', caller: env.PEER_IDENTITY, sandbox: env.IAPEER_TEST_SANDBOX === '1' })
         const outcomes = peers.flatMap(p => stopPeer(p, flags.all === true ? undefined : positionals[1], { env }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         // В48 — a REAL bootout error (reason set; benign already-unloaded carries none) is exit 1:
@@ -3022,7 +3032,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         }
         out(`self-fresh: marked ${identity} for eager fresh re-launch; self-killing session\n`)
         const sock = buildSocketPath(addr.runtime, addr.personality, cfg.sockDir)
-        killSession(sock, identity, env)
+        killSession(sock, identity, env, 'self-fresh')
         return 0
       }
       case 'interrupt': {

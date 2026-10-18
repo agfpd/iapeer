@@ -336,9 +336,22 @@ export async function processInflight(
   // A turn the session STARTED on a message but did not finish before dying: never redelivered (its side
   // effects may already have happened) — the sender is told explicitly that the result is not guaranteed.
   for (const identity of listInterruptedIdentities(cfg.stateDir)) {
+    // Multiple messages can be injected into ONE still-running turn. A session death must notify each
+    // affected sender once, not fan out one alert per injection (18.10: twenty alerts from one turn).
+    // Keep different hosting tokens and callers separate; no message is silently discarded: the one
+    // notice enumerates the affected deliveries. Completed entries have already left in the sweep.
+    const groups = new Map<string, InflightEntry[]>()
     for (const e of takeInterrupted(cfg.stateDir, identity)) {
-      const notified = await notifySender(e, interruptedNotice(e))
-      appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-interrupted', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', notified })
+      const key = JSON.stringify([e.sessionToken, e.caller.runtime, e.caller.personality])
+      const entries = groups.get(key) ?? []
+      entries.push(e)
+      groups.set(key, entries)
+    }
+    for (const entries of groups.values()) {
+      const e = entries[0]!
+      const summary = entries.length > 1 ? `\nAffected deliveries (${entries.length}):\n` + entries.map(x => `${x.sentAt}${x.topic ? ` topic=${x.topic}` : ''}: ${x.message.split('\n')[0]!.slice(0, 200)}`).join('\n') : ''
+      const notified = await notifySender(e, interruptedNotice(e) + summary)
+      appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-interrupted', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', notified, count: entries.length })
     }
   }
   for (const identity of listOrphanIdentities(cfg.stateDir)) {
@@ -470,6 +483,14 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // Notice board (docs/19) — ONE instance shared by the mute-watch (raises) and the
   // fleet handler (serves /notices + the snapshot field). Constructed HERE, at the
   // composition point, because that sharing is the whole wiring.
+  // Readiness marker compatibility (18.10): sessions already running when this core first starts were
+  // launched without a ready marker — stamp them ONCE so delivery does not read the healthy fleet as
+  // booting. Every later hosting writes its own marker at its ready-gate.
+  try {
+    const { backfillHostReadyOnce } = await import('../launch/ptyHost.ts')
+    const stamped = await backfillHostReadyOnce(env)
+    if (stamped) appendLifecycleEvent(cfg.eventLogDir, { ev: 'ready-backfill', count: stamped.length }, { env })
+  } catch { /* best-effort */ }
   const board = new NoticeBoard({ logDir: cfg.eventLogDir, env })
   const stopMuteWatch = startMuteWatch(cfg, board, {
     env,

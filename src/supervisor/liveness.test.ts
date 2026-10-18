@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ownershipVerdict, pidPath, pidStartToken, readPidFile, sockPath, writePidFile } from './paths.ts'
 import { sessionAlive } from './client.ts'
-import { killSession, startSupervisorDaemon } from './index.ts'
+import { auditTermination, killSession, startSupervisorDaemon } from './index.ts'
+import { homedir } from 'node:os'
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 const pidAlive = (p: number): boolean => {
@@ -80,6 +81,30 @@ describe('split-brain 03.07 — ownershipVerdict + locale-pinned token', () => {
 })
 
 describe('В22 pid-ownership token', () => {
+  test('sandbox guard refuses the real run-dir BEFORE any writes or signals (including a symlink alias)', () => {
+    expect(() => auditTermination(join(homedir(), '.iapeer/state/supervisor'), ['sentinel'], { sandbox: true })).toThrow(/REAL supervisor/)
+  })
+
+  test('audit failure prevents SIGTERM; successful write includes caller/reason/target PID before death', async () => {
+    const dir = mkTmp()
+    const ours = spawn('sleep', ['300'])
+    procs.push(ours)
+    await sleep(50)
+    writePidFile(dir, 'audit', ours.pid!)
+    // Open cannot succeed: the would-be log is a directory. The owned process must survive.
+    const { mkdirSync, rmdirSync } = await import('node:fs')
+    mkdirSync(join(dir, 'terminations.log'))
+    expect(() => killSession(dir, 'audit', { reason: 'test-audit', caller: 'test-operator' })).toThrow()
+    expect(pidAlive(ours.pid!)).toBe(true)
+    rmdirSync(join(dir, 'terminations.log'))
+    killSession(dir, 'audit', { reason: 'test-audit', caller: 'test-operator' })
+    const log = readFileSync(join(dir, 'terminations.log'), 'utf8')
+    expect(log).toContain('reason=test-audit')
+    expect(log).toContain('caller=test-operator')
+    expect(log).toContain(`target_pid=${ours.pid}`)
+    await sleep(100)
+    expect(pidAlive(ours.pid!)).toBe(false)
+  })
   test('writePidFile/readPidFile round-trips `<pid> <token>`; legacy bare-pid → empty token', () => {
     const dir = mkTmp()
     writePidFile(dir, 's', process.pid)

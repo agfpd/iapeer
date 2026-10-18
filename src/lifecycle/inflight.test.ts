@@ -220,6 +220,23 @@ describe('processInflight — redeliver, or the sender learns', () => {
     expect(listInterruptedIdentities(state)).toEqual([])
   })
 
+  test('twenty injections into one unfinished session → ONE summary per sender; subsequent sweep → zero', async () => {
+    for (let i = 0; i < 20; i++) recordInflight(state, entry({ message: `message-${i}`, topic: `topic-${i}` }))
+    recordInflight(state, entry({ caller: { personality: 'other', runtime: 'codex' } }))
+    const calls: Array<{ personality: string; message: string }> = []
+    const seam = { processed: () => true, completed: () => false,
+      send: (async (_caller: unknown, input: { personality: string; message: string }) => {
+        calls.push(input)
+        return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: false, ts: 'x' })
+      }) as never }
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, seam)
+    expect(calls.map(c => c.personality)).toEqual(['alice', 'other'])
+    expect(calls[0]!.message).toContain('Affected deliveries (20)')
+    expect(calls[0]!.message).toContain('message-19')
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, seam)
+    expect(calls).toHaveLength(2)
+  })
+
   test('ONE redelivery per message: an orphan that was already redelivered goes to the sender as a notice', async () => {
     recordInflight(state, entry({ message: redeliveryMessage(entry()) }))
     const calls: string[] = []

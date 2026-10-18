@@ -5,7 +5,10 @@
 // serving is productionized (a later block) the daemon-spawn argv is repointed at the installed
 // binary; for now it self-spawns from source (bun + this file), which is what the tests exercise.
 import { spawn as nodeSpawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { formatEventLine } from '../storage/rotatelog.ts'
 import { fileURLToPath } from 'node:url'
 import { runSupervisorClient, sessionAlive } from './client.ts'
 import { defaultRunDir, logPath, ownershipVerdict, pidPath, pidStartToken, readPidFile, servePath, sockPath } from './paths.ts'
@@ -217,7 +220,30 @@ export function listSessions(runDir: string): Array<{ session: string; alive: bo
     })
 }
 
-export function killSession(runDir: string, session: string): boolean {
+export interface TerminationContext { reason?: string; caller?: string; sandbox?: boolean; targetPid?: number; targetToken?: string }
+
+/** Strict write-ahead audit: if attribution cannot be persisted, do not signal. No payload/env. */
+export function auditTermination(runDir: string, targets: string[], context: TerminationContext = {}): void {
+  const canonical = (p: string) => { try { return realpathSync(p) } catch { return resolve(p) } }
+  if ((context.sandbox || process.env.IAPEER_TEST_SANDBOX === '1') && canonical(runDir) === canonical(join(homedir(), '.iapeer/state/supervisor'))) {
+    throw new Error('refusing to signal the REAL supervisor run-dir under IAPEER_TEST_SANDBOX=1')
+  }
+  mkdirSync(runDir, { recursive: true, mode: 0o700 })
+  const fd = openSync(join(runDir, 'terminations.log'), 'a', 0o600)
+  try {
+    appendFileSync(fd, formatEventLine(Date.now(), {
+      ev: targets.length > 1 ? 'termination-batch' : 'termination-request',
+      targets: targets.join(','), caller: context.caller ?? process.env.PEER_IDENTITY ??
+        (process.env.PEER_PERSONALITY ? `${process.env.PEER_RUNTIME ?? 'unknown'}-${process.env.PEER_PERSONALITY}` : `uid:${process.getuid?.() ?? 'unknown'}`),
+      caller_pid: process.pid, caller_ppid: process.ppid,
+      target_pid: context.targetPid, target_token: context.targetToken,
+      reason: context.reason ?? `supervisor-kill:${process.argv[2] ?? 'api'}`,
+    }) + '\n')
+    fsyncSync(fd)
+  } finally { closeSync(fd) }
+}
+
+export function killSession(runDir: string, session: string, context: TerminationContext = {}): boolean {
   const rec = readPidFile(runDir, session)
   if (!rec) return false
   // В22 — verify the pid is STILL our daemon before SIGTERM. After an abnormal death + pid reuse, a bare
@@ -228,6 +254,7 @@ export function killSession(runDir: string, session: string): boolean {
   if (rec.token && !ownershipVerdict(pidStartToken(rec.pid), rec.token)) {
     return false // reused pid — NOT our session; do not signal it
   }
+  auditTermination(runDir, [session], { ...context, targetPid: rec.pid, targetToken: rec.token })
   try {
     process.kill(rec.pid, 'SIGTERM')
   } catch {

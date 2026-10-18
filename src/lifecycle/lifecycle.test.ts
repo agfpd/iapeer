@@ -392,6 +392,7 @@ describe('wakeOrSpawn live-session fast path', () => {
       const runDir = defaultRunDir(env)
       mkdirSync(runDir, { recursive: true })
       writeFileSync(pidPath(runDir, 'claude-fpl'), String(child.pid))
+      writeFileSync(join(runDir, 'claude-fpl.ready'), `host:${child.pid}`)
       const r = await wakeOrSpawn({ personality: 'fpl', runtime: 'claude', task: 'second sender envelope' }, { env })
       expect(r.status).toBe('READY')
       expect(r.woke).toBe(false)

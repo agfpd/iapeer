@@ -39,6 +39,8 @@ import { IAPEER_VERSION } from '../core/version.ts'
 import { iapeerBinPath, stampBinaryHealthy } from '../install/index.ts'
 import { ensureExecutableSignature } from '../install/signature.ts'
 import { readPeersIndex } from '../registry/index.ts'
+import { auditTermination } from '../supervisor/index.ts'
+import { defaultRunDir } from '../supervisor/paths.ts'
 import {
   cycleDaemon,
   cycleLaunchdJob,
@@ -263,6 +265,9 @@ export function recycleFoundationOwnedInfraJobs(env: NodeJS.ProcessEnv = process
   if (env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1') return []
   const out: InfraJobRecycleResult[] = []
   const index = readPeersIndex({ env })
+  const targets = index.peers.flatMap(peer => [...new Set([peer.runtime, ...peer.runtimes])].filter(isInfraRuntime)
+    .map(runtime => resolveAlwaysOnTarget(peer.personality, runtime, env)).filter(t => isFoundationOwnedPlist(t.path)).map(t => t.label))
+  if (targets.length) auditTermination(defaultRunDir(env), targets, { reason: 'update-recycle-infra', caller: env.PEER_IDENTITY })
   for (const peer of index.peers) {
     // Multi-infra (0.4.88): a personality can hold SEVERAL always-on channels
     // (e.g. arthur: telegram on the legacy base plist + web on the per-runtime

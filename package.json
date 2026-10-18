@@ -35,6 +35,8 @@
     "bin",
     "docs",
     "scripts/proof-install-signature.ts",
+    "scripts/proof-fleet-isolation.ts",
+    "scripts/proof-inflight-turns.ts",
     "CHANGELOG.md",
     "tsconfig.json",
     "!src/**/*.test.ts",
