@@ -652,7 +652,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
           noteDelivered: identity => setLastDelivered(cfg, identity),
           noteInflight,
           isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
-        })
+        }, { justReaped: new Set(outcomes.filter(o => o.action.startsWith('reaped')).map(o => o.identity)) })
       },
       // Surface a supervise-tick throw that the daemon timer would otherwise SWALLOW (the class that
       // hid a stuck reaper for hours): record ev=supervise-error in lifecycle.log, flattened to one

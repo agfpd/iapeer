@@ -15,6 +15,7 @@ import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import {
   LIMIT_MAX_NUDGE_ATTEMPTS,
   LIMIT_RESUME_GRACE_MS,
+  LIMIT_RETRY_BACKOFF_MS,
   clearLimitPark,
   listLimitParks,
   parkProgressed,
@@ -24,8 +25,6 @@ import {
 import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
 
-/** Between two failed nudge attempts. */
-const RETRY_BACKOFF_MS = 5 * 60_000
 
 export function limitResumeMessage(p: LimitPark): string {
   return (
@@ -40,6 +39,9 @@ export interface LimitResumeSeam {
   send?: typeof routeSend
   progressed?: (p: LimitPark) => boolean
   now?: () => number
+  /** Identities the SAME supervise tick just idle-reaped: their teardown is asynchronous, so a send now
+   *  would hit the dying socket. Skipped (no attempt counted); the next tick wakes them by delivery. */
+  justReaped?: ReadonlySet<string>
 }
 
 export async function processLimitResumes(
@@ -60,7 +62,8 @@ export async function processLimitResumes(
   }
   for (const p of listLimitParks(cfg)) {
     if (now < p.resetsAtMs + LIMIT_RESUME_GRACE_MS) continue
-    if (p.lastAttemptMs && now - p.lastAttemptMs < RETRY_BACKOFF_MS) continue
+    if (p.lastAttemptMs && now - p.lastAttemptMs < LIMIT_RETRY_BACKOFF_MS) continue
+    if (seam.justReaped?.has(p.identity)) continue
     let moved = false
     try {
       moved = progressed(p)

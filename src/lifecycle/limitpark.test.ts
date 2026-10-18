@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import {
   LIMIT_MAX_HOLD_MS,
   LIMIT_RESUME_GRACE_MS,
+  LIMIT_RESOLVE_WINDOW_MS,
+  clearLimitPark,
   claudeProgressedSince,
   codexProgressedSince,
   limitHoldActive,
@@ -83,10 +85,14 @@ describe('park store', () => {
     expect(readLimitPark(cfg, 'claude-iapeer')?.resetsAtMs).toBe(RESET + 60_000)
     expect(listLimitParks(cfg)).toHaveLength(1)
   })
-  test('hold: live until reset + grace, never beyond the max-hold bound', () => {
+  test('hold: live THROUGH the nudge (until the park resolves), bounded by the retry window and the max-hold bound', () => {
     recordLimitPark(cfg, park())
     expect(limitHoldActive(cfg, 'claude-iapeer', T0 + 60_000)).not.toBeNull()
-    expect(limitHoldActive(cfg, 'claude-iapeer', RESET + LIMIT_RESUME_GRACE_MS)).toBeNull()
+    // The nudge becomes due at reset + grace: the hold must still stand then (incident 18.10).
+    expect(limitHoldActive(cfg, 'claude-iapeer', RESET + LIMIT_RESUME_GRACE_MS)).not.toBeNull()
+    expect(limitHoldActive(cfg, 'claude-iapeer', RESET + LIMIT_RESOLVE_WINDOW_MS)).toBeNull() // nobody resolved it
+    clearLimitPark(cfg, 'claude-iapeer')
+    expect(limitHoldActive(cfg, 'claude-iapeer', RESET + LIMIT_RESUME_GRACE_MS)).toBeNull() // resolved → normal idle
     recordLimitPark(cfg, park({ identity: 'claude-w', eventAtMs: T0, resetsAtMs: T0 + LIMIT_MAX_HOLD_MS + 1 })) // a weekly wall
     expect(limitHoldActive(cfg, 'claude-w', T0 + 60_000)).toBeNull()
   })
@@ -115,16 +121,19 @@ describe('HOLD — superviseTick does not idle-reap a session waiting for its li
     writeFileSync(join(cwd, '.iapeer', 'peer-profile.json'), JSON.stringify({ personality, default_runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' }))
     writeFileSync(join(cfg.stateDir, `claude-${personality}.session`), JSON.stringify({ identity: `claude-${personality}`, runtime: 'claude', personality, cwd, wokeAt }))
   }
-  test('parked → alive (limit-hold) past idleSecs; after reset + grace → reaped normally', () => {
+  test('parked → alive (limit-hold) past idleSecs; still held when the nudge is due; reaped normally once resolved', () => {
     liveSession('p', T0 - 7_200_000)
     recordLimitPark(cfg, park({ identity: 'claude-p', personality: 'p' }))
     const during = T0 + 2 * 3_600_000 // 05:55 — when the real fleet was reaped
     const a = superviseTick(cfg, { env, nowMs: during, sessionAlive: () => true, lastTurnMtime: () => T0, killSession: () => {} })
     expect(a.find(x => x.identity === 'claude-p')?.action).toBe('alive')
     expect(hasIdleReaped(cfg, 'claude-p')).toBe(false)
-    const after = RESET + LIMIT_RESUME_GRACE_MS + 1
-    const b = superviseTick(cfg, { env, nowMs: after, sessionAlive: () => true, lastTurnMtime: () => T0, killSession: () => {} })
-    expect(b.find(x => x.identity === 'claude-p')?.action).toBe('reaped-idle')
+    const due = RESET + LIMIT_RESUME_GRACE_MS + 1
+    const b = superviseTick(cfg, { env, nowMs: due, sessionAlive: () => true, lastTurnMtime: () => T0, killSession: () => {} })
+    expect(b.find(x => x.identity === 'claude-p')?.action).toBe('alive') // no reap racing the nudge
+    clearLimitPark(cfg, 'claude-p') // the nudge resolved the park
+    const c = superviseTick(cfg, { env, nowMs: due + 1, sessionAlive: () => true, lastTurnMtime: () => T0, killSession: () => {} })
+    expect(c.find(x => x.identity === 'claude-p')?.action).toBe('reaped-idle')
   })
 })
 
@@ -152,6 +161,16 @@ describe('NUDGE — after the reset the core continues the stopped turn, no huma
     expect(depsSeen[0]?.wakeContinueWork).toBe(true) // the wake it may trigger RESUMES (live run 18.10: without it → fresh, context lost)
     expect(listLimitParks(cfg)).toHaveLength(0) // one nudge per limit event
     await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS * 10 })
+    expect(sent).toHaveLength(1)
+  })
+  test('a session reaped by the SAME tick is not nudged into its dying socket; the next tick nudges it (no attempt burned)', async () => {
+    recordLimitPark(cfg, park())
+    const sent: Sent[] = []
+    const t = RESET + LIMIT_RESUME_GRACE_MS
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => t, justReaped: new Set(['claude-iapeer']) })
+    expect(sent).toHaveLength(0)
+    expect(listLimitParks(cfg)[0]?.attempts ?? 0).toBe(0)
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => t + 60_000 })
     expect(sent).toHaveLength(1)
   })
   test('the runtime continued on its own → no nudge (no duplicate turn)', async () => {

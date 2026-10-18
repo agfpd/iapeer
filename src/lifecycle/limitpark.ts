@@ -29,6 +29,11 @@ export const LIMIT_RESUME_GRACE_MS = 3 * 60_000
 export const LIMIT_MAX_HOLD_MS = 6 * 60 * 60_000
 /** A failed nudge is retried at most this many times (then the park is dropped, logged). */
 export const LIMIT_MAX_NUDGE_ATTEMPTS = 3
+/** Between two failed nudge attempts. */
+export const LIMIT_RETRY_BACKOFF_MS = 5 * 60_000
+/** Past the reset the hold lasts until the park is RESOLVED (nudged / progressed / dropped) — bounded
+ *  by the full retry budget, so a park nobody resolves (no daemon tick) can never pin a session. */
+export const LIMIT_RESOLVE_WINDOW_MS = LIMIT_RESUME_GRACE_MS + LIMIT_MAX_NUDGE_ATTEMPTS * LIMIT_RETRY_BACKOFF_MS + 60_000
 
 export interface LimitPark {
   identity: string
@@ -103,7 +108,11 @@ export function listLimitParks(cfg: LifecycleConfig): LimitPark[] {
 export function limitHoldActive(cfg: LifecycleConfig, identity: string, nowMs: number): LimitPark | null {
   const p = readLimitPark(cfg, identity)
   if (!p) return null
-  if (nowMs >= p.resetsAtMs + LIMIT_RESUME_GRACE_MS) return null
+  // Hold THROUGH the nudge, not up to it (incident 18.10, codex-iapeer): ending the hold at reset + grace
+  // — the very instant the nudge becomes due — let the same tick idle-reap the session and then nudge
+  // its dying socket ("socket dead during submit" → a 5-minute retry). A parked session is waiting, not
+  // idle, until its park is resolved; the nudge then lands warm on the first attempt.
+  if (nowMs >= p.resetsAtMs + LIMIT_RESOLVE_WINDOW_MS) return null
   if (p.resetsAtMs - p.eventAtMs > LIMIT_MAX_HOLD_MS) return null
   return p
 }
