@@ -33,7 +33,7 @@ import {
   type ProcessAddress,
 } from '../core/socket.ts'
 import { buildEnvelope, formatSentAt, renderEnvelopeForAgent } from '../codec/index.ts'
-import { resolveGlobalRoot } from '../storage/index.ts'
+import { endpointPrivateDir, resolveGlobalRoot } from '../storage/index.ts'
 import { findPeer, readPeersIndex, type PeerRecord } from '../registry/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 // Delivery markers are OWNED by the runtime adapter. transport
@@ -805,6 +805,108 @@ export function transcriptCarriesEnvelope(
   return false
 }
 
+/** The shape transport needs to judge one inflight delivery (a subset of lifecycle's InflightEntry —
+ *  transport never imports lifecycle). */
+export interface ProcessedProbe {
+  runtime: string
+  personality: string
+  cwd: string
+  ts: number
+  rendered: string
+}
+
+const PROCESSED_TAIL_BYTES = 16 * 1024 * 1024
+
+/**
+ * Did the receiving session ANSWER this delivery (OC07)? «Recorded» is not «processed»: measured
+ * 18.10 on claude, a message SIGKILLed mid-request had its `user` record (and the API request blob)
+ * in the transcript but no assistant record after it — the model never answered, and a fresh next
+ * session would not see it. So the proof is a model response AFTER the record that carries the
+ * envelope:
+ *   claude — a `type:"assistant"` record after a non-queue-operation record carrying the needles;
+ *   codex  — a non-user `response_item` (assistant message / function_call / reasoning) or an
+ *            `agent_message` event after the user input carrying the needles;
+ *   opencode — an assistant `message.updated` whose parentID is the user message whose text part
+ *            carries the needles (journal; docs/20).
+ * Reads bounded tails only. False → the entry stays inflight (or orphans if its session is gone):
+ * a false negative costs a duplicate redelivery, never a silent loss.
+ */
+export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env): boolean {
+  const needles = confirmNeedles(probe.rendered)
+  if (!needles.length || needles.every(n => !n)) return false
+  if (getAdapter(probe.runtime).deliveryConfirm === 'structural') {
+    const dir = endpointPrivateDir(probe.runtime, probe.personality, { env })
+    if (!dir) return false
+    const path = join(dir, 'events.jsonl')
+    let size = 0
+    try {
+      size = statSync(path).size
+    } catch {
+      return false
+    }
+    const userIDs = new Set<string>()
+    for (const line of readFileTailFrom(path, Math.max(0, size - PROCESSED_TAIL_BYTES)).split('\n')) {
+      if (!line.trim()) continue
+      let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { role?: string; parentID?: string } } }
+      try {
+        e = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const part = e.properties?.part
+      if (e.type === 'message.part.updated' && part?.type === 'text' && typeof part.text === 'string' && part.messageID) {
+        const text = part.text.replace(/\r/g, '')
+        if (needles.every(n => text.includes(n))) userIDs.add(part.messageID)
+      }
+      const info = e.properties?.info
+      if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID)) return true
+    }
+    return false
+  }
+  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+    let st
+    try {
+      st = statSync(path)
+    } catch {
+      continue
+    }
+    if (st.mtimeMs < probe.ts - 5000) continue
+    let carried = false
+    for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
+      if (!line.trim()) continue
+      let o: { type?: string; payload?: { type?: string; role?: string } }
+      try {
+        o = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (!carried) {
+        if (o.type !== 'queue-operation' && jsonStringValuesContainAll(o, needles)) carried = true
+        continue
+      }
+      if (o.type === 'assistant') return true // claude
+      if (o.type === 'response_item' && o.payload && o.payload.role !== 'user') return true // codex
+      if (o.type === 'event_msg' && o.payload?.type === 'agent_message') return true // codex
+    }
+  }
+  return false
+}
+
+/** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
+export interface InflightNote {
+  sentAt: string
+  identity: string
+  personality: string
+  runtime: string
+  cwd: string
+  sessionToken: string | null
+  caller: { personality: string; runtime: string }
+  message: string
+  topic?: string
+  attachments?: string[]
+  rendered: string
+}
+
 function compactDoneTimeoutMs(env: NodeJS.ProcessEnv | undefined): number {
   const raw = env?.IAPEER_COMPACT_DONE_TIMEOUT_MS
   const n = raw === undefined ? NaN : Number(raw)
@@ -1084,6 +1186,8 @@ export interface ComposerQueuedDelivery {
   topic?: string
   enqueuedAtMs: number
   sessionToken: string
+  /** OC07 — what the inflight ledger needs once the queued delivery lands. */
+  inflight?: InflightInfo
 }
 
 export interface ComposerQueueTryEnqueueArgs {
@@ -1094,6 +1198,7 @@ export interface ComposerQueueTryEnqueueArgs {
   topic?: string
   /** Router-acceptance instant (formatSentAt) — the queued ACK's `ts` mirrors it. */
   sentAt?: string
+  inflight?: InflightInfo
 }
 
 export interface ComposerQueueRouteDeps {
@@ -1137,6 +1242,10 @@ export interface RouteDeps {
    *  and cannot reap the session before the just-delivered message's turn record lands. Injected (same
    *  layering as noteLiveTopic — lifecycle.setLastDelivered wired in main.ts). */
   noteDelivered?: (identity: string) => void
+  /** OC07 — record a CONFIRMED delivery to an AGENT endpoint in the inflight ledger, so a session that
+   *  dies before answering it does not take the message along silently (lifecycle.recordInflight wired
+   *  in main.ts; same layering as noteDelivered). Best-effort: a hook error never fails the delivery. */
+  noteInflight?: (note: InflightNote) => void
   /** H4 launchd-managed detector (injected so transport never imports lifecycle —
    *  main.ts wires the real `isLaunchdManaged`). A MISS on a launchd-managed target is
    *  almost always a TRANSIENT restart window (router restart on connect / `iapeer
@@ -1160,6 +1269,37 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   if (!topic) return
   try {
     deps.noteLiveTopic?.(identity, topic)
+  } catch {
+    /* a post-delivery hook must never fail the delivery */
+  }
+}
+
+type InflightInfo = { sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string }
+
+/** Best-effort inflight record (OC07) — only for agent (tui) endpoints. */
+function noteInflight(
+  deps: Pick<RouteDeps, 'noteInflight'>,
+  target: DeliveryTarget,
+  cwd: string,
+  info: InflightInfo,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!deps.noteInflight) return
+  try {
+    if (getAdapter(target.runtime).kind !== 'tui') return
+    deps.noteInflight({
+      sentAt: info.sentAt,
+      identity: target.address,
+      personality: target.personality,
+      runtime: target.runtime,
+      cwd,
+      sessionToken: hostSessionToken(target.address, env),
+      caller: { personality: info.caller.personality, runtime: info.caller.runtime },
+      message: info.message,
+      ...(info.topic ? { topic: info.topic } : {}),
+      ...(info.attachments?.length ? { attachments: info.attachments } : {}),
+      rendered: renderEnvelopeForAgent(info.envelope),
+    })
   } catch {
     /* a post-delivery hook must never fail the delivery */
   }
@@ -1202,6 +1342,8 @@ export interface ComposerDeliveryQueueOptions {
   noteLiveTopic?: (identity: string, topic: string) => void
   /** В7 — stamp a confirmed queued delivery (same seam as RouteDeps.noteDelivered). */
   noteDelivered?: (identity: string) => void
+  /** OC07 — same seam as RouteDeps.noteInflight, for a queued delivery once it lands. */
+  noteInflight?: (note: InflightNote) => void
   onDelivered?: (caller: ResolvedCaller) => void
 }
 
@@ -1349,6 +1491,7 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         } catch {
           /* best-effort */
         }
+        if (job.inflight) noteInflight({ noteInflight: opts.noteInflight }, job.target, job.peer.cwd, job.inflight, opts.env ?? process.env)
         try {
           opts.onDelivered?.(job.caller)
         } catch {
@@ -1377,6 +1520,7 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         topic: args.topic,
         enqueuedAtMs: monotonicMs(),
         sessionToken: token,
+        ...(args.inflight ? { inflight: args.inflight } : {}),
       }
       const q = queues.get(args.target.address) ?? []
       q.push(job)
@@ -1601,6 +1745,8 @@ async function routeSendInner(
     attachments: spooled.value.paths,
     message,
   })
+  // OC07 — what the inflight ledger needs to redeliver this message if the receiving session dies first.
+  const inflightInfo = { sentAt, caller, message, topic, attachments: spooled.value.paths, envelope }
 
   // M3 wake_policy:"ephemeral" — an ephemeral target is NEVER injected into a live
   // session and never woken synchronously here: the delivery is ALWAYS enqueued
@@ -1620,7 +1766,7 @@ async function routeSendInner(
     // target must still obey the domain guard even though selection is exact).
     const liveGuard = telegramSenderGuard(caller, target.value.runtime, personality)
     if (!liveGuard.ok) return liveGuard
-    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: target.value, envelope, topic, sentAt })
+    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: target.value, envelope, topic, sentAt, inflight: inflightInfo })
     if (queued) return queued
     // peer.cwd enables the Ф-B transcript-mtime liveness probe (busy-session case).
     // deliverWarm is HOST-AWARE (spawn-flip Ф0b-2): a supervisor-hosted target delivers over its
@@ -1629,6 +1775,7 @@ async function routeSendInner(
     if (!delivered.ok) return delivered
     noteTopic(deps, target.value.address, topic)
     noteDelivered(deps, target.value.address) // В7 — floor the idle proxy so this delivery isn't reaped away
+    noteInflight(deps, target.value, peer.cwd, inflightInfo, env)
     return ok({
       ok: true,
       delivered_to: { personality: target.value.personality, runtime: target.value.runtime },
@@ -1661,6 +1808,7 @@ async function routeSendInner(
       const delivered = await deliverWarm(revived.value, envelope, peer.cwd, {}, env)
       if (delivered.ok) {
         noteTopic(deps, revived.value.address, topic)
+        noteInflight(deps, revived.value, peer.cwd, inflightInfo, env)
         return ok({
           ok: true,
           delivered_to: { personality: revived.value.personality, runtime: revived.value.runtime },
@@ -1701,11 +1849,12 @@ async function routeSendInner(
   // a false ok:true — the class the contract forbids. A delivery failure here is
   // surfaced loudly (false-FAIL over false-OK).
   if (woke.taskDelivered === false) {
-    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: live.value, envelope, topic, sentAt })
+    const queued = await deps.composerQueue?.tryEnqueue({ caller, peer, target: live.value, envelope, topic, sentAt, inflight: inflightInfo })
     if (queued) return queued
     const delivered = await deliverWarm(live.value, envelope, peer.cwd, {}, env)
     if (!delivered.ok) return delivered
     noteTopic(deps, live.value.address, topic)
+    noteInflight(deps, live.value, peer.cwd, inflightInfo, env)
     return ok({
       ok: true,
       delivered_to: { personality: live.value.personality, runtime: live.value.runtime },
@@ -1714,6 +1863,7 @@ async function routeSendInner(
     })
   }
   // The envelope was delivered as the boot first-message during wake.
+  noteInflight(deps, live.value, peer.cwd, inflightInfo, env)
   return ok({
     ok: true,
     delivered_to: { personality: live.value.personality, runtime: live.value.runtime },

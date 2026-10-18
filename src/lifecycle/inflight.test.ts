@@ -1,0 +1,122 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeOrphans, type InflightEntry } from './inflight.ts'
+import { deliveryProcessed } from '../transport/index.ts'
+import { processInflight, redeliveryMessage } from '../daemon/main.ts'
+import { ok, err } from '../core/errors.ts'
+import { upsertPeer } from '../registry/index.ts'
+
+let root: string
+let state: string
+beforeEach(() => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'inflight-')))
+  state = join(root, 'state')
+  mkdirSync(state, { recursive: true })
+})
+afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+const ENV_BODY = '<iap from="alice" runtime="claude" ts="03:00:00">\nReply via send_to_peer.\n<msg>DO THE THING 77</msg>\n</iap>'
+function entry(over: Partial<InflightEntry> = {}): InflightEntry {
+  return {
+    id: Math.random().toString(36).slice(2),
+    ts: Date.now() - 1000,
+    sentAt: '03:00:00',
+    identity: 'claude-bob',
+    personality: 'bob',
+    runtime: 'claude',
+    cwd: join(root, 'bob'),
+    sessionToken: 'host:1',
+    caller: { personality: 'alice', runtime: 'claude' },
+    message: 'DO THE THING 77',
+    rendered: ENV_BODY,
+    ...over,
+  }
+}
+
+describe('inflight ledger (OC07)', () => {
+  test('sweep: processed leaves; unprocessed stays on the same live session; gone/replaced session → orphan', () => {
+    recordInflight(state, entry({ id: 'done' }))
+    recordInflight(state, entry({ id: 'pending' }))
+    recordInflight(state, entry({ id: 'old', sessionToken: 'host:0' }))
+    const n = sweepInflight(state, 'claude-bob', { sessionToken: () => 'host:1', processed: e => e.id === 'done' })
+    expect(n).toBe(1)
+    expect(readInflight(state, 'claude-bob').map(e => e.id)).toEqual(['pending'])
+    expect(sweepInflight(state, 'claude-bob', { sessionToken: () => null, processed: () => false })).toBe(1)
+    expect(readInflight(state, 'claude-bob')).toEqual([])
+    expect(listOrphanIdentities(state)).toEqual(['claude-bob'])
+    expect(takeOrphans(state, 'claude-bob').map(e => e.id).sort()).toEqual(['old', 'pending'])
+    expect(listOrphanIdentities(state)).toEqual([])
+  })
+})
+
+describe('deliveryProcessed — recorded is NOT processed', () => {
+  test('claude: user record alone (the SIGKILL-mid-request case) → false; an assistant record after it → true; queue-operation never counts', () => {
+    const env = { HOME: root }
+    const cwd = join(root, 'bob')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const f = join(dir, 's.jsonl')
+    writeFileSync(f, JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: ENV_BODY }) + '\n')
+    appendFileSync(f, JSON.stringify({ type: 'assistant', message: { content: 'busy with something else' } }) + '\n')
+    const probe = { runtime: 'claude', personality: 'bob', cwd, ts: Date.now() - 1000, rendered: ENV_BODY }
+    expect(deliveryProcessed(probe, env)).toBe(false) // enqueue + an unrelated assistant record
+    appendFileSync(f, JSON.stringify({ type: 'user', message: { role: 'user', content: ENV_BODY } }) + '\n')
+    expect(deliveryProcessed(probe, env)).toBe(false) // recorded, not answered
+    appendFileSync(f, JSON.stringify({ type: 'assistant', message: { content: 'on it' } }) + '\n')
+    expect(deliveryProcessed(probe, env)).toBe(true)
+  })
+
+  test('opencode: user text part carrying the envelope → processed only once an assistant answers that message', () => {
+    const env = { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }
+    const dir = join(root, 'iapeer', 'state', 'opencode', 'bob')
+    mkdirSync(dir, { recursive: true })
+    const j = join(dir, 'events.jsonl')
+    writeFileSync(j, JSON.stringify({ type: 'message.part.updated', properties: { part: { type: 'text', text: ENV_BODY, messageID: 'msg_u' } } }) + '\n')
+    const probe = { runtime: 'opencode', personality: 'bob', cwd: root, ts: Date.now(), rendered: ENV_BODY }
+    expect(deliveryProcessed(probe, env)).toBe(false)
+    appendFileSync(j, JSON.stringify({ type: 'message.updated', properties: { info: { role: 'assistant', parentID: 'msg_other' } } }) + '\n')
+    expect(deliveryProcessed(probe, env)).toBe(false)
+    appendFileSync(j, JSON.stringify({ type: 'message.updated', properties: { info: { role: 'assistant', parentID: 'msg_u' } } }) + '\n')
+    expect(deliveryProcessed(probe, env)).toBe(true)
+  })
+})
+
+describe('processInflight — redeliver, or the sender learns', () => {
+  const cfg = () => ({ stateDir: state, eventLogDir: join(root, 'logs') }) as never
+  beforeEach(async () => {
+    for (const p of ['alice', 'bob', 'iapeer']) await upsertPeer({ personality: p, runtime: 'claude', cwd: join(root, p), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })
+  })
+  test('orphan → redelivered AS the original sender with a visible prefix', async () => {
+    recordInflight(state, entry())
+    const sends: Array<{ from: string; to: string; message: string }> = []
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, {
+      processed: () => false,
+      send: (async (caller: { personality: string }, input: { personality: string; message: string }) => {
+        sends.push({ from: caller.personality, to: input.personality, message: input.message })
+        return ok({ ok: true, delivered_to: { personality: input.personality, runtime: 'claude' }, woke: true, ts: 'x' })
+      }) as never,
+    })
+    expect(sends).toHaveLength(1)
+    expect(sends[0]).toMatchObject({ from: 'alice', to: 'bob' })
+    expect(sends[0]!.message).toBe(redeliveryMessage(entry()))
+    expect(listOrphanIdentities(state)).toEqual([])
+  })
+
+  test('redelivery fails (e.g. crash-loop guard) → orphan consumed and the attempt recorded; never silently kept or dropped', async () => {
+    recordInflight(state, entry())
+    const calls: Array<{ from: string; to: string; message: string }> = []
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, {
+      processed: () => false,
+      send: (async (caller: { personality: string }, input: { personality: string; message: string }) => {
+        calls.push({ from: caller.personality, to: input.personality, message: input.message })
+        return input.personality === 'bob' ? err('peer "bob" offline and wake failed: crash-loop guard') : ok({ ok: true, delivered_to: { personality: 'alice', runtime: 'claude' }, woke: false, ts: 'x' })
+      }) as never,
+    })
+    expect(calls.map(c => `${c.from}->${c.to}`)).toEqual(['alice->bob', 'iapeer->alice']) // redelivery, then the explicit notice
+    expect(calls[1]!.message).toMatch(/acknowledged but NOT processed.*crash-loop guard/)
+    expect(listOrphanIdentities(state)).toEqual([])
+  })
+})

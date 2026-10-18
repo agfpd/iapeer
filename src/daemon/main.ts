@@ -56,7 +56,10 @@ import type { ResolvedCaller } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import {
   createComposerDeliveryQueue,
+  deliveryProcessed,
   routeSend,
+  type InflightNote,
+  type RouteDeps,
   type ComposerQueueRouteDeps,
   type ComposerQueuedDelivery,
   type EphemeralRouteDeps,
@@ -73,6 +76,9 @@ import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesyn
 import { startGoalWatch } from './goalwatch.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
+import { randomBytes } from 'crypto'
+import { listInflightIdentities, listOrphanIdentities, recordInflight, sweepInflight, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
+import { hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
  *  (claude/codex `--transport http <url>`) bind to a fixed URL, so production needs
@@ -249,6 +255,88 @@ function queuedFailureMessage(job: ComposerQueuedDelivery, reason: string): stri
  *   2) before daemon shutdown/restart, fail every pending queued envelope back
  *      to its sender, so `queued` never becomes silent loss.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// OC07 — durable inbound across a session death (lifecycle/inflight.ts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The transport hook → the inflight ledger. Best-effort by contract (transport swallows throws). */
+export function makeNoteInflight(cfg: LifecycleConfig): (note: InflightNote) => void {
+  return note => recordInflight(cfg.stateDir, { ...note, id: randomBytes(6).toString('hex'), ts: Date.now() })
+}
+
+/** The redelivery prefix — the model sees it is a re-send, not a duplicate of something it answered. */
+export function redeliveryMessage(e: InflightEntry): string {
+  return `[redelivered by iapeer: the receiving session ended before answering this message; originally sent ${e.sentAt}]\n${e.message}`
+}
+
+/** Body of the explicit non-delivery notice to the original sender. */
+export function undeliveredNotice(e: InflightEntry, reason: string): string {
+  return (
+    `iapeer: your message to "${e.personality}" (${e.runtime}), sent ${e.sentAt}${e.topic ? ` topic=${e.topic}` : ''}, ` +
+    `was acknowledged but NOT processed: the receiving session ended before answering it, and redelivery failed (${reason}). ` +
+    `Resend it if it still matters. First line: ${e.message.split('\n')[0]!.slice(0, 200)}`
+  )
+}
+
+/**
+ * One OC07 pass, run after every supervise tick. (1) Sweep every ledger: processed entries leave;
+ * unprocessed entries whose receiving session is gone or replaced become orphans. (2) Every orphan is
+ * redelivered through the normal route AS ITS ORIGINAL SENDER (wake-on-miss, guards, crash-loop guard
+ * all apply); if that fails, the sender gets an explicit notice from iapeer. Either way the orphan
+ * leaves the store — the invariant «processed by a later session, or the sender knows» holds.
+ */
+export async function processInflight(
+  cfg: LifecycleConfig,
+  env: NodeJS.ProcessEnv,
+  routeDeps: RouteDeps,
+  seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean } = {},
+): Promise<void> {
+  const processed = seam.processed ?? ((e: InflightEntry) => deliveryProcessed(e, env))
+  const send = seam.send ?? routeSend
+  for (const identity of listInflightIdentities(cfg.stateDir)) {
+    const n = sweepInflight(cfg.stateDir, identity, {
+      sessionToken: id => (hostSessionAlive(id, env) ? hostSessionToken(id, env) : null),
+      processed,
+    })
+    if (n > 0) appendLifecycleEvent(cfg.eventLogDir, { ev: 'inflight-orphaned', identity, count: n }, { env })
+  }
+  for (const identity of listOrphanIdentities(cfg.stateDir)) {
+    for (const e of takeOrphans(cfg.stateDir, identity)) {
+      const index = readPeersIndex({ env })
+      let reason: string
+      try {
+        const caller = resolveCallerIdentity({ personality: e.caller.personality, runtime: e.caller.runtime }, index)
+        const r = await send(
+          caller,
+          { personality: e.personality, runtime: e.runtime, message: redeliveryMessage(e), ...(e.topic ? { topic: e.topic } : {}), ...(e.attachments?.length ? { attachments: e.attachments } : {}) },
+          routeDeps,
+        )
+        if (r.ok) {
+          appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-redelivered', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'true', woke: String(r.value.woke) })
+          continue
+        }
+        reason = r.error.message
+      } catch (x) {
+        reason = x instanceof Error ? x.message : String(x)
+      }
+      // Redelivery failed → the sender must learn it explicitly.
+      let notified = 'false'
+      try {
+        const self = findPeer(index, 'iapeer')
+        const callerAddr = `${e.caller.runtime}-${e.caller.personality}`
+        if (self && callerAddr !== `${self.runtime}-iapeer`) {
+          const sender = resolveCallerIdentity({ personality: 'iapeer', runtime: self.runtime }, index)
+          const n = await send(sender, { personality: e.caller.personality, runtime: e.caller.runtime, message: undeliveredNotice(e, reason), topic: e.topic ?? 'delivery-failed' }, routeDeps)
+          notified = String(n.ok)
+        }
+      } catch {
+        notified = 'false'
+      }
+      appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-undelivered', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', err: reason.slice(0, 300), notified })
+    }
+  }
+}
+
 export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): ComposerQueueRouteDeps {
   const noteLiveTopic = makeNoteLiveTopic(cfg, env)
   const onDelivered = makeArmEphemeralOnDelivered(cfg)
@@ -264,6 +352,7 @@ export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.Pro
     logDir: cfg.logDir,
     noteLiveTopic,
     noteDelivered: identity => setLastDelivered(cfg, identity),
+    noteInflight: makeNoteInflight(cfg),
     onDelivered,
     notifyFailed: async (job, reason) => {
       const index = readPeersIndex({ env })
@@ -373,6 +462,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   const armEphemeralOnDelivered = makeArmEphemeralOnDelivered(cfg)
   const ephemeral = makeEphemeralRouteDeps(cfg, env)
   const composerQueue = makeComposerQueueRouteDeps(cfg, env)
+  const noteInflight = makeNoteInflight(cfg)
   // Notice board (docs/19) — ONE instance shared by the mute-watch (raises) and the
   // fleet handler (serves /notices + the snapshot field). Constructed HERE, at the
   // composition point, because that sharing is the whole wiring.
@@ -463,6 +553,8 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // В7 — a confirmed live delivery floors the target's idle proxy (setLastDelivered), so a
     // just-delivered message is never reaped away before its turn record lands.
     noteDelivered: identity => setLastDelivered(cfg, identity),
+    // OC07 — confirmed delivery to an agent endpoint → inflight ledger (redelivered if its session dies first).
+    noteInflight,
     // Busy-human-composer queue: fast queued ack, async drain, fail all pending
     // on daemon close/update so a queued envelope is never silently lost.
     composerQueue,
@@ -496,6 +588,16 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         // start (durable queue), and RETRIES a failed wake (the item stayed at the
         // head). Identities without a queue or with a live session are no-ops.
         await drainAllEphemeralQueues(cfg, { env })
+        // OC07 — acknowledged-but-unanswered inbound of a dead session: redeliver or tell the sender.
+        await processInflight(cfg, env, {
+          env,
+          wake: makeWakeFn(cfg, env),
+          ephemeral,
+          noteLiveTopic,
+          noteDelivered: identity => setLastDelivered(cfg, identity),
+          noteInflight,
+          isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
+        })
       },
       // Surface a supervise-tick throw that the daemon timer would otherwise SWALLOW (the class that
       // hid a stuck reaper for hours): record ev=supervise-error in lifecycle.log, flattened to one

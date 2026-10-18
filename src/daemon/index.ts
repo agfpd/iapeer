@@ -45,7 +45,7 @@ import { IAPEER_VERSION } from '../core/version.ts'
 import { pluginStateDir, writeFileAtomic, type StorageOptions } from '../storage/index.ts'
 import { readPeersIndex, type PeersIndex } from '../registry/index.ts'
 import { resolveCallerIdentity, type CallerIdentity, type ResolvedCaller } from '../identity/index.ts'
-import { routeSend, type ComposerQueueRouteDeps, type EphemeralRouteDeps, type SendToPeerInput, type WakeFn } from '../transport/index.ts'
+import { routeSend, type ComposerQueueRouteDeps, type EphemeralRouteDeps, type RouteDeps, type SendToPeerInput, type WakeFn } from '../transport/index.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
 
 export const CALLER_HEADER = 'x-iapeer-identity'
@@ -226,6 +226,8 @@ export interface CallToolDeps {
   noteLiveTopic?: (identity: string, topic: string) => void
   /** В7 — confirmed-delivery stamp → the target's idle-proxy floor (see transport.RouteDeps.noteDelivered). */
   noteDelivered?: (identity: string) => void
+  /** OC07 — confirmed delivery to an agent endpoint → the inflight ledger (see transport.RouteDeps.noteInflight). */
+  noteInflight?: RouteDeps['noteInflight']
   /** Busy-human-composer queue — see transport.createComposerDeliveryQueue. */
   composerQueue?: ComposerQueueRouteDeps
   /** H4 launchd-managed detector — see transport.RouteDeps.isLaunchdManaged (the
@@ -255,6 +257,7 @@ export async function callTool(
       ephemeral: deps.ephemeral,
       noteLiveTopic: deps.noteLiveTopic,
       noteDelivered: deps.noteDelivered,
+      noteInflight: deps.noteInflight,
       composerQueue: deps.composerQueue,
       isLaunchdManaged: deps.isLaunchdManaged,
     })
@@ -466,6 +469,8 @@ export interface StartDaemonOptions extends StorageOptions {
   /** В7 — confirmed-delivery stamp → the target's idle-proxy floor (setLastDelivered). OFF by default;
    *  the production main wires it. */
   noteDelivered?: (identity: string) => void
+  /** OC07 — confirmed delivery to an agent endpoint → the inflight ledger (see transport.RouteDeps.noteInflight). */
+  noteInflight?: RouteDeps['noteInflight']
   /**
    * Busy-human-composer queue — async acceptance for live local TUI delivery when
    * an attached operator has non-dim text in the target composer. OFF by default
@@ -510,6 +515,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     ephemeral: opts.ephemeral,
     noteLiveTopic: opts.noteLiveTopic,
     noteDelivered: opts.noteDelivered,
+    noteInflight: opts.noteInflight,
     composerQueue: opts.composerQueue,
     isLaunchdManaged: opts.isLaunchdManaged,
   }

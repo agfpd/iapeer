@@ -139,6 +139,33 @@ there. Owner policy (2026-10-18): this is allowed, but never silent.
 - The model actually used is reported by the plugin (`state.json` `model`) and
   appears as the fleet snapshot field `runtimes[].model` (docs/15).
 
+## Durable inbound across a session death (OC07, all agent runtimes)
+
+Invariant: an inbound the core acknowledged is either processed by a later
+session, or its sender is told explicitly that it was not. A runtime's input
+queue lives in its process. Measured 2026-10-18 on claude: a message acked during
+a busy turn had its `user` record (and the API request) in the transcript, the
+process was SIGKILLed before any answer, and the fresh next session never saw it.
+
+- Every confirmed delivery to an agent endpoint (live, wake, launchd-revive,
+  composer queue) is recorded in `<stateDir>/<identity>.inflight.jsonl` with the
+  hosting session token.
+- «Processed» means a model response after the record carrying the envelope:
+  claude — an `assistant` record after a non-`queue-operation` record; codex — a
+  non-user `response_item` or `agent_message`; opencode — an assistant message
+  whose `parentID` is that user message. «Recorded» alone is not processed.
+- After each supervise tick, processed entries leave. Unprocessed entries whose
+  session is gone or was replaced become orphans and are redelivered through the
+  normal route as their original sender, prefixed `[redelivered by iapeer: …]`
+  (wake-on-miss and the crash-loop guard apply). If redelivery fails, the sender
+  receives an explicit notice from `iapeer`. Logged as `ev=inflight-orphaned`
+  (lifecycle.log) and `ev=inflight-redelivered|inflight-undelivered`
+  (delivery.log).
+- A false «not processed» costs a visible duplicate, never a silent loss.
+
+The real death cause is recorded too: the supervisor waits for the reap, so a
+SIGKILL is logged as `dead_signal=SIGKILL`, never as a clean exit 0.
+
 ## Acceptance matrix
 
 `OPEN` includes implementation and/or missing live proof. Unit tests, config-file
