@@ -80,8 +80,29 @@ function mcpApprovalActive(pane: string): boolean {
   return pane.includes('new MCP server') && pane.includes('found in')
 }
 
+// Resume-CONFIRM dialog (claude 2.1.30x, live walt-trader 22.10): resuming a long, long-inactive
+// session asks "<title>" with options "1. Resume" (DEFAULT) / "2. Start a new conversation …" and
+// footer "Enter to confirm · Esc to resume". It is NOT the older 'Resume from summary' picker, so it
+// matched no marker: the boot-driver sent nothing, waitHostReady spun to bootDeadline, the wake held
+// the lock for minutes and the next wake replaced → resumed into the SAME dialog (a loop). Needles are
+// built from fragments (В40: a peer viewing this source must not carry the contiguous phrase) and the
+// match is POSITION-based — the bottom-most ❯ row must be one of the dialog's own options, so a quote of
+// the dialog in a replayed transcript tail (composer ❯ below it) never matches.
+const RESUME_CONFIRM_TITLE = 'Resume this ' + 'conversation?'
+const RESUME_CONFIRM_FOOTER = 'Esc to ' + 'resume'
+function resumeConfirmCursorRow(pane: string): string | null {
+  if (!pane.includes(RESUME_CONFIRM_TITLE) || !pane.includes(RESUME_CONFIRM_FOOTER)) return null
+  let lastCursorRow = ''
+  for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
+  return /❯\s*(?:\d\.\s*)?(?:Resume\s*$|Start a new conversation)/.test(lastCursorRow) ? lastCursorRow : null
+}
+/** Cursor-verified: true ⇔ the live resume-confirm dialog has its cursor ON "1. Resume". */
+function resumeConfirmOnResume(row: string): boolean {
+  return /❯\s*(?:\d\.\s*)?Resume\s*$/.test(row)
+}
+
 function anyBootDialog(pane: string): boolean {
-  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m)) || mcpApprovalActive(pane)
+  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m)) || mcpApprovalActive(pane) || resumeConfirmCursorRow(pane) !== null
 }
 
 // В40 — the fullscreen-renderer nag needles are BUILT from fragments so this SOURCE FILE never contains
@@ -365,6 +386,13 @@ export const claudeAdapter: RuntimeAdapter = {
   bootDialogKeys(pane: string): string[] | null {
     if (pane.includes('Resume from summary')) {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
+    }
+    // Resume-CONFIRM (2.1.30x): a resume wake must CONTINUE the dialogue (no fresh start, no compact).
+    // Same cursor discipline as above: Enter ONLY once the cursor is SEEN on "1. Resume"; on
+    // "2. Start a new conversation" step Up (a swallowed Up self-heals next iteration).
+    {
+      const row = resumeConfirmCursorRow(pane)
+      if (row !== null) return resumeConfirmOnResume(row) ? ['Enter'] : ['Up']
     }
     // Bypass accept: 2.1.30x dropped the "1."/"2." numbering ("❯ No, exit" / "Yes, I
     // accept") — matching only "❯ 2." Down-toggled forever (live, 2026-10-17). Confirm
