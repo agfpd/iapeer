@@ -446,23 +446,33 @@ describe('claudeAdapter', () => {
     expect(claudeAdapter.bootDialogKeys(live170)).toEqual(['Down'])
   })
 
-  test('resume-CONFIRM dialog (2.1.30x, live walt-trader 22.10): gates ready, Enter ONLY on a proven "1. Resume"', () => {
+  test('resume-CONFIRM dialog (2.1.30x, live walt-trader 22.10): gates ready; continues the SAME dialogue on both triggers', () => {
     const T = 'Resume this ' + 'conversation?'
-    const F = 'Enter to confirm · Esc to ' + 'resume'
     const head = `${T}\nThis conversation has been inactive for 3h16m and is 423.4k tokens long. Resuming it will use about 8% of your 5-hour usage limit.\n`
-    const onResume = `${head}❯ 1. Resume \n  2. Start a new conversation Claude can look this one up if you refer to it later\n\n${F}`
-    const onNew = `${head}  1. Resume\n❯ 2. Start a new conversation Claude can look this one up if you refer to it later\n\n${F}`
-    // the live layout (cursor on the default "1. Resume") → confirm
+    const NEW = 'Start a new ' + 'conversation Claude can look this one up if you refer to it later'
+    // trigger 'resume' at boot — numbered rows, the live walt-trader frame (cursor on the default "1. Resume")
+    const onResume = `${head}❯ 1. Resume \n  2. ${NEW}\n\nEnter to confirm · Esc to resume`
     expect(claudeAdapter.bootDialogKeys(onResume)).toEqual(['Enter'])
-    // cursor on "Start a new conversation" → step back up, never confirm a fresh start
-    expect(claudeAdapter.bootDialogKeys(onNew)).toEqual(['Up'])
-    // the dialog is NOT an input surface — even with the bypass banner co-present
-    expect(claudeAdapter.isInputReady(`${onResume}\nbypass permissions on`)).toBe(false)
+    // cursor on "Start a new conversation" (server flag can default-focus it) → Escape (= resume), NEVER Enter
+    const onNew = `${head}  1. Resume\n❯ 2. ${NEW}\n\nEnter to confirm · Esc to resume`
+    expect(claudeAdapter.bootDialogKeys(onNew)).toEqual(['Escape'])
+    // no row focused → Escape
+    const noCursor = `${head}  Resume\n  ${NEW}\n\nEnter to confirm · Esc to dismiss`
+    expect(claudeAdapter.bootDialogKeys(noCursor)).toEqual(['Escape'])
+    // the dialog is NOT an input surface
+    expect(claudeAdapter.isInputReady(onResume)).toBe(false)
     expect(claudeAdapter.isInputReady(onResume, 'gated')).toBe(false)
-    // a QUOTE of the dialog in a replayed tail, with the live composer ❯ below it, is not the dialog
+    // trigger 'idle' mid-session — rows UNNUMBERED, handled by the nag-watcher path too
+    const idle = `● previous turn\n${head}❯ Resume\n  ${NEW}\nYour unsent message will still be there after you answer.\n\nEnter to confirm · Esc to dismiss`
+    expect(claudeAdapter.nagDismissKeys!(idle)).toEqual(['Enter'])
+    expect(claudeAdapter.nagDismissKeys!(onNew)).toEqual(['Escape'])
+    // a QUOTE of the dialog in a replayed tail (live composer + banner below it) is not the dialog
     const quoted = `${onResume}\n● noted\n❯ \n  ⏵⏵ bypass permissions on`
     expect(claudeAdapter.bootDialogKeys(quoted)).toBeNull()
+    expect(claudeAdapter.nagDismissKeys!(quoted)).toBeNull()
     expect(claudeAdapter.isInputReady(quoted)).toBe(true)
+    const quotedGated = `${onResume}\n● noted\n❯ Try "edit <filepath> to..."`
+    expect(claudeAdapter.bootDialogKeys(quotedGated)).toBeNull()
   })
 
   test('bootDialogKeys: bypass-permissions ACCEPT is CURSOR-VERIFIED — Down to "2. Yes", Enter ONLY when proven', () => {

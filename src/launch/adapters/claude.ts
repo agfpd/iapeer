@@ -80,29 +80,45 @@ function mcpApprovalActive(pane: string): boolean {
   return pane.includes('new MCP server') && pane.includes('found in')
 }
 
-// Resume-CONFIRM dialog (claude 2.1.30x, live walt-trader 22.10): resuming a long, long-inactive
-// session asks "<title>" with options "1. Resume" (DEFAULT) / "2. Start a new conversation …" and
-// footer "Enter to confirm · Esc to resume". It is NOT the older 'Resume from summary' picker, so it
-// matched no marker: the boot-driver sent nothing, waitHostReady spun to bootDeadline, the wake held
-// the lock for minutes and the next wake replaced → resumed into the SAME dialog (a loop). Needles are
-// built from fragments (В40: a peer viewing this source must not carry the contiguous phrase) and the
-// match is POSITION-based — the bottom-most ❯ row must be one of the dialog's own options, so a quote of
-// the dialog in a replayed transcript tail (composer ❯ below it) never matches.
+// Resume-CONFIRM dialog (claude 2.1.30x cold-cache quota warning, live walt-trader 22.10): resuming a
+// long, long-inactive session asks "<title>" — "This conversation has been inactive for … Resuming it will
+// use about N% of your 5-hour usage limit" — with options "Resume" / "Start a new conversation". Claude
+// raises it on TWO triggers (2.1.308 source): 'resume' at boot (numbered rows, Esc = resume) and 'idle'
+// when input is submitted into a live session whose cache went cold (rows UNNUMBERED, Esc = dismiss, the
+// typed message is kept). Both Esc outcomes continue the SAME dialogue — only the explicit
+// "new_conversation" row starts over. It matched no marker: the boot-driver sent nothing, waitHostReady
+// spun to bootDeadline holding the wake lock, and the next wake replaced → resumed into the SAME dialog.
+// Needles are fragments (В40: a peer viewing this source must not carry the contiguous phrase). LIVE ⇔ no
+// composer/banner below the last title: a quote of the dialog in a replayed tail has the ready composer
+// (and the bypass banner) rendered after it.
 const RESUME_CONFIRM_TITLE = 'Resume this ' + 'conversation?'
-const RESUME_CONFIRM_FOOTER = 'Esc to ' + 'resume'
-function resumeConfirmCursorRow(pane: string): string | null {
-  if (!pane.includes(RESUME_CONFIRM_TITLE) || !pane.includes(RESUME_CONFIRM_FOOTER)) return null
-  let lastCursorRow = ''
-  for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
-  return /❯\s*(?:\d\.\s*)?(?:Resume\s*$|Start a new conversation)/.test(lastCursorRow) ? lastCursorRow : null
+const RESUME_CONFIRM_NEW_ROW = 'Start a new ' + 'conversation'
+type ResumeConfirm = { cursor: 'resume' | 'new' | 'none' }
+function resumeConfirmLive(pane: string): ResumeConfirm | null {
+  const at = pane.lastIndexOf(RESUME_CONFIRM_TITLE)
+  if (at < 0) return null
+  const below = pane.slice(at)
+  if (!below.includes(RESUME_CONFIRM_NEW_ROW)) return null
+  if (below.includes('bypass permissions on')) return null
+  let cursor: ResumeConfirm['cursor'] = 'none'
+  for (const line of below.split(/\r?\n/)) {
+    if (!line.includes('❯')) continue
+    if (/❯\s*(?:\d\.\s*)?Resume\s*$/.test(line)) cursor = 'resume'
+    else if (/❯\s*(?:\d\.\s*)?Start a new/.test(line)) cursor = 'new'
+    else return null // a non-option ❯ below the title = the live composer → this is a quote
+  }
+  return { cursor }
 }
-/** Cursor-verified: true ⇔ the live resume-confirm dialog has its cursor ON "1. Resume". */
-function resumeConfirmOnResume(row: string): boolean {
-  return /❯\s*(?:\d\.\s*)?Resume\s*$/.test(row)
+/** Keys that CONTINUE the dialogue: Enter only on a cursor PROVEN on "Resume"; otherwise Escape (its
+ *  outcome is resume/dismiss on both triggers — never the new-conversation row a blind Enter could hit). */
+function resumeConfirmKeys(pane: string): string[] | null {
+  const d = resumeConfirmLive(pane)
+  if (!d) return null
+  return d.cursor === 'resume' ? ['Enter'] : ['Escape']
 }
 
 function anyBootDialog(pane: string): boolean {
-  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m)) || mcpApprovalActive(pane) || resumeConfirmCursorRow(pane) !== null
+  return CLAUDE_BOOT_DIALOG_MARKERS.some(m => pane.includes(m)) || mcpApprovalActive(pane) || resumeConfirmLive(pane) !== null
 }
 
 // В40 — the fullscreen-renderer nag needles are BUILT from fragments so this SOURCE FILE never contains
@@ -388,11 +404,9 @@ export const claudeAdapter: RuntimeAdapter = {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
     }
     // Resume-CONFIRM (2.1.30x): a resume wake must CONTINUE the dialogue (no fresh start, no compact).
-    // Same cursor discipline as above: Enter ONLY once the cursor is SEEN on "1. Resume"; on
-    // "2. Start a new conversation" step Up (a swallowed Up self-heals next iteration).
     {
-      const row = resumeConfirmCursorRow(pane)
-      if (row !== null) return resumeConfirmOnResume(row) ? ['Enter'] : ['Up']
+      const k = resumeConfirmKeys(pane)
+      if (k) return k
     }
     // Bypass accept: 2.1.30x dropped the "1."/"2." numbering ("❯ No, exit" / "Yes, I
     // accept") — matching only "❯ 2." Down-toggled forever (live, 2026-10-17). Confirm
@@ -454,6 +468,12 @@ export const claudeAdapter: RuntimeAdapter = {
     // the BOTTOM-MOST cursor row (`❯`) sits on the modal's option. A mere quote of the modal has the READY
     // composer `❯` rendered BELOW it as the bottom-most cursor row. So: fire only when the last `❯`-bearing
     // row is the modal's selected option — a displayed quote never is.
+    // Resume-CONFIRM 'idle' trigger: a message delivered into a live, cache-cold session raises it
+    // mid-session and parks the message behind it — continue the same dialogue.
+    {
+      const k = resumeConfirmKeys(pane)
+      if (k) return k
+    }
     if (!isFullscreenNagText(pane)) return null
     let lastCursorRow = ''
     for (const line of pane.split(/\r?\n/)) if (line.includes('❯')) lastCursorRow = line
