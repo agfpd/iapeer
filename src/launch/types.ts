@@ -462,6 +462,8 @@ export interface PreparedLaunch {
 export interface LaunchConfig extends LaunchAdapterConfig {
   sockDir: string
   bootDeadlineSecs: number
+  /** Seconds an unrecognized boot modal must stay unchanged before the bring-up fails fast. */
+  bootModalSecs?: number
   readyGateSecs: number
   /** Log dir for pipe-pane output. */
   logDir: string
@@ -493,6 +495,8 @@ export interface LaunchResult {
   identity: string
   process_address: string
   reason?: string
+  /** Set iff the bring-up failed FAST on an unrecognized boot modal (waitHostReady fail-fast). */
+  bootModal?: { content: string; option1: string }
 }
 
 /**

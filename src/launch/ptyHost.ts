@@ -221,18 +221,57 @@ export async function startPtyHost(b: {
   }
 }
 
+/** How long an UNRECOGNIZED boot modal must sit unchanged before the bring-up fails fast. Known
+ *  dialogs are answered by the supervisor's boot-driver within one or two 2 s iterations, so a modal
+ *  that survives this window is one nothing will ever answer. Override: IAPEER_BOOT_MODAL_SECS. */
+export const BOOT_MODAL_STABLE_SECS = 20
+
+/** Outcome of waitHostReady. `bootModal` ⇔ the wait was cut short by an unrecognized modal. */
+export type HostReadyOutcome =
+  | { ready: true }
+  | { ready: false; bootModal?: { content: string; option1: string } }
+
+/**
+ * Generic boot-time modal fallback for a select the adapter's unknownBlockingModal does not parse
+ * (e.g. unnumbered rows, a footer outside its cancel/go-back vocabulary — the 2.1.30x resume-confirm
+ * was both). Structural: a bottom-area "Enter/Esc to <verb>" footer with a cursor-glyph row above it and
+ * NO ready composer. Only consulted at boot, on a not-ready pane the boot-driver has no keys for.
+ */
+export function genericBootPrompt(view: string): { content: string; option1: string } | null {
+  const lines = view.split(/\r?\n/).map(l => l.replace(/\s+$/, ''))
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
+  const tail = lines.slice(-12)
+  // A SELECT footer verb only — never a working-state hint like "esc to interrupt" (a booting composer).
+  const footerIdx = tail.findIndex(l => /\b(?:enter|esc)\s+to\s+(?:confirm|select|cancel|go back|resume|dismiss|continue|accept|exit|skip)\b/i.test(l))
+  if (footerIdx < 0) return null
+  const above = tail.slice(0, footerIdx)
+  const cursorRow = [...above].reverse().find(l => /[❯›]\s*\S/.test(l))
+  if (!cursorRow) return null
+  return { content: tail.join('\n'), option1: cursorRow.replace(/^.*?[❯›]\s*/, '').trim() }
+}
+
 /**
  * Wait for the hosted input surface to be ready: poll the pane-log model and run the adapter's
  * isInputReady (the supervisor's boot-driver answers dialogs internally, so launch does NOT drive
- * them). Returns true when ready, false on deadline / session death. Mirrors the tmux boot loop's
- * 2 s cadence + bootDeadline.
+ * them). Mirrors the tmux boot loop's 2 s cadence + bootDeadline.
+ *
+ * FAIL-FAST on an unrecognized modal (22.10 walt-trader): a boot dialog no adapter knows sat on screen
+ * while this loop spun to bootDeadline (240 s) HOLDING THE WAKE LOCK — every other sender got
+ * wake-lock-held, and the next wake replaced → re-launched into the same dialog. Now: when the pane is
+ * not ready, the boot-driver has no keys for it (bootDialogKeys null), and a modal is detected
+ * (adapter.unknownBlockingModal, else genericBootPrompt) with the SAME content for modalStableSecs,
+ * the wait ends with `bootModal` — the caller tears the host down and fails the wake explicitly.
  */
 export async function waitHostReady(
-  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; paneLogStartByte?: number; approvalMode?: ApprovalMode; env?: NodeJS.ProcessEnv },
+  b: { identity: string; logDir: string; adapter: RuntimeAdapter; bootDeadlineSecs: number; modalStableSecs?: number; paneLogStartByte?: number; approvalMode?: ApprovalMode; env?: NodeJS.ProcessEnv },
   sleep: (ms: number) => Promise<void>,
-): Promise<boolean> {
+  now: () => number = Date.now,
+  seam: { alive?: () => boolean; viewport?: () => Promise<string | null> } = {},
+): Promise<HostReadyOutcome> {
   const log = `${b.logDir}/${b.identity}.log`
   const iters = Math.max(1, Math.ceil(b.bootDeadlineSecs / 2))
+  const stableMs = (b.modalStableSecs ?? BOOT_MODAL_STABLE_SECS) * 1000
+  let modal: { content: string; option1: string; since: number } | null = null
   // paneLogStartByte = the pane-log size at THIS session's spawn (captured by launch before the
   // supervisor opens the shared append-only log). Passing it to the model render confines readiness to
   // bytes THIS session wrote — without it a prior session's trailing `❯ ready` frame in the shared log
@@ -240,11 +279,17 @@ export async function waitHostReady(
   // session (the first message is then lost). See readyGateModel.loadPaneLogModel.
   for (let i = 0; i < iters; i++) {
     await sleep(2000)
-    if (!hostSessionAlive(b.identity, b.env)) return false
-    const view = await paneLogViewport(log, HOST_COLS, HOST_ROWS, b.paneLogStartByte ?? 0)
-    if (view && b.adapter.isInputReady(view, b.approvalMode)) return true
+    if (!(seam.alive ? seam.alive() : hostSessionAlive(b.identity, b.env))) return { ready: false }
+    const view = seam.viewport ? await seam.viewport() : await paneLogViewport(log, HOST_COLS, HOST_ROWS, b.paneLogStartByte ?? 0)
+    if (!view) continue
+    if (b.adapter.isInputReady(view, b.approvalMode)) return { ready: true }
+    const known = b.adapter.bootDialogKeys(view)
+    const found = known && known.length ? null : (b.adapter.unknownBlockingModal?.(view) ?? genericBootPrompt(view))
+    if (!found) { modal = null; continue }
+    if (!modal || modal.content !== found.content) { modal = { ...found, since: now() }; continue }
+    if (now() - modal.since >= stableMs) return { ready: false, bootModal: { content: modal.content, option1: modal.option1 } }
   }
-  return false
+  return { ready: false }
 }
 
 /** Deliver the first/next message to the hosted session over its supervisor socket. */

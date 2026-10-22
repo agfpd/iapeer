@@ -78,6 +78,8 @@ export interface LifecycleConfig {
    *  isolated by the same sandbox as stateDir (eventlog.ts). */
   eventLogDir: string
   bootDeadlineSecs: number
+  /** Unrecognized boot modal: fail the bring-up once it sat unchanged this long (launch fail-fast). */
+  bootModalSecs?: number
   readyGateSecs: number
   idleSecs: number
   /** Crash-loop guard: refuse to (re)launch after this many deaths within the window. */
@@ -126,6 +128,7 @@ export function loadLifecycleConfig(env: NodeJS.ProcessEnv = process.env): Lifec
     logDir: join(root, LOGS_DIR, 'lifecycle'),
     eventLogDir: join(root, LOGS_DIR, 'iapeer'),
     bootDeadlineSecs: num(env.IAPEER_BOOT_DEADLINE_SECS, 240),
+    bootModalSecs: num(env.IAPEER_BOOT_MODAL_SECS, 20),
     readyGateSecs: num(env.IAPEER_READY_GATE_SECS, 120),
     idleSecs: num(env.IAPEER_IDLE_SECS, 3600),
     crashLoopMax: num(env.IAPEER_CRASHLOOP_MAX, 3),
@@ -1024,6 +1027,9 @@ export interface WakeResult {
 export interface WakeDeps {
   env?: NodeJS.ProcessEnv
   cfg?: LifecycleConfig
+  /** A bring-up failed fast on an unrecognized boot modal — the daemon's alert outlet (best-effort,
+   *  fire-and-forget; never awaited by the wake). */
+  onBootModal?: (info: { personality: string; runtime: string; identity: string; content: string; option1: string; reason: string }) => void
 }
 
 /**
@@ -1283,6 +1289,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       ...(cfg.opencodeBin ? { opencodeBin: cfg.opencodeBin } : {}),
       sockDir: cfg.sockDir,
       bootDeadlineSecs: cfg.bootDeadlineSecs,
+      ...(cfg.bootModalSecs !== undefined ? { bootModalSecs: cfg.bootModalSecs } : {}),
       readyGateSecs: cfg.readyGateSecs,
       logDir: cfg.logDir,
       // Exit-cause log → next to lifecycle.log (~/.iapeer/logs/iapeer), where the
@@ -1312,6 +1319,13 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     if (reloadResumeRef && isStopped(cfg, identity) && !isLaunchdManaged(args.personality, env)) {
       killPtyHost(identity, env, { reason: 'stop-during-capability-reload' }, cfg.supervisorRunDir ?? hostRunDir(env))
       return { status: 'FAILED', woke: false, runtime, stopped: true, pending: true, reason: 'operator stopped the endpoint during reload launch' }
+    }
+    if (result.status === 'FAILED' && result.bootModal) {
+      const first = result.bootModal.content.split('\n').map(l => l.trim()).find(Boolean) ?? ''
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'boot-modal', identity, option1: result.bootModal.option1.slice(0, 120), title: first.slice(0, 200) }, { env })
+      try {
+        deps.onBootModal?.({ personality: args.personality, runtime, identity, content: result.bootModal.content, option1: result.bootModal.option1, reason: result.reason ?? 'unknown-boot-modal' })
+      } catch { /* the alert is best-effort — never masks the FAILED reason */ }
     }
     if (result.status === 'FAILED') {
       // enroll-on-FAILED (0.2.57): launch can return FAILED on a ready-gate false-negative
