@@ -1027,9 +1027,6 @@ export interface WakeResult {
 export interface WakeDeps {
   env?: NodeJS.ProcessEnv
   cfg?: LifecycleConfig
-  /** A bring-up failed fast on an unrecognized boot modal — the daemon's alert outlet (best-effort,
-   *  fire-and-forget; never awaited by the wake). */
-  onBootModal?: (info: { personality: string; runtime: string; identity: string; content: string; option1: string; reason: string }) => void
 }
 
 /**
@@ -1039,6 +1036,11 @@ export interface WakeDeps {
  * withWakeLock. Refuses a launchd-managed peer (H4). Ф2 claude path; codex is a
  * follow-up (the structure generalizes).
  */
+/** The first line of a modal screen that carries text — box-drawing borders and separators skipped. */
+export function bootModalTitle(content: string): string {
+  return content.split('\n').map(l => l.replace(/[\u2500-\u257f]/g, ' ').trim()).find(Boolean) ?? ''
+}
+
 export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<WakeResult> {
   const env = deps.env ?? process.env
   const cfg = deps.cfg ?? loadLifecycleConfig(env)
@@ -1321,11 +1323,18 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       return { status: 'FAILED', woke: false, runtime, stopped: true, pending: true, reason: 'operator stopped the endpoint during reload launch' }
     }
     if (result.status === 'FAILED' && result.bootModal) {
-      const first = result.bootModal.content.split('\n').map(l => l.trim()).find(Boolean) ?? ''
-      appendLifecycleEvent(cfg.eventLogDir, { ev: 'boot-modal', identity, option1: result.bootModal.option1.slice(0, 120), title: first.slice(0, 200) }, { env })
-      try {
-        deps.onBootModal?.({ personality: args.personality, runtime, identity, content: result.bootModal.content, option1: result.bootModal.option1, reason: result.reason ?? 'unknown-boot-modal' })
-      } catch { /* the alert is best-effort — never masks the FAILED reason */ }
+      // The DURABLE fact every wake path shares (daemon route, CLI `iapeer send`, notifier): the daemon's
+      // boot-modal watch tails this line into the owner board + the operator alert (daemon/bootalert.ts).
+      // A wake in a short-lived CLI process could not deliver an alert itself before exiting.
+      appendLifecycleEvent(cfg.eventLogDir, {
+        ev: 'boot-modal',
+        identity,
+        personality: args.personality,
+        runtime,
+        title: bootModalTitle(result.bootModal.content).slice(0, 200),
+        option1: result.bootModal.option1.slice(0, 120),
+        content: result.bootModal.content.slice(-2000),
+      }, { env })
     }
     if (result.status === 'FAILED') {
       // enroll-on-FAILED (0.2.57): launch can return FAILED on a ready-gate false-negative

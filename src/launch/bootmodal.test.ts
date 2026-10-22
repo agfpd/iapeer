@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { genericBootPrompt, waitHostReady } from './ptyHost.ts'
 import { claudeAdapter } from './adapters/claude.ts'
 import { codexAdapter } from './adapters/codex.ts'
-import { bootModalAlertText, makeBootModalAlert } from '../daemon/bootalert.ts'
+import { bootModalAlertText, bootModalFromEvent, makeBootModalAlert } from '../daemon/bootalert.ts'
+import { bootModalTitle } from '../lifecycle/index.ts'
+import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
+import { startBootModalWatch } from '../daemon/bootalert.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // An invented modal no adapter knows (layout mirrors the 2.1.30x resume-confirm that hung walt-trader:
 // unnumbered rows + a footer verb outside cancel/go-back).
@@ -77,7 +83,7 @@ describe('boot fail-fast on an unrecognized modal', () => {
 })
 
 describe('boot-modal alert outlet', () => {
-  const info = { personality: 'p', runtime: 'claude', identity: 'claude-p', content: UNKNOWN, option1: 'Keep going', reason: 'unknown-boot-modal' }
+  const info = { personality: 'p', runtime: 'claude', identity: 'claude-p', content: UNKNOWN, option1: 'Keep going', title: 'Something new from the runtime?' }
 
   test('sends ONE alert to the configured target per dedup window; none without a target', async () => {
     const sent: Array<{ to: string; topic?: string; msg: string }> = []
@@ -111,9 +117,43 @@ describe('boot-modal alert outlet', () => {
     expect(none.length).toBe(0)
   })
 
+  test('lifecycle line → alert payload; title skips box-drawing separators', () => {
+    expect(bootModalTitle('────────\n  ╭──╮\n  Resume session\n  ❯ x')).toBe('Resume session')
+    const e = bootModalFromEvent({ ev: 'boot-modal', fields: { identity: 'claude-p', personality: 'p', runtime: 'claude', content: UNKNOWN, option1: 'Keep going', title: 't' } })
+    expect(e?.content).toBe(UNKNOWN)
+    expect(bootModalFromEvent({ ev: 'wake', fields: {} })).toBeNull()
+  })
+
   test('alert text names the peer, the option and the screen', () => {
     const t = bootModalAlertText(info)
     expect(t).toContain('p (claude)')
     expect(t).toContain('Something new from the runtime?')
   })
+})
+
+test('boot-modal watch: a lifecycle line written by ANY process (e.g. a CLI send) reaches the operator', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'iapeer-bootmodal-'))
+  const root = mkdtempSync(join(tmpdir(), 'iapeer-root-'))
+  try {
+    await Bun.write(join(root, 'alerts.json'), '{"peer":"ops"}')
+    const env = { IAPEER_ROOT: root, IAPEER_TEST_SANDBOX: '1' }
+    appendLifecycleEvent(dir, { ev: 'boot-modal', identity: 'claude-old', personality: 'old', runtime: 'claude', title: 'x', option1: 'y', content: 'z' }, { env })
+    const sent: string[] = []
+    const stop = startBootModalWatch({
+      eventLogDir: dir, env, pollMs: 20,
+      routeDeps: { env },
+    })
+    // history before the watch started is not re-alerted; a NEW line is
+    appendLifecycleEvent(dir, { ev: 'boot-modal', identity: 'claude-p', personality: 'p', runtime: 'claude', title: 'Resume session', option1: 'a', content: 'Resume session\n❯ a\nEsc to cancel' }, { env })
+    await new Promise(r => setTimeout(r, 150))
+    stop()
+    const log = await Bun.file(join(dir, 'delivery.log')).text().catch(() => '')
+    for (const l of log.split('\n')) if (l.includes('ev=boot-modal-alert')) sent.push(l)
+    expect(sent.length).toBe(1)
+    expect(sent[0]).toContain('to=ops')
+    expect(sent[0]).toContain('about=claude-p')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
 })

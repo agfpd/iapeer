@@ -17,7 +17,8 @@ import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
 import type { NoticeBoard } from './notices.ts'
-import type { WakeDeps } from '../lifecycle/index.ts'
+import { FleetEventTailer, type FleetEvent } from './fleet.ts'
+import { lifecycleLogPath } from '../lifecycle/eventlog.ts'
 
 export const BOOT_MODAL_ALERT_DEDUP_MS = 30 * 60_000
 
@@ -39,7 +40,14 @@ export function readAlertTarget(env: NodeJS.ProcessEnv = process.env): AlertTarg
   }
 }
 
-type BootModalInfo = Parameters<NonNullable<WakeDeps['onBootModal']>>[0]
+export interface BootModalInfo {
+  personality: string
+  runtime: string
+  identity: string
+  content: string
+  option1: string
+  title: string
+}
 
 export function bootModalAlertText(i: BootModalInfo): string {
   return [
@@ -59,7 +67,7 @@ export function makeBootModalAlert(
   const now = seam.now ?? Date.now
   const send = seam.send ?? routeSend
   return info => {
-    const title = info.content.split('\n').map(l => l.trim()).find(Boolean) ?? ''
+    const title = info.title
     try {
       opts.board?.raise({
         personality: info.personality,
@@ -95,4 +103,24 @@ export function makeBootModalAlert(
       } catch { /* best-effort */ }
     })()
   }
+}
+
+/** ev=boot-modal lifecycle line → the alert payload (null for any other / malformed line). */
+export function bootModalFromEvent(e: Pick<FleetEvent, 'ev' | 'fields'>): BootModalInfo | null {
+  if (e.ev !== 'boot-modal') return null
+  const f = e.fields
+  if (!f.identity || !f.personality || !f.runtime) return null
+  return { identity: f.identity, personality: f.personality, runtime: f.runtime, content: f.content ?? '', option1: f.option1 ?? '', title: f.title ?? '' }
+}
+
+/** Tail lifecycle.log from its CURRENT end and alert on every new ev=boot-modal line. Returns stop. */
+export function startBootModalWatch(
+  opts: { eventLogDir: string; env: NodeJS.ProcessEnv; board?: NoticeBoard; routeDeps?: RouteDeps; pollMs?: number },
+): () => void {
+  const alert = makeBootModalAlert(opts)
+  const tailer = new FleetEventTailer([{ path: lifecycleLogPath(opts.eventLogDir), src: 'lifecycle' }], opts.pollMs ?? 1000)
+  return tailer.subscribe(e => {
+    const info = bootModalFromEvent(e)
+    if (info) alert(info)
+  })
 }

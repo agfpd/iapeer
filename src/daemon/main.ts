@@ -47,9 +47,8 @@ import {
   superviseTick,
   wakeOrSpawn,
   type LifecycleConfig,
-  type WakeDeps,
 } from '../lifecycle/index.ts'
-import { makeBootModalAlert } from './bootalert.ts'
+import { startBootModalWatch } from './bootalert.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
 import { buildProcessAddress } from '../core/socket.ts'
 import { err, ok } from '../core/errors.ts'
@@ -140,11 +139,11 @@ const DAEMON_MAIN_PATH = fileURLToPath(import.meta.url)
  * structurally identical (WakeRequest ⊆ WakeArgs, WakeResult ⊆ WakeOutcome); this
  * is the one place transport's injected-wake meets the lifecycle implementation.
  */
-export function makeWakeFn(cfg: LifecycleConfig, env: NodeJS.ProcessEnv, onBootModal?: WakeDeps['onBootModal']): WakeFn {
+export function makeWakeFn(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): WakeFn {
   return (req: WakeRequest): Promise<WakeOutcome> =>
     wakeOrSpawn(
       { personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task, ...(req.continueWork ? { continueWork: true } : {}) },
-      { cfg, env, ...(onBootModal ? { onBootModal } : {}) },
+      { cfg, env },
     )
 }
 
@@ -496,10 +495,10 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     if (stamped) appendLifecycleEvent(cfg.eventLogDir, { ev: 'ready-backfill', count: stamped.length }, { env })
   } catch { /* best-effort */ }
   const board = new NoticeBoard({ logDir: cfg.eventLogDir, env })
-  // Boot-modal alert outlet (fail-fast on an unrecognized boot dialog): board notice + IAP to the host's
-  // configured operator peer (alerts.json). Its OWN route deps wake WITHOUT the hook — an alert target
-  // whose boot hits a modal must not recurse into another alert.
-  const onBootModal = makeBootModalAlert({
+  // Boot-modal watch (fail-fast on an unrecognized boot dialog): tails lifecycle.log ev=boot-modal from
+  // EVERY wake path (daemon, CLI send, notifier) → board notice + IAP to the host's operator peer
+  // (alerts.json).
+  const stopBootModalWatch = startBootModalWatch({
     eventLogDir: cfg.eventLogDir,
     env,
     board,
@@ -603,7 +602,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     },
   })
   const handle = await startDaemon({
-    wake: makeWakeFn(cfg, env, onBootModal),
+    wake: makeWakeFn(cfg, env),
     // M2 arm-on-outbound (see makeArmEphemeralOnDelivered): ephemeral caller's ok
     // send ⇒ armed for the supervise quiet-reap. No-op for every other caller.
     onDelivered: armEphemeralOnDelivered,
@@ -655,7 +654,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         // OC07 — acknowledged-but-unanswered inbound of a dead session: redeliver or tell the sender.
         await processInflight(cfg, env, {
           env,
-          wake: makeWakeFn(cfg, env, onBootModal),
+          wake: makeWakeFn(cfg, env),
           ephemeral,
           noteLiveTopic,
           noteDelivered: identity => setLastDelivered(cfg, identity),
@@ -665,7 +664,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
         // Limit-resume (docs/19 §9): a peer stopped by a model limit continues after the reset.
         await processLimitResumes(cfg, env, {
           env,
-          wake: makeWakeFn(cfg, env, onBootModal),
+          wake: makeWakeFn(cfg, env),
           ephemeral,
           noteLiveTopic,
           noteDelivered: identity => setLastDelivered(cfg, identity),
@@ -698,7 +697,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
   // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
   // every test that starts a daemon would hang on exit).
-  return { ...handle, close: async () => { stopCapabilityReloads(); stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
+  return { ...handle, close: async () => { stopCapabilityReloads(); stopBootModalWatch(); stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

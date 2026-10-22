@@ -274,7 +274,7 @@ export const launch: LaunchFn = async (
         // An unrecognized modal nothing will answer: fail NOW (not at bootDeadline) so the wake lock is
         // released and the caller hears an explicit reason. Same teardown as never-ready below.
         killPtyHost(identity, env, { reason: 'launch-unknown-boot-modal' })
-        const first = hostReady.bootModal.content.split('\n').map(l => l.trim()).find(Boolean) ?? ''
+        const first = hostReady.bootModal.content.split('\n').map(l => l.replace(/[\u2500-\u257f]/g, ' ').trim()).find(Boolean) ?? ''
         return { ...fail(identity, `unknown-boot-modal (hosted: an unrecognized dialog blocks the boot — "${first.slice(0, 120)}"; option 1: "${hostReady.bootModal.option1.slice(0, 80)}")`), bootModal: hostReady.bootModal }
       }
       if (!hostReady.ready) {
