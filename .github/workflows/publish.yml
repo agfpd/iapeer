@@ -21,7 +21,12 @@ permissions:
 
 jobs:
   publish:
-    runs-on: macos-latest
+    # ubuntu, not macOS: publishing a source-only tarball is OS-independent, and hosted macOS arm64
+    # runners can sit queued until GitHub drops the job (v0.4.146, 26.10.2026: "not acquired by
+    # Runner of type hosted"). The macOS-bound test suite is NOT re-run here — it already gated this
+    # exact commit twice on macOS: `preversion` (a red suite aborts the bump, so no tag exists) and
+    # ci.yml on main. typecheck is platform-neutral and stays as a cheap last check.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,6 +44,5 @@ jobs:
           ver="v$(node -p "require('./package.json').version")"
           [ "$tag" = "$ver" ] || { echo "tag $tag != package.json $ver" >&2; exit 1; }
       - run: bun install --frozen-lockfile
-      - run: bun run test
       - run: bun run typecheck
       - run: npm publish
