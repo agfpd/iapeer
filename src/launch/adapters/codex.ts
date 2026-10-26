@@ -92,6 +92,19 @@ function codexDirTrustActive(pane: string): boolean {
 function codexHooksReviewActive(pane: string): boolean {
   return pane.includes('Hooks need review')
 }
+/**
+ * The startup model-migration offer (tui/src/model_migration.rs, codex 0.163): «Meet <model> … › 1. Try
+ * new model  2. Use existing model». Captured live 26.10.2026 on darwin: it blocked a fresh wake, the
+ * delivered task never ran («model-did-not-process-task»). A peer's model is the OWNER's decision (pinned
+ * via `--model` in launch.env), so the boot-driver always DECLINES: a bare '2' selects «Use existing
+ * model» and commits (handle_menu_key: Char('2') → reject; codex persists [notice.model_migrations]).
+ * NEVER Enter/Esc — both ACCEPT the new model (Esc is confirm, not cancel). Matched only when the opt-out
+ * row is on screen: without it (can_opt_out=false) the only answer is accepting, which is not ours to give
+ * — the modal stays unknown and the boot-modal fail-fast alerts the operator.
+ */
+function codexModelMigrationActive(pane: string): boolean {
+  return pane.includes('Try new model') && pane.includes('Use existing model')
+}
 
 // codex's select-modal glyph (U+203A) — the same arrow isInputReady keys on (a numbered option row is
 // `› 1. …`; the composer is `› <text>`, no leading digit-dot).
@@ -99,7 +112,7 @@ const CODEX_SELECT_GLYPH = '›'
 /** Does the pane carry a KNOWN codex boot dialog (update / dir-trust / hooks-review)? unknownBlockingModal
  *  returns null for these so they stay owned by the boot-driver and are never re-routed to a human. */
 function isKnownCodexBlockingSignature(pane: string): boolean {
-  return codexUpdatePromptActive(pane) || codexDirTrustActive(pane) || codexHooksReviewActive(pane)
+  return codexUpdatePromptActive(pane) || codexDirTrustActive(pane) || codexHooksReviewActive(pane) || codexModelMigrationActive(pane)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,6 +333,7 @@ export const codexAdapter: RuntimeAdapter = {
     if (codexUpdatePromptActive(pane)) return ['2', 'Enter']
     if (codexDirTrustActive(pane)) return ['Enter']
     if (codexHooksReviewActive(pane)) return ['2']
+    if (codexModelMigrationActive(pane)) return ['2']
     return null
   },
 

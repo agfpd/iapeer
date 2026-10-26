@@ -1300,3 +1300,83 @@ describe('goal verb', () => {
     expect(o.action).toBe('offline')
   })
 })
+
+// ─── `iapeer voice` on a peer with NO live session (pilot defect 26.10.2026) ─────────────────
+// `voice open` forced resume:true and failed «no codex session to resume» after the fleet's lazy
+// fresh. Invariant: an asleep peer is woken by ORDINARY warm-on-demand (no forced resume) with a real
+// first turn (codex materializes the rollout lazily — the receipts live there), then voice opens.
+describe('voice verb — asleep peer', () => {
+  test('wakes WITHOUT forced resume, with a first-turn task, then opens exactly once', async () => {
+    await register('vx', 'codex')
+    const { voicePeer, VOICE_WAKE_TASK } = await import('./index.ts')
+    const T0 = Date.parse('2026-10-26T15:00:00.000Z')
+    let now = T0
+    let live = false
+    let hosts = 0
+    const lines: string[] = []
+    const line = (type: string, payload: Record<string, unknown>) => JSON.stringify({ timestamp: new Date(now).toISOString(), type, payload })
+    const stateDir = mkdtempSync(join(tmpdir(), 'iapeer-voicecli-'))
+    const runDir = join(stateDir, 'run')
+    mkdirSync(runDir)
+    writeFileSync(join(runDir, 'codex-vx.pid'), '700')
+    const wakes: Array<Record<string, unknown>> = []
+    const typed: string[][] = []
+    const deps = () => ({
+      env: env(),
+      stateDir: join(stateDir, 'voice'),
+      runDir,
+      procTable: () => (live ? [{ pid: 700, ppid: 1, comm: 'iapeer' }, { pid: 701, ppid: 700, comm: 'codex' }, ...Array.from({ length: hosts }, (_, i) => ({ pid: 800 + i, ppid: 701, comm: 'codex-voice-host' }))] : []),
+      openRollout: () => (live && lines.length ? '/fake.jsonl' : null),
+      readTail: () => lines.join('\n'),
+      now: () => now,
+      sleep: async (ms: number) => { now += ms },
+      control: async (args: string[]) => {
+        typed.push(args)
+        if (args[0] === 'open' && hosts === 0) { hosts = 1; now += 1; lines.push(line('realtime_item', { id: 'rt1', type: 'realtime_session_started' })) }
+        return { ok: true }
+      },
+    })
+    const o = await voicePeer('open', 'vx', {
+      env: env(),
+      depsFn: deps,
+      sleepFn: async () => { now += 500 },
+      wakeFn: async args => {
+        wakes.push(args)
+        live = true
+        lines.push(line('event_msg', { type: 'task_started' }), line('event_msg', { type: 'task_complete' }))
+        return { status: 'READY' } as never
+      },
+    })
+    expect(wakes).toEqual([{ personality: 'vx', runtime: 'codex', task: VOICE_WAKE_TASK }])
+    expect(wakes[0]).not.toHaveProperty('resume')
+    expect(o).toMatchObject({ ok: true, state: 'open', session: 'rt1', already: false, hosts: 1 })
+    expect(await voicePeer('open', 'vx', { env: env(), depsFn: deps })).toMatchObject({ ok: true, state: 'open', already: true, session: 'rt1' })
+    expect(typed).toEqual([['open']])
+    rmSync(stateDir, { recursive: true, force: true })
+  })
+
+  test('a live session with no materialized rollout is refused honestly — nothing typed', async () => {
+    await register('vy', 'codex')
+    const { voicePeer } = await import('./index.ts')
+    const stateDir = mkdtempSync(join(tmpdir(), 'iapeer-voicecli-'))
+    const runDir = join(stateDir, 'run')
+    mkdirSync(runDir)
+    writeFileSync(join(runDir, 'codex-vy.pid'), '700')
+    const typed: string[][] = []
+    const o = await voicePeer('open', 'vy', {
+      env: env(),
+      depsFn: () => ({
+        env: env(),
+        stateDir: join(stateDir, 'voice'),
+        runDir,
+        procTable: () => [{ pid: 700, ppid: 1, comm: 'iapeer' }, { pid: 701, ppid: 700, comm: 'codex' }],
+        openRollout: () => null,
+        control: async (args: string[]) => { typed.push(args); return { ok: true } },
+      }),
+    })
+    expect(o.ok).toBe(false)
+    expect(o.state).toBe('closed')
+    expect(typed).toEqual([])
+    rmSync(stateDir, { recursive: true, force: true })
+  })
+})

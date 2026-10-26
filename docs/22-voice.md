@@ -1,6 +1,6 @@
 # 22 — Native Codex voice (`iapeer voice`)
 
-Status: v1, 0.4.146. Implementation: `src/voice/` (engine `index.ts`, effects `deps.ts`, daemon sweep
+Status: v1, 0.4.146; asleep-peer wake and migration-offer decline in 0.4.150. Implementation: `src/voice/` (engine `index.ts`, effects `deps.ts`, daemon sweep
 `sweep.ts`); codex keystroke plan: `launch/adapters/codex.ts` → control `voice`.
 
 ## Purpose
@@ -48,7 +48,12 @@ Invariants:
   (`state/lifecycle/voice/<identity>.lock`; a lock whose holder died is stolen).
 - A caller killed mid-operation leaves an intent file. Status converges to the observed truth, and
   the daemon sweep finishes the reconciliation.
-- open on an asleep codex peer first resumes its dialogue (`wakeOrSpawn`, `resume:true`).
+- open on a codex peer with no live session wakes it by ordinary warm-on-demand (no forced resume;
+  the lifecycle picks fresh or resume) with a short first turn (`VOICE_WAKE_TASK`). Codex creates the
+  thread's rollout lazily on the first persisted turn, and a realtime start alone does not create it.
+  The open waits for that turn to end, so voice is never switched on mid-turn. This path can take up to
+  ~2 min (boot + one turn); during it status reads `closed`. A live session with no materialized
+  rollout is refused without typing anything.
 
 ## Idle close (daemon, every 5 s)
 
@@ -58,6 +63,13 @@ Applies only to sessions iapeer opened (an intent file exists). The session is i
 count as idle. The sweep closes the session with `reason:"idle"`. A close that happened outside
 iapeer (the human's `/voice`, a transport drop) is recorded as `user`/`error`. The lifecycle log
 gets `voice-opened` and `voice-closed` events.
+
+## Codex boot offer: model migration
+
+A codex upgrade can raise «Meet <model> … › 1. Try new model 2. Use existing model» at startup, and it
+blocks the wake. The boot-driver answers a bare `2` (Use existing model): a peer's model is the owner's
+pin. Enter and Esc would both ACCEPT the switch. Without the opt-out row the screen is left to the
+boot-modal fail-fast alert.
 
 ## Microphone binding
 

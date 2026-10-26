@@ -645,3 +645,41 @@ describe('codex executeControl — goal', () => {
     expect(claudeAdapter.executeControl({ name: 'goal', args: ['resume'] })).toBeNull()
   })
 })
+
+// ── codex model-migration boot offer (26.10.2026, live on darwin) ────────────
+// A fresh wake sat on «Meet GPT-6 Sol … › 1. Try new model 2. Use existing model»; the task never ran.
+// A peer's model is the owner's pin — the boot-driver declines with a bare '2' (Enter/Esc ACCEPT).
+describe('codex boot — model migration offer is declined', () => {
+  const offer = [
+    'Meet GPT-6 Sol',
+    'Our latest Sol is more intelligent and more efficient so your usage limits go further.',
+    'This model is a great daily driver for complex tasks, especially coding.',
+    '› 1. Try new model',
+    '  2. Use existing model',
+    'enter/esc confirm · ⌃c quit',
+  ].join('\n')
+  test('answers with a bare 2 (Use existing model) — never Enter/Esc', () => {
+    expect(codexAdapter.bootDialogKeys(offer)).toEqual(['2'])
+  })
+  test('is a KNOWN boot dialog: not ready, not re-routed as an unknown modal', () => {
+    expect(codexAdapter.isInputReady(offer)).toBe(false)
+    expect(codexAdapter.unknownBlockingModal?.(offer) ?? null).toBeNull()
+  })
+  test('without the opt-out row (can_opt_out=false) it is NOT auto-answered', () => {
+    const forced = ['Meet GPT-6 Sol', 'Press enter to continue'].join('\n')
+    expect(codexAdapter.bootDialogKeys(forced)).toBeNull()
+  })
+})
+
+describe('codex executeControl — voice', () => {
+  test('open types the /voice toggle; stop types the idempotent /voice stop', () => {
+    expect(codexAdapter.executeControl({ name: 'voice', args: ['open'] })).toEqual({ sequence: [['-l', '/voice'], ['Enter']], stepDelayMs: 300 })
+    expect(codexAdapter.executeControl({ name: 'voice', args: ['stop'] })).toEqual({ sequence: [['-l', '/voice stop'], ['Enter']], stepDelayMs: 300 })
+  })
+  test.each([['mute'], ['settings'], [''], ['open now']])('non-whitelisted arg %p → null', arg => {
+    expect(codexAdapter.executeControl({ name: 'voice', args: [arg] })).toBeNull()
+  })
+  test('claude has no native voice → null', () => {
+    expect(claudeAdapter.executeControl({ name: 'voice', args: ['open'] })).toBeNull()
+  })
+})

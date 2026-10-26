@@ -86,7 +86,7 @@ import { ensureDaemonStarted, installDaemonPlist, parseDaemonPort, startConfigur
 import { MARKETPLACE_NAME, onboardHost, runtimeAuthNote, tccFullDiskAccessNote } from '../onboard/index.ts'
 import { probeFullDiskAccess, readMemoryProvider } from '../status/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
-import { closeVoice, openVoice, voiceStatus, type VoiceDeps } from '../voice/index.ts'
+import { closeVoice, observeVoice, openVoice, voiceStatus, type VoiceDeps } from '../voice/index.ts'
 import { realVoiceDeps } from '../voice/deps.ts'
 import { pluginLogsDir } from '../storage/index.ts'
 
@@ -796,12 +796,16 @@ export async function goalPeer(
   }
 }
 
+/** First message of a voice-driven wake (see voicePeer): a turn that ends at once. */
+export const VOICE_WAKE_TASK = 'iapeer: тебя разбудили, чтобы открыть нативный голосовой режим Codex (/voice) в этой сессии. Голосовой слой будет передавать тебе работу блоками <realtime_delegation>; отвечай на них как обычно, с тулами, памятью и send_to_peer. Сейчас ничего не делай и сразу закончи ход.'
+const VOICE_WAKE_TURN_TIMEOUT_MS = 120_000
+
 /** `iapeer voice` — the operator/runtime entry to native Codex voice (src/voice). Status is pure
- *  observation; open wakes an asleep codex peer into its SAME dialogue first (voice needs a thread). */
+ *  observation; open wakes an asleep codex peer by ordinary warm-on-demand first (voice needs a live thread). */
 export async function voicePeer(
   sub: 'open' | 'close' | 'status',
   personality: string,
-  opts: CliEnvOptions & { depsFn?: (p: string, env: NodeJS.ProcessEnv) => VoiceDeps; wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: true }) => Promise<WakeResult> } = {},
+  opts: CliEnvOptions & { depsFn?: (p: string, env: NodeJS.ProcessEnv) => VoiceDeps; wakeFn?: (args: { personality: string; runtime: Runtime; task: string }) => Promise<WakeResult>; sleepFn?: (ms: number) => Promise<void>; wakeTurnTimeoutMs?: number } = {},
 ): Promise<Record<string, unknown> & { ok: boolean; state: string; session?: string; already?: boolean; reason?: string; error?: string }> {
   const env = opts.env ?? process.env
   const peer = findPeer(readPeersIndex({ env }), personality)
@@ -818,8 +822,28 @@ export async function voicePeer(
     if (isForeignLaunchd(personality, env)) return { ok: false, state: 'closed', error: `"${personality}" is managed by a foreign launchd plist` }
     const cfg = loadLifecycleConfig(env)
     const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
-    const w = await wake({ personality, runtime: 'codex', task: '', resume: true })
+    // ORDINARY warm-on-demand: the lifecycle decides fresh vs resume from what it tracks (idle-reaped →
+    // resume, soft-reload / no dialogue → fresh). Forcing resume failed live on 26.10 («no codex session
+    // to resume» after the fleet's lazy fresh) — voice needs a live thread, not necessarily the old one.
+    // A real first message, not an empty wake: codex creates the thread's rollout LAZILY (on the first
+    // persisted turn — a realtime start alone does not materialize it), and the voice receipts + idle
+    // detector read that rollout. One short turn makes the thread durable and tells the agent why it woke.
+    const w = await wake({ personality, runtime: 'codex', task: VOICE_WAKE_TASK })
     if (w.status !== 'READY') return { ok: false, state: 'closed', error: `could not wake ${personality} (codex): ${w.reason ?? w.status}` }
+    // Voice is opened outside a turn: wait for that first turn to finish and the rollout to exist.
+    const sleep = opts.sleepFn ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+    const deadline = Date.now() + (opts.wakeTurnTimeoutMs ?? VOICE_WAKE_TURN_TIMEOUT_MS)
+    let obs = observeVoice(d, identity)
+    while (!(obs.rollout && !obs.rollout.turnRunning) && Date.now() < deadline) {
+      await sleep(500)
+      obs = observeVoice(d, identity)
+    }
+  }
+  const pre = observeVoice(d, identity)
+  if (pre.live && !pre.rollout) {
+    // Nothing typed: without the rollout no start receipt could be observed, and the open would only
+    // time out into a cleanup. Honest refusal instead.
+    return { ok: false, state: voiceStatus(d, identity).state, error: `${personality} has no materialized codex thread yet (no turn in this session) — send it a message first` }
   }
   return { ...(await openVoice(d, identity)) }
 }
