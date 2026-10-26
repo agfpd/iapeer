@@ -379,7 +379,10 @@ async function closeLocked(d: VoiceDeps, identity: string, reason: VoiceCloseRea
     if (prev && prev.op !== 'close') writeIntent(d, identity, { op: 'close', atMs: now(), reason, ...(session ? { session } : {}), lastClose: { reason, atMs: now(), ...(session ? { session } : {}) } })
     return { ok: true, state: 'closed', already: true, ...(before.reason ? { reason: before.reason } : {}), hosts: 0 }
   }
-  writeIntent(d, identity, { op: 'close', atMs: now(), reason, ...(session ? { session } : {}), ...(prev?.lastClose ? { lastClose: prev.lastClose } : {}) })
+  // lastClose is set NOW, not after confirmation: status only surfaces it once `closed` is OBSERVED
+  // (helper gone), and carrying the previous close here let a poll in the confirm window report the
+  // PREVIOUS session/reason (seen live 26.10, 0.4.148).
+  writeIntent(d, identity, { op: 'close', atMs: now(), reason, ...(session ? { session } : {}), lastClose: { reason, atMs: now(), ...(session ? { session } : {}) } })
   // `/voice stop` is idempotent in codex (Inactive/Stopping → no-op) — safe even if state raced.
   const sent = await d.control(['stop'])
   if (!sent.ok) {

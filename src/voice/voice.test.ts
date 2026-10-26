@@ -175,6 +175,22 @@ describe('openVoice / closeVoice', () => {
     expect(voiceStatus(d, 'codex-p')).toMatchObject({ state: 'closed', reason: 'requested' })
     expect(await closeVoice(d, 'codex-p')).toMatchObject({ ok: true, state: 'closed', already: true })
   })
+  test('a poll during the close confirm window never reports the PREVIOUS session/reason', async () => {
+    const { w, d } = world()
+    await openVoice(d, 'codex-p')
+    await closeVoice(d, 'codex-p')
+    const second = await openVoice(d, 'codex-p')
+    let seen: ReturnType<typeof voiceStatus> | undefined
+    const ctl = d.control
+    d.control = async args => {
+      const r = await ctl(args)
+      if (args[0] === 'stop') seen = voiceStatus(d, 'codex-p') // helper gone, final write not yet done
+      return r
+    }
+    await closeVoice(d, 'codex-p', 'idle')
+    expect(seen).toMatchObject({ state: 'closed', session: second.session, reason: 'idle' })
+    expect(w.hosts).toBe(0)
+  })
   test('hung open → cleanup via /voice stop, receipt closed (timeout is never reported as closed by itself)', async () => {
     const { w, d } = world({ onOpen: 'hang' })
     const r = await openVoice(d, 'codex-p')
