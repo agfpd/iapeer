@@ -18,6 +18,7 @@ import {
   INFRA_RUNTIME_LIST,
   isInfraRuntime,
   isRuntime,
+  resolveSockDir,
   type Intelligence,
   type Runtime,
 } from '../core/constants.ts'
@@ -31,6 +32,7 @@ import {
   compactDoneBaseline,
   isPeerLive,
   isPeerReady,
+  listOnlinePeers,
   purgeAttachmentInbox,
   routeControl,
   routeSend,
@@ -805,7 +807,7 @@ const VOICE_WAKE_TURN_TIMEOUT_MS = 120_000
 export async function voicePeer(
   sub: 'open' | 'close' | 'status',
   personality: string,
-  opts: CliEnvOptions & { depsFn?: (p: string, env: NodeJS.ProcessEnv) => VoiceDeps; wakeFn?: (args: { personality: string; runtime: Runtime; task: string }) => Promise<WakeResult>; sleepFn?: (ms: number) => Promise<void>; wakeTurnTimeoutMs?: number } = {},
+  opts: CliEnvOptions & { depsFn?: (p: string, env: NodeJS.ProcessEnv) => VoiceDeps; wakeFn?: (args: { personality: string; runtime: Runtime; task: string }) => Promise<WakeResult>; sleepFn?: (ms: number) => Promise<void>; wakeTurnTimeoutMs?: number; micReleased?: boolean; micOwnerLiveFn?: () => boolean } = {},
 ): Promise<Record<string, unknown> & { ok: boolean; state: string; session?: string; already?: boolean; reason?: string; error?: string }> {
   const env = opts.env ?? process.env
   const peer = findPeer(readPeersIndex({ env }), personality)
@@ -818,6 +820,16 @@ export async function voicePeer(
     return { ok: true, state: s.state, ...(s.session ? { session: s.session } : {}), ...(s.reason ? { reason: s.reason } : {}), hosts: s.hosts, live: s.live, ...(s.idleMs !== undefined ? { idle_ms: s.idleMs } : {}) }
   }
   if (sub === 'close') return { ...(await closeVoice(d, identity, 'requested')) }
+  // MICROPHONE OWNERSHIP (pilot 26.10: an operator open while voicetalk held the mic gave two listeners
+  // on one microphone — «double activation»). When a voicetalk presence runtime is live it OWNS the mic:
+  // an open is accepted only as its handoff (`--mic-released`, passed by voicetalk after its own capture
+  // stopped). Checked BEFORE any wake or keystroke. Already-open stays idempotent (no new listener).
+  const micOwnerLive = (opts.micOwnerLiveFn ?? (() => listOnlinePeers(resolveSockDir(env), env).some((p: { runtime: string }) => p.runtime === 'voicetalk')))()
+  if (micOwnerLive && !opts.micReleased) {
+    const s = voiceStatus(d, identity)
+    if (s.state === 'open') return { ok: true, state: 'open', ...(s.session ? { session: s.session } : {}), already: true, hosts: s.hosts }
+    return { ok: false, state: s.state, error: 'the microphone is owned by the live voicetalk runtime — open voice through it (it passes --mic-released after releasing the mic)' }
+  }
   if (!voiceStatus(d, identity).live) {
     if (isForeignLaunchd(personality, env)) return { ok: false, state: 'closed', error: `"${personality}" is managed by a foreign launchd plist` }
     const cfg = loadLifecycleConfig(env)
@@ -1692,6 +1704,7 @@ function parseIdentity(identity: string): { personality: string; runtime: Runtim
  *  possible via the explicit `--key=value` form (which stays verbatim). */
 const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   'accept-risk',
+  'mic-released',
   'all',
   'check',
   'dry-run',
@@ -1818,7 +1831,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then attach to the pty session (Ctrl-] detaches)' },
   { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact; no runtime = EVERY live runtime of the peer' },
   { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
-  { sig: 'voice <open|close|status> <peer> [--json]', desc: 'native Codex realtime voice (/voice) in the peer\'s live session — receipts from the voice helper process + rollout; idle-closed by the daemon' },
+  { sig: 'voice <open|close|status> <peer> [--json] [--mic-released]', desc: 'native Codex realtime voice (/voice) in the peer\'s live session — receipts from the voice helper process + rollout; idle-closed by the daemon' },
   { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
   { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
   { sig: 'capability <list | register <decl.json> | sync <name> | unregister <name>>', desc: 'capability-plugin lifecycle: per-peer provision/unprovision on every agent endpoint (docs/21)' },
@@ -3149,9 +3162,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const sub = positionals[0]
         const peerName = positionals[1]
         if (!sub || !['open', 'close', 'status'].includes(sub) || !peerName) {
-          return argErr(errOut, 'voice needs a subcommand and a peer — usage: iapeer voice <open|close|status> <peer> [--json]')
+          return argErr(errOut, 'voice needs a subcommand and a peer — usage: iapeer voice <open|close|status> <peer> [--json] [--mic-released]')
         }
-        const r = await voicePeer(sub as 'open' | 'close' | 'status', peerName, { env })
+        const r = await voicePeer(sub as 'open' | 'close' | 'status', peerName, { env, micReleased: flags['mic-released'] === true })
         if (flags.json === true) out(JSON.stringify(r) + '\n')
         else out(`voice ${sub} → ${peerName}: ${r.state}${r.session ? ` session=${r.session}` : ''}${r.already ? ' (already)' : ''}${r.reason ? ` reason=${r.reason}` : ''}${r.error ? ` — ${r.error}` : ''}\n`)
         return sub === 'status' || r.ok ? 0 : 1

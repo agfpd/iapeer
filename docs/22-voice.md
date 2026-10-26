@@ -55,6 +55,34 @@ Invariants:
   ~2 min (boot + one turn); during it status reads `closed`. A live session with no materialized
   rollout is refused without typing anything.
 
+## Microphone ownership
+
+While a voicetalk presence runtime is live, it owns the microphone. `voice open` is accepted only as
+its handoff: `--mic-released`, which voicetalk passes after its own capture has stopped. Without the
+flag the open is refused before any wake or keystroke. An already-open session still answers
+`already:true`, since no new listener is created. The rule exists because an operator open during the
+pilot (26.10) put two listeners on one microphone.
+
+## Upstream limit — results of non-voice turns do not reach the voice layer
+
+The TUI starts realtime with `client_managed_handoffs: true` (`tui/src/app_server_session/realtime.rs`),
+so core mirrors nothing: `handoff_out` returns early. The TUI speaks only items whose origin is
+`Delegated` (turns the voice layer itself started) while `latest_input_was_voice` holds
+(`speak_completed_realtime_delegation`). A turn started by an IAP envelope is typed input: it bumps
+`input_generation` and clears `latest_input_was_voice`, so its result is never relayed. Upstream has
+no switch for this (codex 0.163/0.164). A behavioral workaround is a backend prompt
+(`experimental_realtime_ws_backend_prompt`) that tells the voice layer to delegate status questions
+instead of answering them from its own memory; the delegated turn sees the whole thread.
+
+## Latency reading
+
+A `transcript_segment` id is a UUIDv7 minted at the segment's first transcript delta (its start); the
+rollout line timestamp is its seal (its end; `core/src/realtime_history.rs`). The gap between
+consecutive segment timestamps therefore includes the whole assistant utterance. In the pilot the
+assistant segment started at or before the user segment was sealed (median 0.0 s), because the user
+transcription finalizes after the reply has begun. The rollout cannot measure end-of-speech to first
+audio.
+
 ## Idle close (daemon, every 5 s)
 
 Applies only to sessions iapeer opened (an intent file exists). The session is idle when no

@@ -1380,3 +1380,62 @@ describe('voice verb — asleep peer', () => {
     rmSync(stateDir, { recursive: true, force: true })
   })
 })
+
+// ─── `iapeer voice` — the microphone owner's handshake (pilot 26.10: «double activation») ────
+describe('voice verb — microphone ownership', () => {
+  const setup = async (name: string, open = false) => {
+    await register(name, 'codex')
+    const stateDir = mkdtempSync(join(tmpdir(), 'iapeer-voicemic-'))
+    const runDir = join(stateDir, 'run')
+    mkdirSync(runDir)
+    writeFileSync(join(runDir, `codex-${name}.pid`), '700')
+    const typed: string[][] = []
+    const wakes: unknown[] = []
+    let hosts = open ? 1 : 0
+    const lines = [JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'task_complete' } })]
+    if (open) lines.push(JSON.stringify({ timestamp: new Date().toISOString(), type: 'realtime_item', payload: { id: 'rt0', type: 'realtime_session_started' } }))
+    const deps = () => ({
+      env: env(),
+      stateDir: join(stateDir, 'voice'),
+      runDir,
+      procTable: () => [{ pid: 700, ppid: 1, comm: 'iapeer' }, { pid: 701, ppid: 700, comm: 'codex' }, ...Array.from({ length: hosts }, () => ({ pid: 801, ppid: 701, comm: 'codex-voice-host' }))],
+      openRollout: () => '/fake.jsonl',
+      readTail: () => lines.join('\n'),
+      control: async (args: string[]) => {
+        typed.push(args)
+        if (args[0] === 'open') { hosts = 1; lines.push(JSON.stringify({ timestamp: new Date(Date.now() + 5).toISOString(), type: 'realtime_item', payload: { id: 'rt1', type: 'realtime_session_started' } })) }
+        return { ok: true }
+      },
+    })
+    return { deps, typed, wakes, cleanup: () => rmSync(stateDir, { recursive: true, force: true }) }
+  }
+
+  test('voicetalk live + no --mic-released → refused before any keystroke or wake', async () => {
+    const { voicePeer } = await import('./index.ts')
+    const w = await setup('vm1')
+    const o = await voicePeer('open', 'vm1', { env: env(), depsFn: w.deps, micOwnerLiveFn: () => true, wakeFn: async a => { w.wakes.push(a); return { status: 'READY' } as never } })
+    expect(o).toMatchObject({ ok: false, state: 'closed' })
+    expect(o.error).toContain('--mic-released')
+    expect(w.typed).toEqual([])
+    expect(w.wakes).toEqual([])
+    w.cleanup()
+  })
+
+  test('the owner\'s handoff (--mic-released) opens', async () => {
+    const { voicePeer } = await import('./index.ts')
+    const w = await setup('vm2')
+    const o = await voicePeer('open', 'vm2', { env: env(), depsFn: w.deps, micOwnerLiveFn: () => true, micReleased: true })
+    expect(o).toMatchObject({ ok: true, state: 'open', already: false })
+    expect(w.typed).toEqual([['open']])
+    w.cleanup()
+  })
+
+  test('already open stays idempotent without the flag (no new listener is created)', async () => {
+    const { voicePeer } = await import('./index.ts')
+    const w = await setup('vm3', true)
+    const o = await voicePeer('open', 'vm3', { env: env(), depsFn: w.deps, micOwnerLiveFn: () => true })
+    expect(o).toMatchObject({ ok: true, state: 'open', already: true, session: 'rt0' })
+    expect(w.typed).toEqual([])
+    w.cleanup()
+  })
+})
