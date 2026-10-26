@@ -54,10 +54,29 @@ Invariants:
 
 Applies only to sessions iapeer opened (an intent file exists). The session is idle when no
 `realtime_session_started`, `transcript_segment` or turn boundary has occurred for
-`IAPEER_VOICE_IDLE_SECS` (default 90) and no turn is running: waiting for requested work does not
+`IAPEER_VOICE_IDLE_SECS` (default 60) and no turn is running: waiting for requested work does not
 count as idle. The sweep closes the session with `reason:"idle"`. A close that happened outside
 iapeer (the human's `/voice`, a transport drop) is recorded as `user`/`error`. The lifecycle log
 gets `voice-opened` and `voice-closed` events.
+
+## Microphone binding
+
+The voice helper selects the input by the exact CoreAudio device name (`voice-host/src/devices.rs`).
+An unknown name fails the open with "selected audio device unavailable"; it never falls back to the
+default device. `audio.*` is read from every config layer except Project, so a per-peer binding is a
+session flag in the peer's codex `launch.env`. TOML `\u0020` escapes stand in for spaces because
+`PEER_START_ARGS` is whitespace-split:
+
+    PEER_START_ARGS="… -c audio.microphone="reSpeaker\u0020XVF3800\u00204-Mic\u0020Array""
+
+`audio.microphone_channel` (1-based, unset = mix all) is available when needed. The binding takes
+effect on the peer's next launch.
+
+## Not available in 0.163 — initial request text
+
+The TUI starts voice with `initial_items: None` (`tui/src/app_server_session/realtime.rs`) and never
+sends `RealtimeConversationText`. No in-band path from outside the TUI process gives the voice model
+an initial utterance, so the wake phrase's request has to be spoken again after open. Deferred.
 
 ## Known upstream limitation — identity of the voice layer
 

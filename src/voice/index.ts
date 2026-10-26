@@ -93,7 +93,7 @@ export interface VoiceStatus {
 export const OPEN_GRACE_MS = 12_000
 export const OPEN_TIMEOUT_MS = 18_000
 export const CLOSE_TIMEOUT_MS = 10_000
-export const DEFAULT_IDLE_SECS = 90
+export const DEFAULT_IDLE_SECS = 60
 const POLL_MS = 250
 const ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
 
