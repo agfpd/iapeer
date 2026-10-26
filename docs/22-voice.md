@@ -74,6 +74,14 @@ no switch for this (codex 0.163/0.164). A behavioral workaround is a backend pro
 (`experimental_realtime_ws_backend_prompt`) that tells the voice layer to delegate status questions
 instead of answering them from its own memory; the delegated turn sees the whole thread.
 
+## Voice-layer prompt (pilot, darwin)
+
+`docs/voice-prompts/` holds per-peer prompts and the pinned upstream copy each one was taken from;
+`scripts/voice-prompt.ts` installs a prompt as a one-line `experimental_realtime_ws_backend_prompt`
+in the peer's project config. That key is not on codex's project-local denylist. This prompt is the
+minimal alternative to the relay limit above, and it also gives the voice layer the peer's identity.
+See `docs/voice-prompts/README.md` for how to check it on codex updates.
+
 ## Latency reading
 
 A `transcript_segment` id is a UUIDv7 minted at the segment's first transcript delta (its start); the
