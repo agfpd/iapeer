@@ -471,6 +471,15 @@ export const codexAdapter: RuntimeAdapter = {
       if (!sub || !GOAL_SUBCOMMANDS.has(sub)) return null
       return { sequence: [['-l', `/goal ${sub}`], ['Enter']], stepDelayMs: 300 }
     }
+    if (command.name === 'voice') {
+      // Native realtime voice (src/voice, docs/22). `/voice` is a TOGGLE in codex — the caller types
+      // 'open' only after OBSERVING voice closed, under its per-peer lock. `/voice stop` is codex's
+      // explicit, idempotent close (Inactive/Stopping → no-op). Closed set: never caller text.
+      const sub = command.args?.[0]
+      if (sub === 'open') return { sequence: [['-l', '/voice'], ['Enter']], stepDelayMs: 300 }
+      if (sub === 'stop') return { sequence: [['-l', '/voice stop'], ['Enter']], stepDelayMs: 300 }
+      return null
+    }
     return null
   },
 }

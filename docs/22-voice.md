@@ -1,0 +1,70 @@
+# 22 — Native Codex voice (`iapeer voice`)
+
+Status: v1, 0.4.146. Implementation: `src/voice/` (engine `index.ts`, effects `deps.ts`, daemon sweep
+`sweep.ts`); codex keystroke plan: `launch/adapters/codex.ts` → control `voice`.
+
+## Purpose
+
+Open and close codex-cli's native realtime voice conversation (`/voice`) inside a peer's LIVE codex
+session on its current thread. The goal is a natural voice conversation with the fleet without
+STT → agent → TTS. iapeer owns the session control, the receipts, and the idle close. Microphone
+handover and wake word stay with voicetalk-runtime.
+
+## Upstream facts (codex-cli 0.163.0, source tag `rust-v0.163.0`)
+
+- `/voice` TOGGLES (`tui/src/chatwidget/slash_dispatch.rs` → `VoiceControl::Toggle`). `/voice stop`
+  is an explicit close and a no-op when Inactive/Stopping, so it is idempotent. `/voice mute` only
+  mutes the microphone: the session stays connected.
+- Each voice session runs in a separate helper process, `codex-voice-host`
+  (`codex-resources/voice/bin`), which holds the CoreAudio microphone and speaker. Codex terminates
+  it on close.
+- In a paginated-history thread (the default since 0.160) the rollout records
+  `realtime_item{realtime_session_started}`, `transcript_segment{role,text}` (both sides) and
+  `realtime_session_closed{outcome}`. Delegated work shows as
+  `task_started{turn_attribution.turn_trigger:"realtime"}`.
+- Codex has no idle timeout of its own.
+- Calls go to `chatgpt.com/backend-api/codex/realtime/calls` (ChatGPT-account auth). Protocol V3;
+  the default model per source is `gpt-live-1-codex`. Billing and whether a muted session is metered
+  are NOT confirmed.
+
+## Contract (consumer: voicetalk-runtime)
+
+`iapeer voice <open|close|status> <peer> [--json]` prints one JSON line. Exit 0 iff `ok`
+(`status` always exits 0).
+
+| verb | returns after | success |
+|---|---|---|
+| open | `realtime_session_started` newer than the open intent, with exactly 1 helper | `{"ok":true,"state":"open","session":"<id>","already":false,"hosts":1}` |
+| open (already open) | immediately; nothing is typed | `{"ok":true,"state":"open","session":"<same id>","already":true}` |
+| close | the helper is gone | `{"ok":true,"state":"closed","reason":"requested",…}` |
+| status | — | `{"ok":true,"state":"open|opening|closing|closed","session"?,"reason"?:"idle|user|error|requested","hosts":n,"live":bool,"idle_ms"?}` |
+
+Invariants:
+- `state:"closed"` holds only when no `codex-voice-host` exists in the peer's supervised process tree
+  (audio released) and no unconfirmed open is still inside its 12 s grace.
+- A timed-out open is never reported as closed by itself. The engine types `/voice stop` and returns
+  `closed` only once the helper is gone; otherwise it returns `closing`.
+- `/voice` (a toggle) is typed only after observing `closed`, under a per-peer lock
+  (`state/lifecycle/voice/<identity>.lock`; a lock whose holder died is stolen).
+- A caller killed mid-operation leaves an intent file. Status converges to the observed truth, and
+  the daemon sweep finishes the reconciliation.
+- open on an asleep codex peer first resumes its dialogue (`wakeOrSpawn`, `resume:true`).
+
+## Idle close (daemon, every 5 s)
+
+Applies only to sessions iapeer opened (an intent file exists). The session is idle when no
+`realtime_session_started`, `transcript_segment` or turn boundary has occurred for
+`IAPEER_VOICE_IDLE_SECS` (default 90) and no turn is running: waiting for requested work does not
+count as idle. The sweep closes the session with `reason:"idle"`. A close that happened outside
+iapeer (the human's `/voice`, a transport drop) is recorded as `user`/`error`. The lifecycle log
+gets `voice-opened` and `voice-closed` events.
+
+## Known upstream limitation — identity of the voice layer
+
+The realtime model receives codex's built-in `BACKEND_PROMPT` ("You are Codex, an OpenAI
+general-purpose agentic assistant…") plus a synthesized `<startup_context>` (current thread digest,
+recent work, workspace tree). It does not receive the peer's `model_instructions_file`, so it may
+deny being the peer while the delegated backend turns run as the peer. The only override is the
+config key `experimental_realtime_ws_backend_prompt` (it replaces the whole prompt and reaches V3
+`instructions`), with `experimental_realtime_ws_startup_context` as a sibling. Upstream marks both
+"Experimental / do not use". iapeer does not set them yet.

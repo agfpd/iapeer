@@ -83,6 +83,7 @@ The sections are layered: from "install and use" to "understand the architecture
 - [19 — Notices](19-notices.md) — telling the owner a peer went mute: detecting the structural API error that leaves a session alive, green and speechless, and routing it to the owner's surfaces one-way (not an approval)
 - [20 — OpenCode agent runtime](20-opencode.md) — acceptance contract, memory and observability ABI, core plugin, native harness
 - [21 — Capability-plugin lifecycle](21-capabilities.md) — declaration and core-owned provision/unprovision joints for per-peer plugin surfaces
+- [22 — Native Codex voice](22-voice.md) — `iapeer voice open|close|status`: `/voice` control of a live codex session, helper-process + rollout receipts, daemon idle close
 
 ## Status
 

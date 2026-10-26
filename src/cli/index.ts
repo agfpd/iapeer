@@ -86,6 +86,8 @@ import { ensureDaemonStarted, installDaemonPlist, parseDaemonPort, startConfigur
 import { MARKETPLACE_NAME, onboardHost, runtimeAuthNote, tccFullDiskAccessNote } from '../onboard/index.ts'
 import { probeFullDiskAccess, readMemoryProvider } from '../status/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
+import { closeVoice, openVoice, voiceStatus, type VoiceDeps } from '../voice/index.ts'
+import { realVoiceDeps } from '../voice/deps.ts'
 import { pluginLogsDir } from '../storage/index.ts'
 
 function infraRecycleNote(infra: readonly { personality: string; state: string; detail?: string }[] | undefined): string {
@@ -792,6 +794,34 @@ export async function goalPeer(
     from: before.status,
     reason: `goal still "${before.status}" ${GOAL_APPLY_TIMEOUT_MS}ms after /goal ${sub} — the session may be mid-turn (the composer takes the text but does not act on it until the turn ends)`,
   }
+}
+
+/** `iapeer voice` — the operator/runtime entry to native Codex voice (src/voice). Status is pure
+ *  observation; open wakes an asleep codex peer into its SAME dialogue first (voice needs a thread). */
+export async function voicePeer(
+  sub: 'open' | 'close' | 'status',
+  personality: string,
+  opts: CliEnvOptions & { depsFn?: (p: string, env: NodeJS.ProcessEnv) => VoiceDeps; wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: true }) => Promise<WakeResult> } = {},
+): Promise<Record<string, unknown> & { ok: boolean; state: string; session?: string; already?: boolean; reason?: string; error?: string }> {
+  const env = opts.env ?? process.env
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  if (!peer) return { ok: false, state: 'closed', error: `peer "${personality}" is not registered` }
+  if (peer.runtime !== 'codex' && !peer.runtimes.includes('codex')) return { ok: false, state: 'closed', error: `native voice is a codex feature; "${personality}" declares no codex runtime` }
+  const d = (opts.depsFn ?? realVoiceDeps)(personality, env)
+  const identity = buildProcessAddress('codex', personality)
+  if (sub === 'status') {
+    const s = voiceStatus(d, identity)
+    return { ok: true, state: s.state, ...(s.session ? { session: s.session } : {}), ...(s.reason ? { reason: s.reason } : {}), hosts: s.hosts, live: s.live, ...(s.idleMs !== undefined ? { idle_ms: s.idleMs } : {}) }
+  }
+  if (sub === 'close') return { ...(await closeVoice(d, identity, 'requested')) }
+  if (!voiceStatus(d, identity).live) {
+    if (isForeignLaunchd(personality, env)) return { ok: false, state: 'closed', error: `"${personality}" is managed by a foreign launchd plist` }
+    const cfg = loadLifecycleConfig(env)
+    const wake = opts.wakeFn ?? (args => wakeOrSpawn(args, { cfg, env }))
+    const w = await wake({ personality, runtime: 'codex', task: '', resume: true })
+    if (w.status !== 'READY') return { ok: false, state: 'closed', error: `could not wake ${personality} (codex): ${w.reason ?? w.status}` }
+  }
+  return { ...(await openVoice(d, identity)) }
 }
 
 export async function compactPeer(
@@ -1764,6 +1794,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'attach <peer> [runtime]', desc: 'ensure-live + resume, then attach to the pty session (Ctrl-] detaches)' },
   { sig: 'interrupt <peer> [runtime]', desc: 'interrupt the current turn (Escape) — context intact; no runtime = EVERY live runtime of the peer' },
   { sig: 'compact <peer> [runtime]', desc: 'compact the peer\'s dialogue (/compact); resumes clean-asleep first' },
+  { sig: 'voice <open|close|status> <peer> [--json]', desc: 'native Codex realtime voice (/voice) in the peer\'s live session — receipts from the voice helper process + rollout; idle-closed by the daemon' },
   { sig: 'self-fresh', desc: '(agent self-call) mark /new eager-fresh + self-kill — the daemon relaunches fresh' },
   { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
   { sig: 'capability <list | register <decl.json> | sync <name> | unregister <name>>', desc: 'capability-plugin lifecycle: per-peer provision/unprovision on every agent endpoint (docs/21)' },
@@ -3087,6 +3118,19 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         }
         errOut(`compact: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
         return 1
+      }
+      case 'voice': {
+        // Native Codex realtime voice (src/voice, docs/22): open | close | status a peer's `/voice`.
+        // Receipt = ONE JSON line on stdout (with --json), exit 0 only on ok.
+        const sub = positionals[0]
+        const peerName = positionals[1]
+        if (!sub || !['open', 'close', 'status'].includes(sub) || !peerName) {
+          return argErr(errOut, 'voice needs a subcommand and a peer — usage: iapeer voice <open|close|status> <peer> [--json]')
+        }
+        const r = await voicePeer(sub as 'open' | 'close' | 'status', peerName, { env })
+        if (flags.json === true) out(JSON.stringify(r) + '\n')
+        else out(`voice ${sub} → ${peerName}: ${r.state}${r.session ? ` session=${r.session}` : ''}${r.already ? ' (already)' : ''}${r.reason ? ` reason=${r.reason}` : ''}${r.error ? ` — ${r.error}` : ''}\n`)
+        return sub === 'status' || r.ok ? 0 : 1
       }
       case 'goal': {
         // Recovery for a codex thread goal the peer's OWN tools cannot fix (docs/19 §2a).

@@ -79,6 +79,7 @@ import { processLimitResumes } from './limitresume.ts'
 import { recordLimitPark } from '../lifecycle/limitpark.ts'
 import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
+import { startVoiceSweep } from '../voice/sweep.ts'
 import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { startCapabilityReloads } from '../capability/reload.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
@@ -455,6 +456,8 @@ export interface ConfiguredDaemonOptions {
   muteWatchIntervalMs?: number
   /** Goal-watch sweep cadence (default DEFAULT_GOALWATCH_INTERVAL_MS). */
   goalWatchIntervalMs?: number
+  /** Native Codex voice idle sweep cadence (docs/22); 0 disables. */
+  voiceSweepIntervalMs?: number
   /** Turn-watch sweep cadence (default DEFAULT_TURNWATCH_INTERVAL_MS). */
   turnWatchIntervalMs?: number
   /** Profile-sync sweep cadence (default DEFAULT_PROFILE_SYNC_INTERVAL_MS). */
@@ -554,6 +557,18 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       try {
         const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
         appendLifecycleEvent(cfg.eventLogDir, { ev: 'goalwatch-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
+      } catch { /* best-effort */ }
+    },
+  })
+  // Native Codex voice (docs/22): close iapeer-opened `/voice` sessions once the conversation is
+  // idle, so an open realtime session never hangs on and burns the owner's limits.
+  const stopVoiceSweep = startVoiceSweep(cfg, {
+    env,
+    ...(opts.voiceSweepIntervalMs !== undefined ? { intervalMs: opts.voiceSweepIntervalMs } : {}),
+    onError: (err: unknown) => {
+      try {
+        const detail = err instanceof Error ? (err.stack ?? err.message) : String(err)
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'voicesweep-error', error: detail.replace(/\s+/g, ' ').slice(0, 600) }, { env })
       } catch { /* best-effort */ }
     },
   })
@@ -697,7 +712,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   // The mute-watch timer is OURS, not startDaemon's — so its teardown must hang off the
   // handle we return, or a closed daemon would leave a live timer sweeping the disk (and
   // every test that starts a daemon would hang on exit).
-  return { ...handle, close: async () => { stopCapabilityReloads(); stopBootModalWatch(); stopMuteWatch(); stopGoalWatch(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
+  return { ...handle, close: async () => { stopCapabilityReloads(); stopBootModalWatch(); stopMuteWatch(); stopGoalWatch(); stopVoiceSweep(); stopTurnWatch(); stopProfileSync(); await handle.close() } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
