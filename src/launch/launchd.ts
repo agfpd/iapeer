@@ -325,6 +325,7 @@ export type BootstrapState =
   | 'refused-foreign' // the plist EXISTS but is not foundation-owned → never load someone else's
   | 'missing-plist' // no plist at that path at all — nothing to load (NOT a foreign plist)
   | 'failed' // launchctl bootstrap exited non-zero
+  | 'stopped' // the channel is operator-stopped (launchd-disabled / C1 flag) — only an explicit `iapeer start` loads it
 
 export interface BootstrapResult {
   state: BootstrapState
@@ -618,6 +619,39 @@ export function bootoutLaunchdJob(label: string, env: NodeJS.ProcessEnv = proces
   return r.status === 0 ? { state: 'booted-out' } : { state: 'failed', detail: (r.stderr ?? '').trim() || `exit ${r.status}` }
 }
 
+/** Parse `launchctl print-disabled gui/<uid>` output: is `label` overridden to disabled?
+ *  Lines read `"<label>" => disabled|enabled` (older macOS: `=> true|false`). */
+export function parseLaunchdDisabled(out: string, label: string): boolean {
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*"([^"]+)"\s*=>\s*(\S+)/)
+    if (m && m[1] === label) return m[2] === 'disabled' || m[2] === 'true'
+  }
+  return false
+}
+
+/** Is the label disabled in the gui domain? launchd keeps this override across reboots. */
+export function isLaunchdDisabled(label: string, uid: string = currentUid()): boolean {
+  const r = spawnSync('launchctl', ['print-disabled', `gui/${uid}`], { encoding: 'utf8' })
+  return parseLaunchdDisabled(r.stdout ?? '', label)
+}
+
+/**
+ * Set the persistent enable/disable override of a gui-domain label (`launchctl
+ * enable|disable gui/<uid>/<label>`). A disabled label cannot be bootstrapped and is not
+ * loaded at login. This is how an operator stop of an always-on channel survives any
+ * out-of-band bootstrap and a reboot. Sandbox-safe: never calls launchctl under
+ * IAPEER_TEST_SANDBOX (the override is host-global).
+ */
+export function setLaunchdEnabled(
+  label: string,
+  enabled: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): { state: 'ok' | 'skipped-sandbox' | 'failed'; detail?: string } {
+  if (env.IAPEER_TEST_SANDBOX === '1' || process.env.IAPEER_TEST_SANDBOX === '1') return { state: 'skipped-sandbox' }
+  const r = spawnSync('launchctl', [enabled ? 'enable' : 'disable', `gui/${currentUid()}/${label}`], { encoding: 'utf8' })
+  return r.status === 0 ? { state: 'ok' } : { state: 'failed', detail: (r.stderr ?? '').trim() || `exit ${r.status}` }
+}
+
 /**
  * AUTO-bootstrap a freshly-provisioned foundation plist into the gui domain
  * (`launchctl bootstrap gui/<uid> <plist>`) — the "load it now, don't write-and-wait
@@ -638,6 +672,7 @@ export function launchctlBootstrap(
   personality: string,
   plistPath: string,
   env: NodeJS.ProcessEnv = process.env,
+  opts: { enable?: boolean } = {},
 ): BootstrapResult {
   // The label is the plist BASENAME stem — true for BOTH schemes (legacy base
   // `com.iapeer.<p>.plist` and per-runtime `com.iapeer.<p>.<rt>.plist`), and the
@@ -677,6 +712,22 @@ export function launchctlBootstrap(
     return { state: 'skipped-sandbox', label, detail: 'IAPEER_TEST_SANDBOX=1 — not loading a real launchd job' }
   }
   const uid = currentUid()
+  // OPERATOR STOP IS DURABLE (26.10.2026 privacy incident: a stopped voicetalk channel was
+  // re-bootstrapped by an out-of-band repair and listened to the room again). `stop` leaves
+  // the label DISABLED in the gui domain; only the explicit start (opts.enable) lifts it.
+  // Every implicit path (re-provision, runtime update, create) sees 'stopped' and leaves the
+  // channel down. launchd itself refuses `bootstrap` of a disabled label (exit 5, verified
+  // live) and skips it at login, which covers raw launchctl and reboot.
+  if (opts.enable) {
+    const en = setLaunchdEnabled(label, true, env)
+    if (en.state === 'failed') return { state: 'failed', label, detail: `launchctl enable failed: ${en.detail ?? ''}` }
+  } else if (isLaunchdDisabled(label, uid)) {
+    return {
+      state: 'stopped',
+      label,
+      detail: `${label} is disabled (stopped by the operator) — not loading it; \`iapeer start ${personality}\` brings it back`,
+    }
+  }
   // UNDEAD-JOB-SAFE core: wait for a booted-out
   // job to actually vanish, then bootstrap with backoff. A genuinely LIVE job
   // reads 'already-loaded' (idempotent no-op, same semantics as before); only a

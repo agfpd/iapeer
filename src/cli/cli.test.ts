@@ -757,6 +757,22 @@ describe('В48 — stop bootout discriminates benign already-unloaded from a rea
   })
 })
 
+describe('durable operator stop of an always-on channel (26.10.2026 privacy incident)', () => {
+  test('stop marks the infra channel stopped (list ✕); only start clears it', async () => {
+    await register('vtinfra', 'telegram', 'natural')
+    const { installAlwaysOnPlist } = await import('../launch/launchd.ts')
+    installAlwaysOnPlist({ personality: 'vtinfra', runtime: 'telegram', cwd: '/tmp/vtinfra', runtimeBin: '/bin/true', env: env() })
+    const cfg = loadLifecycleConfig(env())
+    const status = () => listPeers({ env: env() }).find(p => p.personality === 'vtinfra')!.runtimes[0]!.status
+    stopPeer('vtinfra', 'telegram', { env: env() })
+    expect(isStopped(cfg, 'telegram-vtinfra')).toBe(true)
+    expect(status()).toBe('stopped')
+    startPeer('vtinfra', 'telegram', { env: env() })
+    expect(isStopped(cfg, 'telegram-vtinfra')).toBe(false)
+    expect(status()).toBe('asleep')
+  })
+})
+
 // ─── new — the UNCONDITIONAL fresh-restart control (docs/Control-команды §new) ─
 
 describe('new (unconditional fresh restart)', () => {

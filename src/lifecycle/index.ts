@@ -230,9 +230,10 @@ function claimDeadSession(cfg: LifecycleConfig, identity: string): boolean {
 // wake on the next message). Lives next to the session-state, in state/lifecycle —
 // daemon-owned, durable across restarts. Keyed on IDENTITY (runtime-personality):
 // `stop <peer> <runtime>` halts one runtime; the flag is per-runtime presence.
-// always-on (launchd) peers are NOT stopped this way — their stop is launchctl
-// bootout (ЖЦ); a launchd peer never carries this flag (and the daemon is H4
-// read-only for it regardless).
+// always-on (launchd) channels carry the same flag since 0.4.152: `stop` sets it next
+// to `launchctl disable` + bootout, `start` clears both. For them it is NOT a wake gate
+// (the daemon is H4 read-only regardless) but the durable operator intent that every
+// implicit bootstrap path (re-provision, runtime update) honors, and `list` shows as ✕.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function stoppedFlagPath(cfg: LifecycleConfig, identity: string): string {

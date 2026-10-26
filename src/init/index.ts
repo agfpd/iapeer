@@ -32,6 +32,8 @@ import { provisionPeer, type ProvisionResult } from '../provision/index.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { bootstrapFailed, launchctlBootstrap, resolveAlwaysOnTarget, type BootstrapResult } from '../launch/launchd.ts'
 import { runtimeSelfConfig, type SelfConfigResult } from '../runtime/index.ts'
+import { isStopped, loadLifecycleConfig } from '../lifecycle/index.ts'
+import { buildProcessAddress } from '../core/socket.ts'
 import { defaultEnsureDepsDeps, ensureOpencodePluginDependency, type EnsureDepsDeps } from '../opencode/deps.ts'
 import type { Intelligence } from '../core/constants.ts'
 
@@ -607,12 +609,19 @@ export async function initPeer(opts: InitPeerOptions): Promise<InitPeerResult> {
       // Multi-infra: load the plist provision actually installed for THIS runtime
       // (legacy base or per-runtime suffixed — resolveAlwaysOnTarget is stable
       // post-install, so this is the same file installAlwaysOnPlist wrote).
-      bootstrapped = launchctlBootstrap(
-        provisioned.personality,
-        resolveAlwaysOnTarget(provisioned.personality, provisioned.runtime, env).path,
-        env,
-      )
-      if (bootstrapFailed(bootstrapped.state)) {
+      const target = resolveAlwaysOnTarget(provisioned.personality, provisioned.runtime, env)
+      // An operator-stopped channel stays down: re-provision (update-runtime, create,
+      // init) is not a start. Only `iapeer start` lifts the stop (C1 flag + launchd disable).
+      bootstrapped = isStopped(loadLifecycleConfig(env), buildProcessAddress(provisioned.runtime, provisioned.personality))
+        ? {
+            state: 'stopped',
+            label: target.label,
+            detail: `"${provisioned.personality}" (${provisioned.runtime}) is stopped by the operator — not loading it; \`iapeer start ${provisioned.personality} ${provisioned.runtime}\` brings it back`,
+          }
+        : launchctlBootstrap(provisioned.personality, target.path, env)
+      if (bootstrapped.state === 'stopped') {
+        opts.warn?.(bootstrapped.detail ?? 'channel stopped — not bootstrapping')
+      } else if (bootstrapFailed(bootstrapped.state)) {
         opts.warn?.(`bootstrap ${bootstrapped.state}: ${bootstrapped.detail ?? ''}`)
       }
     }

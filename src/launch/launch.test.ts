@@ -683,3 +683,14 @@ describe('codex executeControl — voice', () => {
     expect(claudeAdapter.executeControl({ name: 'voice', args: ['open'] })).toBeNull()
   })
 })
+
+describe('parseLaunchdDisabled (durable operator stop)', () => {
+  const { parseLaunchdDisabled } = require('./launchd.ts') as typeof import('./launchd.ts')
+  const out = 'disabled services = {\n\t\t"com.iapeer.arthur.voicetalk" => disabled\n\t\t"com.iapeer.arthur.web" => enabled\n\t\t"com.old.style" => true\n\t}\n'
+  test('reads the per-label override; enabled or absent is not disabled', () => {
+    expect(parseLaunchdDisabled(out, 'com.iapeer.arthur.voicetalk')).toBe(true)
+    expect(parseLaunchdDisabled(out, 'com.old.style')).toBe(true)
+    expect(parseLaunchdDisabled(out, 'com.iapeer.arthur.web')).toBe(false)
+    expect(parseLaunchdDisabled(out, 'com.iapeer.arthur')).toBe(false)
+  })
+})

@@ -10,6 +10,7 @@ import { updateAllRuntimes, updateRuntime, type RestartedPeer } from './update.t
 import { installRuntimePackage } from './deploy.ts'
 import { readRuntimeManifest, writeRuntimeManifest, type RuntimeManifest } from './index.ts'
 import { upsertPeer } from '../registry/index.ts'
+import { isStopped, loadLifecycleConfig, setStopped } from '../lifecycle/index.ts'
 
 const roots: string[] = []
 function mkTmp(): string {
@@ -83,6 +84,30 @@ describe('updateRuntime (§(г): gate → re-install → re-provision → restar
     expect(r.peers.map(p => p.personality)).toEqual(['timer']) // re-provisioned
     expect(restarts).toEqual(['timer']) // restarted via the injected stop/start
     expect(readRuntimeManifest('notifier', { env })?.version).toBe('0.2.0')
+  })
+
+  test('an operator-stopped channel stays down: re-provision does not bootstrap it, restart skips it', async () => {
+    const root = mkTmp()
+    const { dir, hook } = stubBins()
+    const env = envFor(root, dir)
+    const manifest = (version: string): RuntimeManifest => ({ runtime: 'notifier', version, selfConfig: hook, peers: [{ personality: 'timer', intelligence: 'absent' }] })
+    writeRuntimeManifest(manifest('0.1.0'), { env })
+    await upsertPeer(
+      { personality: 'timer', runtime: 'notifier', cwd: join(root, 'iapeer', 'peers', 'timer'), intelligence: 'absent' },
+      { env },
+    )
+    setStopped(loadLifecycleConfig(env), 'notifier-timer')
+    const r = await updateRuntime({
+      runtime: 'notifier',
+      env,
+      runNpx: (_pkg, e) => (writeRuntimeManifest(manifest('0.2.0'), { env: e }), { ok: true }),
+      npmVersion: () => '0.2.0',
+      // NO injected restart: the default stop→start would lift the operator stop
+    })
+    expect(r.state).toBe('updated')
+    expect(r.peers.find(p => p.personality === 'timer')?.bootstrap).toBe('stopped')
+    expect(r.restarted).toEqual([expect.objectContaining({ personality: 'timer', state: 'skipped-stopped' })])
+    expect(isStopped(loadLifecycleConfig(env), 'notifier-timer')).toBe(true)
   })
 
   test('version-gate: manifest stamp equals npm latest → already-latest, NOTHING runs', async () => {

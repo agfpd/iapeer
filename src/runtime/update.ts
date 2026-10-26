@@ -21,6 +21,7 @@ import { spawnSync } from 'child_process'
 import { readdirSync } from 'fs'
 import { join } from 'path'
 import { isRuntime, type Runtime } from '../core/constants.ts'
+import { buildProcessAddress } from '../core/socket.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
 import { readRuntimeManifest } from './index.ts'
@@ -45,7 +46,7 @@ const defaultNpmVersion: NpmVersionFn = (pkg, env) => {
 
 export interface RestartedPeer {
   personality: string
-  state: 'restarted' | 'refused-foreign-launchd' | 'failed'
+  state: 'restarted' | 'refused-foreign-launchd' | 'skipped-stopped' | 'failed'
   detail?: string
 }
 
@@ -85,6 +86,12 @@ export interface UpdateRuntimeOptions {
  *  refused by the verbs themselves and reported, never forced. */
 async function defaultRestartPeer(personality: string, runtime: Runtime, env: NodeJS.ProcessEnv): Promise<RestartedPeer> {
   const { stopPeer, startPeer } = await import('../cli/index.ts')
+  // A stop→start restart would LIFT an operator stop (start clears it). A stopped runtime
+  // has no running session to refresh; it picks up the new code on its next explicit start.
+  const { isStopped, loadLifecycleConfig } = await import('../lifecycle/index.ts')
+  if (isStopped(loadLifecycleConfig(env), buildProcessAddress(runtime, personality))) {
+    return { personality, state: 'skipped-stopped', detail: 'stopped by the operator — left down; runs the new code on its next `iapeer start`' }
+  }
   try {
     const stops = stopPeer(personality, runtime, { env })
     if (stops.some(o => o.action === 'refused-foreign-launchd')) {

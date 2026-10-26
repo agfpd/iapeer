@@ -72,6 +72,7 @@ import {
   existingAlwaysOnPlists,
   launchctlBootstrap,
   resolveAlwaysOnTarget,
+  setLaunchdEnabled,
 } from '../launch/launchd.ts'
 import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
 import { claudeProjectsRoot, transcriptSlug } from '../launch/adapters/claude.ts'
@@ -287,11 +288,23 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // session) resolves to its suffixed label → bootout exit 3 (benign) → killSession
       // below still tears the session down.
       const target = resolveAlwaysOnTarget(personality, rt, env)
+      // DURABLE operator stop (26.10.2026: a bootout-only stop was undone 6 min later by an
+      // out-of-band `launchctl bootstrap` — the host monitor read "unloaded but not disabled"
+      // as a fault and the SRE peer restored it, so the room mic was captured again).
+      // Two marks, both lifted only by `start`: the C1 flag (iapeer's own paths and `list` ✕)
+      // and the launchd disable override (launchd refuses bootstrap and skips the job at
+      // login, so raw launchctl and a reboot cannot bring it back). Disable BEFORE bootout:
+      // no window in which KeepAlive or anyone else can reload it.
+      setStopped(cfg, identity)
+      const dis = setLaunchdEnabled(target.label, false, env)
       const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${target.label}`], { encoding: 'utf8' })
       killSession(sock, identity, env, 'stop')
       const stderrText = (r.stderr ?? '').trim()
       const benign = r.status === 0 || r.status === 3 || /No such process/i.test(stderrText)
-      const reason = benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`
+      const reason = [
+        benign ? undefined : `launchctl bootout exited ${r.status}${stderrText ? `: ${stderrText}` : ''}`,
+        dis.state === 'failed' ? `launchctl disable failed (the stop does not survive an external bootstrap or a reboot): ${dis.detail ?? ''}` : undefined,
+      ].filter(Boolean).join('; ') || undefined
       out.push({ personality, runtime: rt, action: 'bootout', reason })
       appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'bootout', reason }, { env })
     } else {
@@ -336,13 +349,16 @@ export function startPeer(personality: string, runtime: string | undefined, opts
       // Multi-infra: load the plist that holds THIS (personality, runtime) channel
       // (legacy base or per-runtime suffixed — the same resolution install/stop use).
       const plist = resolveAlwaysOnTarget(personality, rt, env).path
+      // The explicit start is the ONLY path that lifts an operator stop: clear the C1 flag
+      // and the launchd disable override (launchctlBootstrap enable:true), then load.
       // UNDEAD-JOB-SAFE start: a bootstrap right after a bootout used to hit the
       // still-dismantling job (exit 5 I/O
       // error) and leave the router DOWN. launchctlBootstrap now waits for the
       // job to vanish and retries with backoff (~22 s budget); a failure after
       // every attempt is LOUD with the manual rescue recipe. (Also gains the
       // sentinel fleet-guard + sandbox guard the raw spawn never had.)
-      const r = launchctlBootstrap(personality, plist, env)
+      clearStopped(cfg, identity)
+      const r = launchctlBootstrap(personality, plist, env, { enable: true })
       // NO PLIST ≠ FOREIGN PLIST. The peer declares this infra runtime but no always-on
       // plist was ever provisioned for the (personality, runtime) channel — there is
       // nothing to bootstrap, and the honest answer is the verb that PROVISIONS it, not
@@ -1217,6 +1233,9 @@ export async function removePeerCli(
           const r = spawnSync('launchctl', ['bootout', `gui/${uid()}/${entry.label}`], { encoding: 'utf8' })
           // bootout exits non-zero when the job was already unloaded — benign for a teardown.
           bootoutNote = r.status === 0 ? 'bootout' : `bootout (exit ${r.status}${(r.stderr ?? '').trim() ? `: ${(r.stderr ?? '').trim()}` : ''})`
+          // Drop a `stop`'s disable override with the channel: it is keyed on the label, and a
+          // future channel reusing the label must not be born silently disabled.
+          if (setLaunchdEnabled(entry.label, true, env).state === 'failed') bootoutNote += ' (launchctl enable failed)'
         }
         let rmNote: string
         try {
