@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An operator `stop` of an always-on channel is durable.** It used to be a bare `launchctl bootout`:
+  the plist stayed loaded-able and not disabled, so the host monitor read it as
+  `gone-without-disable` and an SRE peer re-bootstrapped it (26.10.2026: a stopped voicetalk channel
+  captured the room mic again). `stop` now sets the C1 stop flag (`list` shows ✕) and
+  `launchctl disable`s the label before bootout; launchd then refuses any `bootstrap` and skips it
+  at login. Re-provision (`create`/`init`/`update-runtime`) reports `stopped` instead of loading it;
+  the update-runtime restart skips a stopped peer (`skipped-stopped`) instead of stop→start lifting
+  the stop. Only `start` clears both marks. `remove` drops the disable override with the channel.
+
 - **Hosted hard teardown reclaims PTY-owned subprocesses, not only the runtime root.**
   `self-fresh`, stop and reap snapshot ancestry before killing the runtime, including stdio MCP
   launchers in separate process groups. Start-token and controlling-terminal checks exclude reused
