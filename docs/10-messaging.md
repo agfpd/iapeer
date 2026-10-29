@@ -44,7 +44,9 @@ The daemon finds the recipient in the registry and selects its endpoint first. W
 - **asleep** — the daemon brings the session up, re-checks the recipient, delivers; the answer is `delivered, woke`.
 - **stopped** — the daemon refuses and tells the sender directly.
 
-The key guarantee: `delivered` means the message actually landed in a live session (the daemon waited for confirmation), not that it was just sent into the void. If the session didn't confirm receipt in the allotted time, the daemon treats it as dead and doesn't lie about success.
+The key guarantee: `delivered` means the message actually landed in a live session, not merely that bytes reached its terminal. Codex delivery requires a new native user-input record containing the message, or both a new full-message native history entry and a matching native pending-input preview with an empty composer. A socket ACK, terminal repaint, warning count, or pasted-content placeholder is not acceptance. The same gate covers cold and warm delivery. An unavailable receipt fails visibly (even if the process remains alive); an ambiguous timeout says acceptance is unconfirmed, since the input could still be consumed later. Callers must not interpret that as proof that no side effects can occur.
+
+Codex's **“This conversation is open in another app”** view is a read-only thread-ownership conflict, not a normal warning. Delivery fails with that reason; the core does not seize ownership, fork the conversation, or blindly press `r`. Close the other owner and retry the native resume before sending again. Sender runtimes retain responsibility for their usual failure/fallback chain.
 
 In every message's envelope travels the sender's nature (`intelligence`) — the recipient knows whether a human, an agent, or a service process is writing to it — and the dispatch instant (`ts`): the moment the router accepted the send. The same instant is returned to the sender as the `ts` field of its `send_to_peer` result, so both sides of a conversation can literally compare timestamps — which is what makes an async desync (a reply addressing an already-outdated state) visible to the recipient instead of silent.
 

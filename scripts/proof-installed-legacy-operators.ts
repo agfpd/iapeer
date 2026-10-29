@@ -147,7 +147,36 @@ try {
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
 
-  if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || process.argv.includes('--hand-edit-only') || process.argv.includes('--enable-only') || arg('--legacy-bin')) {
+  if (process.argv.includes('--blocked-only')) {
+    // Contrast: a session whose TUI cannot accept input (SIGSTOP stands in for any modal) still
+    // ACKs pty bytes. A correct core reports failure; the buggy socket-ack path reported delivered.
+    if (runtime !== 'codex') throw new Error('--blocked-only requires codex')
+    const child = Bun.spawnSync(['pgrep', '-P', String(hosting().pid)]).stdout.toString().trim().split('\n')[0]
+    if (!child) throw new Error('codex child pid missing')
+    process.kill(Number(child), 'SIGSTOP')
+    const t = Date.now()
+    const sent = await cli('send', personality, '--runtime', runtime, '--from', 'notifier-sender', '--topic', 'operator-proof', '--message', 'BLOCKED_DELIVERY_PROOF')
+    record('delivery-blocked', { child, sent, completedWhileBlocked: completedAfter(t) })
+    process.kill(Number(child), 'SIGCONT')
+    success = true
+  } else if (process.argv.includes('--deliver-only')) {
+    if (runtime !== 'codex') throw new Error('--deliver-only requires codex')
+    const { captureHostViewport } = await import('../src/supervisor/capture.ts')
+    for (const size of [500, 1482, 8000]) {
+      const marker = `DELIVERY_SIZE_${size}`
+      const t = Date.now(), sent = await send(marker + ' x'.repeat(Math.ceil(size / 2)))
+      await Bun.sleep(2000)
+      record('delivery-idle', { size, sent, completed: completedAfter(t), view: await captureHostViewport(runDir, identity()) })
+    }
+    busyNext = true; busyReceived = false
+    await send('RELOAD_BUSY_PROOF'); await until('busy request', () => busyReceived)
+    const t = Date.now(), sent = await send('DELIVERY_BUSY_LONG ' + ' x'.repeat(1000))
+    record('delivery-busy', { sent, view: await captureHostViewport(runDir, identity()) })
+    releaseBusy?.()
+    await Bun.sleep(3000)
+    record('delivery-after-busy', { completed: completedAfter(t), view: await captureHostViewport(runDir, identity()) })
+    success = true
+  } else if (process.argv.includes('--reload-only') || process.argv.includes('--provider-only') || process.argv.includes('--remove-only') || process.argv.includes('--hand-edit-only') || process.argv.includes('--enable-only') || arg('--legacy-bin')) {
     let busyAt = 0
     await proveReload({ root, cwd, runtime, cli, turn, hosting, session: nativeSession, record,
       probe: async () => {

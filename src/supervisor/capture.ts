@@ -4,6 +4,11 @@ import { readGeometry, sockPath } from './paths.ts'
 /** Read the running host's OWN emulator, never the shared cross-session pane-log.
  * Legacy hosts already implement same-size attach: no resize or input is sent to the child. */
 export async function captureHostViewport(runDir: string, session: string): Promise<string | null> {
+  return (await captureHostState(runDir, session))?.text ?? null
+}
+
+/** One consistent emulator snapshot, including styled composer occupancy (dim ghost text is empty). */
+export async function captureHostState(runDir: string, session: string): Promise<{ text: string; composerOccupied: boolean } | null> {
   const geometry = readGeometry(runDir, session)
   if (!geometry) return null
   const { cols, rows } = geometry
@@ -34,10 +39,10 @@ export async function captureHostViewport(runDir: string, session: string): Prom
   })
   if (!bytes) return null
   const { Terminal } = await import('@xterm/headless')
-  const { modelToPlainText } = await import('./render.ts')
+  const { modelToPlainText, composerOccupancyFromModel } = await import('./render.ts')
   const term = new Terminal({ cols, rows, allowProposedApi: true })
   try {
     await new Promise<void>(r => term.write(bytes, r))
-    return modelToPlainText(term, cols, rows)
+    return { text: modelToPlainText(term, cols, rows), composerOccupied: composerOccupancyFromModel(term, cols, rows, session.split('-')[0]!) }
   } finally { term.dispose() }
 }

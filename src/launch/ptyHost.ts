@@ -294,6 +294,9 @@ export async function waitHostReady(
 
 /** Deliver the first/next message to the hosted session over its supervisor socket. */
 export function deliverHosted(identity: string, message: string, env: NodeJS.ProcessEnv = process.env): Promise<DeliverResult> {
+  if (identity.startsWith('codex-')) {
+    return import('./codexDelivery.ts').then(m => m.deliverCodexToHost(hostRunDir(env), identity, message, env))
+  }
   return deliverToHost(hostRunDir(env), identity, message)
 }
 

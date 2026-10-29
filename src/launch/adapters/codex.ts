@@ -224,15 +224,9 @@ export const codexAdapter: RuntimeAdapter = {
     ghostTextSgr: ['2', '38;5;246'],
   },
 
-  // codex writes NO prompt-acceptance record — its session-jsonl user-input appears only
-  // when the model TURN ingests the message (during a long turn, tens of seconds away;
-  // measured ~80s live 2026-06-25). But its input queue is DURABLE: a mid-turn submit is
-  // held and processed at the next turn boundary, never lost (verified live — an 80s turn
-  // still ingested + replied with the exact probe token, despite the send false-FAILing at
-  // the 8s grace). So the flushed socket-ack IS the delivery confirm; a transcript grace
-  // only false-FAILs a message that WILL be processed → wrong fallback escalation. A
-  // genuinely dead session still fails at the socket-ack. (See RuntimeAdapter.deliveryConfirm.)
-  deliveryConfirm: 'socket-ack',
+  // deliverHosted owns a native-receipt gate shared by cold and warm delivery. A flushed CR
+  // alone does NOT prove entry into Codex's input queue (walt-trader, 28–29.10.2026).
+  deliveryConfirm: 'host-receipt',
 
   /**
    * argv = codexBin + (resume --last when spec.resume) + the TUI args +

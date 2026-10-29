@@ -400,7 +400,7 @@ async function deliverViaHost(
   // LAZY: only 'transcript'-confirm runtimes (claude) use the baseline; router (socket-ack) and
   // socket-ack runtimes (codex) return before it — computing it for them recursively scanned all of
   // ~/.codex/sessions (full-file read per session) on every delivery for nothing.
-  const usesBaseline = adapter.kind !== 'router' && adapter.deliveryConfirm !== 'socket-ack'
+  const usesBaseline = adapter.kind !== 'router' && adapter.deliveryConfirm !== 'socket-ack' && adapter.deliveryConfirm !== 'host-receipt'
   const baseline = cwd && usesBaseline ? compactDoneBaseline(target.runtime, cwd, { env }) : null
   // Б7 — the default deliverHosted resolves the supervisor run-dir from env (sandboxed under a test root).
   const send = seam.deliverHosted ?? ((identity: string, msg: string) => deliverHosted(identity, msg, env))
@@ -408,13 +408,15 @@ async function deliverViaHost(
   if (!sent.ok) {
     return err(
       `hosted peer "${target.personality}" (${target.runtime}) deliver failed: ${sent.error ?? 'unknown error'}; ` +
-        `message NOT delivered`,
+        (adapter.deliveryConfirm === 'host-receipt' ? `delivery not confirmed` : `message NOT delivered`),
     )
   }
   // Router (telegram/notifier): no transcript proxy → confirmed by the socket-ack just obtained. A
   // router's liveness is structural via launchd KeepAlive (not a model turn), so the ack IS the
   // delivery-level confirm (parity with the legacy tmux router C-j path).
   if (adapter.kind === 'router') return ok(undefined)
+  // Codex's shared cold/warm host leaf already required native acceptance, not a socket ACK.
+  if (adapter.deliveryConfirm === 'host-receipt') return ok(undefined)
   // 'socket-ack' TUI runtimes (codex): the input queue is DURABLE — a mid-turn submit is HELD and
   // processed at the next turn boundary, however long that is (verified live 2026-06-25: an 80s turn
   // still ingested + replied; the send false-FAILed at the 8s grace, the message was NOT lost). codex
