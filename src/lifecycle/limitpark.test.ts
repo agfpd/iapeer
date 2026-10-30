@@ -21,7 +21,7 @@ import { claudeResetsAtMs, parseClaudeTranscript } from '../daemon/mutewatch.ts'
 import { ok, err } from '../core/errors.ts'
 import { SYSTEM_PERSONALITY } from '../core/constants.ts'
 import { upsertPeer } from '../registry/index.ts'
-import { noteHostingGeneration } from './workOrigin.ts'
+import { noteHostingGeneration, noteWorkOrigin } from './workOrigin.ts'
 
 let root: string
 let laDir: string
@@ -211,6 +211,29 @@ describe('NUDGE — after the reset the core continues the stopped turn, no huma
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ runtime: 'codex', topic: 'limit-resume' })
   })
+  test('a fast refusal preceding the post-delivery receipt still recovers explicit-work authorization', async () => {
+    const file = join(root, 'fast-limit.jsonl'), rendered = 'explicit task proof'
+    writeFileSync(file, JSON.stringify({ type: 'event_msg', timestamp: new Date(T0 - 500).toISOString(), payload: { type: 'user_message', message: rendered } }) + '\n')
+    recordLimitPark(cfg, park({ identity: 'codex-iapeer', runtime: 'codex', file }))
+    noteWorkOrigin(cfg, { identity: 'codex-iapeer', personality: 'iapeer', runtime: 'codex', cwd: root, sessionToken: 'limited-host', ts: T0 + 1000, acceptedAtMs: T0 - 1000, sentAt: '01:00:00', caller: { personality: 'pm', runtime: 'claude' }, message: rendered, rendered, explicitRuntime: true })
+    const sent: Sent[] = []
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS })
+    expect(sent[0]?.runtime).toBe('codex')
+    expect(sent[0]?.topic).toBe('limit-resume')
+  })
+  test('a limit nudge continues the current ephemeral job outside the new-task FIFO', async () => {
+    recordLimitPark(cfg, park())
+    let depsSeen: { ephemeral?: unknown; wakeContinueWork?: boolean } | undefined
+    await processLimitResumes(cfg, env, { ephemeral: { isEphemeral: () => true } } as never, {
+      progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS,
+      send: (async (_caller: unknown, _input: unknown, deps: typeof depsSeen) => {
+        depsSeen = deps
+        return ok({ ok: true, delivered_to: { personality: 'iapeer', runtime: 'claude' }, woke: true, ts: 'x' })
+      }) as never,
+    })
+    expect(depsSeen?.ephemeral).toBeUndefined()
+    expect(depsSeen?.wakeContinueWork).toBe(true)
+  })
   test('a failed skipped-work status is retried, never replaced by a secondary continuation', async () => {
     recordLimitPark(cfg, park({ identity: 'codex-iapeer', runtime: 'codex' }))
     const sent: Sent[] = [], t = RESET + LIMIT_RESUME_GRACE_MS
@@ -230,6 +253,14 @@ describe('continue-work wake intent — the nudge resumes the stopped context', 
     return c
   }
   const has = () => ({ ok: true, ref: 'uuid-1' })
+  test('an idle-reaped ephemeral job resumes only for continuation; a new job stays fresh', () => {
+    const c = peerCwd()
+    writeFileSync(join(c, '.iapeer', 'peer-profile.json'), JSON.stringify({ personality: 'p', default_runtime: 'claude', runtimes: ['claude'], intelligence: 'artificial', wake_policy: 'ephemeral' }))
+    setIdleReaped(cfg, 'claude-p')
+    expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has).cause).toBe('ephemeral-policy')
+    setIdleReaped(cfg, 'claude-p')
+    expect(resolveWakeMode(cfg, 'claude-p', c, undefined, has, 'limit-resume', f => f(), true)).toEqual({ resume: true, resumeRef: 'uuid-1', cause: 'idle-reaped-continue' })
+  })
   test('idle-reaped + a topic the lineage never saw → still RESUME under continueWork (fresh without it)', () => {
     const c = peerCwd()
     setIdleReaped(cfg, 'claude-p')

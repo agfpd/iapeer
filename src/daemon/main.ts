@@ -219,13 +219,13 @@ export function makeEphemeralRouteDeps(
 ): EphemeralRouteDeps {
   return {
     isEphemeral: cwd => isEphemeralPeer(cwd),
-    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice }) => {
+    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
       const identity = buildProcessAddress(rt.value, peer.personality)
       let depth: number
       try {
-        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
+        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
       } catch (e) {
         return err(
           `ephemeral enqueue failed for "${peer.personality}": ${e instanceof Error ? e.message : String(e)}; message NOT queued`,

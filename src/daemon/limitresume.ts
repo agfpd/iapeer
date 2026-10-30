@@ -25,7 +25,7 @@ import {
 import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
-import { workOriginStillValid } from '../lifecycle/workOrigin.ts'
+import { workOriginAtLimit, workOriginStillValid } from '../lifecycle/workOrigin.ts'
 
 
 export function limitResumeMessage(p: LimitPark): string {
@@ -71,6 +71,15 @@ export async function processLimitResumes(
       log({ identity: p.identity, outcome: 'dropped', err: 'peer no longer registered' })
       continue
     }
+    // A fast native refusal can be observed before the delivery handshake finishes writing its
+    // receipt. Recover that proof now; its ACCEPTANCE time must still precede this limit event.
+    if (p.runtime !== peer.runtime && !p.workOrigin) {
+      const origin = workOriginAtLimit(cfg, p.identity, p.eventAtMs, env, p.file)
+      if (origin) {
+        p.workOrigin = origin
+        updateLimitPark(cfg, p)
+      }
+    }
     if (p.runtime !== peer.runtime && !workOriginStillValid(cfg, p.workOrigin, p.identity, p.eventAtMs, env)) {
       // Do not transplant another runtime's work. Tell the working personality what was skipped,
       // without instructing it to resume that work or contact a human.
@@ -104,7 +113,9 @@ export async function processLimitResumes(
       // Topic = the stopped session's own thread (captured at park time), so the topic set still
       // follows the work; the RESUME itself rides the explicit continue-work intent, not the topic.
       const topic = p.topic || 'limit-resume'
-      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic }, { ...routeDeps, env, wakeContinueWork: true })
+      // This continues the CURRENT job, including an ephemeral worker's interrupted job; it is not
+      // a new FIFO task. Re-enqueueing would fresh-wake a nudge alone and lose the assigned work.
+      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic }, { ...routeDeps, env, ephemeral: undefined, wakeContinueWork: true })
       if (r.ok) {
         clearLimitPark(cfg, p.identity)
         log({ identity: p.identity, outcome: 'nudged', woke: String(r.value.woke), resets: new Date(p.resetsAtMs).toISOString() })

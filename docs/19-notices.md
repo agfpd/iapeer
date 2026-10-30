@@ -492,6 +492,9 @@ remains an operator-selected destination. Explicit task redelivery and ephemeral
 retain their addressed endpoints; `/new`, `self-fresh`, attach and other operator commands retain
 their existing semantics. Capability maintenance on a non-default endpoint waits for its next
 ordinary launch instead of creating a new working turn.
+Ephemeral delivery preserves explicit runtime provenance through its FIFO to the actual hosting.
+A limit nudge continues that same job **outside the new-task FIFO**; an idle-reaped worker resumes
+its interrupted native context under `continueWork`. Only a new queued job gets a fresh window.
 Delayed composer/FIFO core status notices re-check the current default at drain: a status whose
 endpoint ceased to be default fails with a durable delivery/lifecycle record instead of starting
 a secondary turn. Explicit queued work is unaffected.

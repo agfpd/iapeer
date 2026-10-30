@@ -10,6 +10,7 @@ import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
 import { upsertPeer } from '../registry/index.ts'
+import { buildEnvelope } from '../codec/index.ts'
 import {
   drainAllEphemeralQueues,
   drainEphemeralQueue,
@@ -61,6 +62,20 @@ test('queued core events suppress launch-seed; stale core status does not wake a
   await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn })
   expect(seen).toHaveLength(2)
   expect(seen[1]?.runtime).toBe('codex')
+})
+
+test('an explicitly addressed FIFO task records provenance at actual delivery, not merely at enqueue', async () => {
+  const cfg = mkCfg(), root = mkTmp()
+  const env = { ...process.env, IAPEER_ROOT: root, IAPEER_SOCK_DIR: join(root, 's'), IAPEER_LAUNCHAGENTS_DIR: join(root, 'la') }
+  await upsertPeer({ personality: 'w', runtime: 'claude', runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd: root }, { env })
+  const task = buildEnvelope({ fromPersonality: 'pm', fromRuntime: 'claude', fromIntelligence: 'artificial', message: 'explicit worker job' })
+  enqueueEphemeralTask(cfg, 'codex-w', { task, explicitRuntime: true })
+  expect(peekEphemeralTask(cfg, 'codex-w')?.explicitRuntime).toBe(true)
+  expect(existsSync(join(cfg.stateDir, 'codex-w.work-origin.json'))).toBe(false)
+  await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn: async () => ({ status: 'READY', woke: true }) })
+  const receipt = JSON.parse(readFileSync(join(cfg.stateDir, 'codex-w.work-origin.json'), 'utf8'))
+  expect(receipt.explicitRuntime).toBe(true)
+  expect(receipt.caller).toEqual({ personality: 'pm', runtime: 'claude' })
 })
 
 describe('ephemeral queue primitives (FIFO)', () => {

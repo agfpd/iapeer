@@ -151,6 +151,11 @@ try {
     const kind = arg('--park-kind') ?? 'stale'
     const defaultRuntime = kind === 'default' ? runtime : runtime === 'codex' ? 'claude' : 'codex'
     writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, runtime: defaultRuntime, runtimes: ['claude', 'codex'], ...(kind === 'explicit' ? {} : { initial_prompt: 'Send AUTONOMOUS_CONTACT_PROOF to sender using the local iapeer CLI.' }) })
+    // wake_policy is an owner field: the profile writer preserves it from disk, not its argument.
+    if (process.argv.includes('--ephemeral')) {
+      const path = join(cwd, '.iapeer/peer-profile.json')
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(read(path)), wake_policy: 'ephemeral' }))
+    }
     await upsertPeer({ personality, runtime: defaultRuntime, runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd }, { env })
     const { reindexFromLocals } = await import('../src/identity/profileStandard.ts')
     await reindexFromLocals({ env })
@@ -168,7 +173,8 @@ try {
     if (kind === 'explicit') {
       busyNext = true
       await send('RELOAD_BUSY_PROOF')
-      await until('explicit non-default native turn in progress', () => busyReceived)
+      await until('explicit non-default native turn in progress', () => busyReceived, 100000)
+      await until('actual-delivery provenance receipt', () => existsSync(join(lifecycle, identity() + '.work-origin.json')))
       original = nativeSession()
       const { loadLifecycleConfig, removeSessionState, setIdleReaped } = await import('../src/lifecycle/index.ts')
       const { recordLimitPark, LIMIT_RESUME_GRACE_MS } = await import('../src/lifecycle/limitpark.ts')
@@ -187,11 +193,13 @@ try {
     const lifecycleLog = read(join(iap, 'logs/iapeer/lifecycle.log'))
     const defaultRuntime = JSON.parse(read(join(iap, 'peers-profiles.json'))).peers.find((p: any) => p.personality === personality)?.default_runtime
     const turnCompleted = completedAfter(Date.now() - 20000)
-    record('limit-resume-observed', { kind, defaultRuntime, original, session: nativeSession(), turnCompleted, hosting: hosting(), contactSent, outbound: read(join(root, 'sender.log')), lifecycle: lifecycleLog })
+    const { isEphemeralPeer } = await import('../src/lifecycle/index.ts')
+    record('limit-resume-observed', { kind, ephemeral: isEphemeralPeer(cwd), defaultRuntime, original, session: nativeSession(), turnCompleted, hosting: hosting(), contactSent, outbound: read(join(root, 'sender.log')), lifecycle: lifecycleLog })
     if (process.argv.includes('--expect-fixed')) {
       if (contactSent) throw new Error('autonomous wake ran the contact launch-seed')
       if (kind === 'stale' ? hosting().pid || !lifecycleLog.includes('outcome=skipped-nondefault') : !lifecycleLog.includes('outcome=nudged') || !turnCompleted) throw new Error('wrong continuation outcome')
       if (kind === 'explicit' && nativeSession() !== original) throw new Error('explicit task did not resume its original native session')
+      if (process.argv.includes('--ephemeral') && (!isEphemeralPeer(cwd) || !lifecycleLog.includes('ev=ephemeral-drain'))) throw new Error('ephemeral proof never exercised the FIFO')
     }
     success = true
   } else {

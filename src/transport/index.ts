@@ -1457,6 +1457,7 @@ export interface EphemeralRouteDeps {
    *  ack. MUST NOT block on the wake (the sender's content-level answer is the
    *  worker's own reply, not this transport ack). */
   deliver: (args: {
+    explicitRuntime?: true
     suppressInitialPrompt?: boolean
     coreNotice?: boolean
     peer: PeerRecord
@@ -2065,6 +2066,7 @@ async function routeSendInner(
   if (deps.ephemeral?.isEphemeral(peer.cwd)) {
     if (caller.personality === peer.personality) return err('cannot send to self')
     return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt,
+      ...(runtime && caller.runtime !== 'core' ? { explicitRuntime: true as const } : {}),
       ...(caller.runtime === 'core' ? { suppressInitialPrompt: true } : {}), ...(deps.coreNotice ? { coreNotice: true } : {}) })
   }
 

@@ -13,7 +13,7 @@
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
 import { limitHoldActive } from './limitpark.ts'
-import { noteHostingGeneration } from './workOrigin.ts'
+import { noteHostingGeneration, noteWorkOrigin } from './workOrigin.ts'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -28,7 +28,7 @@ import {
   type Runtime,
 } from '../core/constants.ts'
 import { buildProcessAddress, buildSocketPath, parseSessionName } from '../core/socket.ts'
-import { renderEnvelopeForAgent } from '../codec/index.ts'
+import { decodeEnvelope, renderEnvelopeForAgent } from '../codec/index.ts'
 import { err, ok, type Result } from '../core/errors.ts'
 import { capPaneLogs, gcPaneLogs, paneLogGcConfig, paneLogRotateConfig } from '../launch/cmdlog.ts'
 import { resolveGlobalRoot } from '../storage/index.ts'
@@ -710,11 +710,17 @@ export function resolveWakeMode(
     return { resume: false, cause: 'soft-reload' }
   }
   // 3. default (a message woke a dead/asleep peer): decide by the death cause.
-  // 3-ephemeral (M1): a stateless worker ALWAYS wakes fresh on delivery — never resume,
-  // regardless of death cause or topic. Its clean-window-per-task is the whole point.
+  // 3-ephemeral (M1): a stateless worker starts each NEW job fresh. A core limit nudge
+  // continues that same interrupted job, not a second assignment.
   // Consume a stray .idle-reaped marker so it does not accumulate (it has no effect for
   // an ephemeral peer, which never resumes, but keep state tidy).
   if (isEphemeralPeer(cwd)) {
+    // A reset nudge is NOT a second queued task: continue the explicitly assigned job's context.
+    if (continueWork && hasIdleReaped(cfg, identity)) {
+      done(() => clearIdleReaped(cfg, identity))
+      const r = resolveResume(cwd)
+      return r.ok ? { resume: true, resumeRef: r.ref, cause: 'idle-reaped-continue' } : { resume: false, cause: 'idle-reaped-no-resume' }
+    }
     done(() => clearIdleReaped(cfg, identity))
     return { resume: false, cause: 'ephemeral-policy' }
   }
@@ -1983,6 +1989,7 @@ export async function drainEphemeralQueue(
     { env },
   )
   const wake = deps.wakeFn ?? wakeOrSpawn
+  const acceptedAtMs = Date.now()
   const result = await wake({ personality, runtime, topic: item.topic, task: item.task, ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }, { cfg, env })
   // Remove ONLY when THIS wake actually delivered the task. On the live-session fast
   // path (READY, taskDelivered:false) a CONCURRENT wake delivered ITS OWN task — ours
@@ -1990,6 +1997,16 @@ export async function drainEphemeralQueue(
   // contract forbids); leaving it at the head lets the next drain (after that session
   // reaps) deliver it into a fresh session — invariant "one task = one fresh session".
   if (result.status === 'READY' && result.taskDelivered !== false) {
+    // The queue bypasses routeSend's post-delivery inflight hook. Preserve the same explicit-work
+    // provenance here, only AFTER this hosting actually received the queued item.
+    try {
+      const from = decodeEnvelope(item.task)
+      const peer = findPeer(readPeersIndex({ env }), personality)
+      if (peer) noteWorkOrigin(cfg, { identity, personality, runtime, cwd: peer.cwd,
+        sessionToken: hostSessionToken(identity, env), ts: acceptedAtMs, sentAt: from.sentAt ?? new Date(acceptedAtMs).toISOString(),
+        caller: { personality: from.fromPersonality, runtime: from.fromRuntime }, message: from.message,
+        rendered: renderEnvelopeForAgent(item.task), ...(item.explicitRuntime ? { explicitRuntime: true } : {}) })
+    } catch { /* a provenance write failure never invents authorization or requeues a delivered job */ }
     removeEphemeralTask(cfg, identity, item.seq)
   }
   return result

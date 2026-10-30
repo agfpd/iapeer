@@ -56,7 +56,7 @@ The guarantee "`delivered` means it landed in a live session" is covered in [10 
 
 When bringing up a sleeper, the daemon chooses: start a **fresh** session or **resume** the prior conversation. It depends on what's waking it, the peer type, and — for agents — the **topic** of the incoming message.
 
-Three peer types, three base behaviors: an **ephemeral worker** always starts fresh, a **human** (Telegram) always resumes, an **agent** resumes only on a matching topic. The full expansion:
+Three peer types, three base behaviors: an **ephemeral worker** starts each new queued job fresh, a **human** (Telegram) always resumes, an **agent** resumes only on a matching topic. A core limit-reset nudge continues the interrupted job, not a new job: an idle-reaped ephemeral worker resumes its existing context ([19 §9](19-notices.md#9-limit-resume--a-peer-stopped-by-a-limit-continues-by-itself-after-the-reset)). The full expansion:
 
 | What woke it | Condition | Result |
 |---|---|---|
