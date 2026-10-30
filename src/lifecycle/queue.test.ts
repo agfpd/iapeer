@@ -11,6 +11,7 @@ import { spawnSync } from 'child_process'
 import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
 import { upsertPeer } from '../registry/index.ts'
 import { buildEnvelope } from '../codec/index.ts'
+import { clearLimitPark, recordLimitPark } from './limitpark.ts'
 import {
   drainAllEphemeralQueues,
   drainEphemeralQueue,
@@ -76,6 +77,21 @@ test('an explicitly addressed FIFO task records provenance at actual delivery, n
   const receipt = JSON.parse(readFileSync(join(cfg.stateDir, 'codex-w.work-origin.json'), 'utf8'))
   expect(receipt.explicitRuntime).toBe(true)
   expect(receipt.caller).toEqual({ personality: 'pm', runtime: 'claude' })
+})
+
+test('an idle-reaped job parked by a limit retains the worker slot; the next FIFO job cannot overtake it', async () => {
+  const cfg = mkCfg(), root = mkTmp()
+  const env = { ...process.env, IAPEER_ROOT: root, IAPEER_SOCK_DIR: join(root, 's') }
+  enqueueEphemeralTask(cfg, 'codex-w', { task: 'NEXT_JOB' })
+  recordLimitPark(cfg, { identity: 'codex-w', personality: 'w', runtime: 'codex', eventAtMs: Date.now() - 1000, resetsAtMs: Date.now() })
+  let wakes = 0
+  const wakeFn = async (): Promise<WakeResult> => { wakes++; return { status: 'READY', woke: true } }
+  expect(await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn })).toBeNull()
+  expect(wakes).toBe(0)
+  expect(ephemeralQueueDepth(cfg, 'codex-w')).toBe(1)
+  clearLimitPark(cfg, 'codex-w')
+  await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn })
+  expect(wakes).toBe(1)
 })
 
 describe('ephemeral queue primitives (FIFO)', () => {

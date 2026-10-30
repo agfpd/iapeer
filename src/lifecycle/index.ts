@@ -12,7 +12,7 @@
 // before any wake or reap. wakeOrSpawn refuses a launchd peer; superviseTick and
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
-import { limitHoldActive } from './limitpark.ts'
+import { limitHoldActive, readLimitPark } from './limitpark.ts'
 import { noteHostingGeneration, noteWorkOrigin } from './workOrigin.ts'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
@@ -1975,6 +1975,9 @@ export async function drainEphemeralQueue(
   const identity = buildProcessAddress(runtime, personality)
   const sock = buildSocketPath(runtime, personality, cfg.sockDir)
   if (sessionAlive(sock, identity, env)) return null // one task per session — wait for its reap
+  // A limit-park owns this worker's CURRENT job even after idle-reap. The next FIFO task must not
+  // overtake it on the supervise tick that runs BEFORE the reset continuation pass.
+  if (readLimitPark(cfg, identity)) return null
   const item = peekEphemeralTask(cfg, identity)
   if (!item) return null
   if (item.coreNotice && findPeer(readPeersIndex({ env }), personality)?.runtime !== runtime) {

@@ -495,6 +495,8 @@ ordinary launch instead of creating a new working turn.
 Ephemeral delivery preserves explicit runtime provenance through its FIFO to the actual hosting.
 A limit nudge continues that same job **outside the new-task FIFO**; an idle-reaped worker resumes
 its interrupted native context under `continueWork`. Only a new queued job gets a fresh window.
+An unresolved limit-park reserves the worker slot even after idle-reap: a later FIFO job cannot
+overtake the interrupted job before the reset-continuation pass runs.
 Delayed composer/FIFO core status notices re-check the current default at drain: a status whose
 endpoint ceased to be default fails with a durable delivery/lifecycle record instead of starting
 a secondary turn. Explicit queued work is unaffected.
