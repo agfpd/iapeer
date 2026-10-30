@@ -6,7 +6,7 @@
 // https://platform.claude.com/docs/en/build-with-claude/streaming
 // https://developers.openai.com/api/docs/guides/streaming-responses
 // https://developers.openai.com/codex/config-advanced#custom-model-providers
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -86,7 +86,7 @@ const env: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, '.codex'), TERM: 'xterm-256color',
   IAPEER_ROOT: iap, IAPEER_LAUNCHAGENTS_DIR: join(root, 'LaunchAgents'), IAPEER_SOCK_DIR: join(root, 's'),
   IAPEER_PORT: String(port), IAPEER_DAEMON_SOCKET: join(root, 'router.sock'),
-  IAPEER_CLAUDE_BIN: process.argv.includes('--limit-resume-only') ? join(hostHome, '.local/bin/claude') : native, IAPEER_CODEX_BIN: process.argv.includes('--limit-resume-only') ? '/opt/homebrew/bin/codex' : native, IAPEER_IDLE_SECS: '15',
+  IAPEER_CLAUDE_BIN: process.argv.includes('--limit-resume-only') ? join(hostHome, '.local/bin/claude') : native, IAPEER_CODEX_BIN: process.argv.includes('--limit-resume-only') ? '/opt/homebrew/bin/codex' : native, IAPEER_IDLE_SECS: ['--unknown-delivery-only', '--death-delivery-only', '--refusal-delivery-only'].some(flag => process.argv.includes(flag)) ? '600' : '15',
   ANTHROPIC_BASE_URL: provider.url.origin, ANTHROPIC_AUTH_TOKEN: 'synthetic-local-only', ANTHROPIC_MODEL: 'claude-sonnet-4-5',
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', HOMEBREW_NO_AUTO_UPDATE: '1',
 }
@@ -130,6 +130,7 @@ const send = async (message: string) => must('send', personality, '--runtime', r
 const completedAfter = (start: number) => records().some(r => Date.parse(r.timestamp) >= start && (runtime === 'claude' ? r.type === 'assistant' && r.message?.stop_reason === 'end_turn' : r.type === 'event_msg' && r.payload?.type === 'task_complete'))
 const turn = async (message: string) => { const t = Date.now(); await send(message); await until('native completed turn', () => completedAfter(t)); await Bun.sleep(500) }
 let daemon: ReturnType<typeof Bun.spawn> | undefined, attached: ReturnType<typeof Bun.spawn> | undefined, success = false
+let stoppedChild: number | undefined
 try {
   writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark', bypassPermissionsModeAccepted: true }))
   mkdirSync(join(home, '.codex'), { recursive: true })
@@ -151,6 +152,9 @@ try {
   const sink = await startSupervisorDaemon({ session: 'notifier-sender', runtime: 'notifier', runDir, daemonArgv: [bin, 'supervisor'], serve: { argv: ['/bin/cat'], env: {}, cwd: root, paneLogPath: join(root, 'sender.log') } })
   if (sink.state !== 'started') throw new Error(JSON.stringify(sink))
   const sentinelPid = readPidFile(runDir, 'notifier-sender')!.pid
+  if (process.argv.includes('--death-delivery-only') || process.argv.includes('--unknown-delivery-only')) {
+    writeFileSync(join(iap, 'alerts.json'), JSON.stringify({ peer: 'sender', runtime: 'notifier' }))
+  }
   await must('version')
   if (process.argv.includes('--limit-resume-only')) {
     // No real human exists in this root: the launch-seed's contact goes to the local cat sink.
@@ -223,6 +227,15 @@ try {
       coldSession = nativeSession()
       if (nativeUsers.length !== 1) throw new Error(`expected exactly one native USER for ${marker}, got ${nativeUsers.length}`)
       if (process.argv.includes('--expect-fixed') && sent.code !== 0) throw new Error(`false failure for ${marker}`)
+      if (process.argv.includes('--expect-fixed')) {
+        const acceptance = () => files(join(runDir, 'acceptance')).filter(p => p.endsWith('.json'))
+          .map(p => JSON.parse(read(p))).find(r => r.message?.includes(marker))
+        await until('durable native acceptance finalized and caller notified', () => {
+          const r = acceptance()
+          return r?.status === 'delivered' && r.callerNotice === 'sent'
+        }, 60000)
+        record('wake-acceptance-final', acceptance())
+      }
       // On the buggy binary, failure exits wake before recording its topic. Preserve the intended
       // resume discriminator in the fixture, otherwise the second run tests another fresh wake.
       const { addTopic, loadLifecycleConfig } = await import('../src/lifecycle/index.ts')
@@ -236,7 +249,91 @@ try {
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
 
-  if (process.argv.includes('--blocked-only')) {
+  if (process.argv.includes('--refusal-delivery-only')) {
+    // Real installed notifier policy, not a stand-in retry/fallback implementation.
+    // Its registration store still reads HOME/.iapeer rather than IAPEER_ROOT.
+    // Keep both names within this isolated root; never borrow the host registry.
+    symlinkSync(iap, join(home, '.iapeer'))
+    // The test harness reads this operator inbox. Declare it as an agent rather
+    // than an unattended absent-intelligence service, which notifier correctly refuses.
+    writePeerProfileAtomic(senderCwd, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'artificial' })
+    await upsertPeer({ personality: 'sender', runtime: 'notifier', intelligence: 'artificial', cwd: senderCwd }, { env })
+    await must('stop', personality, runtime)
+    const watcherCwd = join(root, 'watcher')
+    writePeerProfileAtomic(watcherCwd, { personality: 'watcher', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
+    await upsertPeer({ personality: 'watcher', runtime: 'notifier', intelligence: 'absent', cwd: watcherCwd }, { env })
+    const notifierBin = join(hostHome, '.local/bin/notifier-runtime')
+    const watcher = await startSupervisorDaemon({ session: 'notifier-watcher', runtime: 'notifier', runDir,
+      daemonArgv: [bin, 'supervisor'], serve: { argv: [notifierBin, 'run'], cwd: watcherCwd,
+        env: { ...env, PEER_PERSONALITY: 'watcher', PEER_RUNTIME: 'notifier', PEER_IDENTITY: 'notifier-watcher', IAP_BIN: bin },
+        paneLogPath: join(root, 'watcher.log') } })
+    if (watcher.state !== 'started') throw new Error(JSON.stringify(watcher))
+    await until('native notifier ready', () => read(join(root, 'watcher.log')).includes('"evt":"start"'))
+    const { markHostReady } = await import('../src/launch/ptyHost.ts')
+    markHostReady('notifier-watcher', env)
+    const marker = 'PROVEN_PREPASTE_REFUSAL_FALLBACK', script = join(root, 'signal.sh')
+    writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' '${marker}'\nexec /bin/sleep 300\n`); chmodSync(script, 0o700)
+    await must('send', 'watcher', '--runtime', 'notifier', '--from', 'notifier-sender', '--message', JSON.stringify({
+      script, target: personality, fallback: 'sender', id: 'prepaste-refusal-proof', topic: 'prepaste-refusal-proof',
+    }))
+    await until('real notifier automatic fallback', () => read(join(root, 'sender.log')).includes(marker), 90000)
+    const nativeUsers = records().filter(r => r.type === 'response_item' && r.payload?.role === 'user' && JSON.stringify(r.payload).includes(marker))
+    const log = read(join(iap, 'logs/iapeer/delivery.log'))
+    record('prepaste-refusal-automatic-fallback', { log, sender: read(join(root, 'sender.log')), watcher: read(join(root, 'watcher.log')), nativeUsers })
+    if (!log.includes('ok=false') || nativeUsers.length) throw new Error('refusal did not fail before native input')
+    success = true
+  } else if (process.argv.includes('--death-delivery-only')) {
+    if (runtime !== 'codex') throw new Error('--death-delivery-only requires codex')
+    stoppedChild = Number(Bun.spawnSync(['pgrep', '-P', String(hosting().pid)]).stdout.toString().trim().split('\n')[0])
+    if (!stoppedChild) throw new Error('Codex child pid missing')
+    process.kill(stoppedChild, 'SIGSTOP')
+    const marker = 'CODEX_DIED_AFTER_PASTE_PROOF'
+    const sent = await send(marker)
+    const acceptance = () => files(join(runDir, 'acceptance')).filter(p => p.endsWith('.json')).map(p => JSON.parse(read(p))).find(r => r.message?.includes(marker))
+    if (acceptance()?.status !== 'pending') throw new Error('blocked submit did not transfer pending custody')
+    process.kill(stoppedChild, 'SIGKILL'); stoppedChild = undefined
+    await until('dead native unresolved and both notices accepted', () => {
+      const r = acceptance()
+      return r?.status === 'unresolved' && r.callerNotice === 'sent' && r.lastAlertAt !== undefined
+    }, 150000)
+    const nativeUsers = records().filter(r => r.type === 'response_item' && r.payload?.role === 'user' && JSON.stringify(r.payload).includes(marker))
+    const log = read(join(iap, 'logs/iapeer/delivery.log')), sender = read(join(root, 'sender.log'))
+    const r = acceptance()
+    record('death-after-paste-unresolved', { sent, acceptance: r, nativeUsers, log, sender })
+    if (r?.status !== 'unresolved' || nativeUsers.length || log.includes('ev=inflight-redeliver') || !sender.includes(r.id)) throw new Error('death was failed/replayed or escalation missing')
+    success = true
+  } else if (process.argv.includes('--unknown-delivery-only')) {
+    if (runtime !== 'claude') throw new Error('--unknown-delivery-only requires claude')
+    stoppedChild = Number(Bun.spawnSync(['pgrep', '-P', String(hosting().pid)]).stdout.toString().trim().split('\n')[0])
+    if (!stoppedChild) throw new Error('Claude child pid missing')
+    process.kill(stoppedChild, 'SIGSTOP')
+    const marker = 'CLAUDE_UNKNOWN_ONCE_PROOF', t = Date.now()
+    const sent = await send(marker)
+    await until('unknown escalation or legacy replay', () => {
+      const log = read(join(iap, 'logs/iapeer/delivery.log'))
+      return log.includes('outcome=unresolved') || log.includes('ev=inflight-redeliver')
+    }, 210000)
+    const log = read(join(iap, 'logs/iapeer/delivery.log'))
+    record('unknown-delivery-escalation', { sent, log, sender: read(join(root, 'sender.log')),
+      acceptance: files(join(runDir, 'acceptance')).map(p => JSON.parse(read(p))) })
+    if (process.argv.includes('--expect-fixed') && (!log.includes('outcome=unresolved') || log.includes('ev=inflight-redeliver'))) throw new Error('unknown was replayed or not escalated')
+    process.kill(stoppedChild, 'SIGCONT'); stoppedChild = undefined
+    // A resumed TUI can swallow the buffered submit CR while rendering the paste.
+    // Submit the existing draft once as the test operator; never paste another payload.
+    await Bun.sleep(1000)
+    const { sendControlToHost } = await import('../src/supervisor/deliver.ts')
+    // CSI-u Enter is unambiguous even while Claude's multiline paste heuristic
+    // treats a raw CR as another draft newline (verified on native 2.1.314).
+    const submit = await sendControlToHost(runDir, identity(), [Buffer.from('\x1b[13u')])
+    record('test-operator-submit-existing-draft', { key: 'CSI-u Enter', submit })
+    await until('released native turn', () => completedAfter(t), 60000)
+    await Bun.sleep(3000)
+    const userTexts = records().filter(r => r.type === 'user').map(r => typeof r.message?.content === 'string' ? r.message.content : JSON.stringify(r.message?.content))
+    const occurrences = userTexts.reduce((n, text) => n + (text?.split(marker).length - 1 || 0), 0)
+    record('unknown-delivery-native-input', { occurrences, userTexts })
+    if (process.argv.includes('--expect-fixed') && occurrences !== 1) throw new Error(`unknown native input appeared ${occurrences} times`)
+    success = true
+  } else if (process.argv.includes('--blocked-only')) {
     // Contrast: a session whose TUI cannot accept input (SIGSTOP stands in for any modal) still
     // ACKs pty bytes. A correct core reports failure; the buggy socket-ack path reported delivered.
     if (runtime !== 'codex') throw new Error('--blocked-only requires codex')
@@ -369,16 +466,18 @@ try {
   }
   }
 } finally {
+  if (stoppedChild) { try { process.kill(stoppedChild, 'SIGCONT') } catch {} }
   releaseBusy?.()
   if (attached) { attached.kill(); await attached.exited; attached.terminal?.close() }
   if (daemon) { daemon.kill(); await daemon.exited }
   for (const p of ['operator-proof', 'operator-renamed']) await cli('supervisor', 'kill', `${runtime}-${p}`, '--run-dir', runDir)
   await cli('supervisor', 'kill', 'notifier-sender', '--run-dir', runDir)
+  if (process.argv.includes('--refusal-delivery-only')) await cli('supervisor', 'kill', 'notifier-watcher', '--run-dir', runDir)
   provider.stop(true)
   surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
-    for (const p of files(root).filter(p => /(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) && !p.includes('/node_modules/'))) {
+    for (const p of files(root).filter(p => (/(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) || p.includes('/acceptance/') && p.endsWith('.json')) && !p.includes('/node_modules/'))) {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))

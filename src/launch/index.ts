@@ -316,7 +316,7 @@ export const launch: LaunchFn = async (
       if (d.acceptance === 'pending') return { ...ready(identity), acceptance: 'pending', deliveryId: d.deliveryId }
       // Native acceptance already proves this input. A second mtime gate can only turn an
       // accepted task into a false refusal (short turn/re-save race), causing a duplicate.
-      if (adapter.deliveryConfirm === 'host-receipt') return ready(identity)
+      if (adapter.deliveryConfirm === 'host-receipt') return { ...ready(identity), deliveryId: d.deliveryId }
       const readyDeadline = Date.now() + cfg.readyGateSecs * 1000
       while (Date.now() < readyDeadline) {
         await sleep(2000)

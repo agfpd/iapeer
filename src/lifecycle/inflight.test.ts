@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
+import { inflightAcceptanceId, listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
+import { readAcceptance } from '../launch/acceptanceStore.ts'
 import { deliveryCompleted, deliveryLanded, deliveryProcessed } from '../transport/index.ts'
 import { processInflight, redeliveryMessage } from '../daemon/main.ts'
 import { ok, err } from '../core/errors.ts'
@@ -143,15 +144,20 @@ describe('interrupted turns (OC07 extension) — processed but unfinished: never
 })
 
 describe('unconfirmed deliveries — the ledger, not the sender, decides', () => {
-  test('unconfirmed + not landed: kept inside the window, orphaned after it; landed → a normal pending entry', () => {
+  test('Claude unknown stays in custody after 120s and receiver death; only explicit acceptance settles it', () => {
     recordInflight(state, entry({ id: 'u1', unconfirmed: true, ts: 1_000_000 }))
     const base = { sessionToken: () => 'host:1', processed: () => false }
     expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => false, now: 1_000_000 + 60_000 })).toBe(0)
     expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => true, now: 1_000_000 + 60_000 })).toBe(0)
-    expect(readInflight(state, 'claude-bob')[0]!.unconfirmed).toBeUndefined() // landed → flag cleared
+    expect(readInflight(state, 'claude-bob')[0]!.unconfirmed).toBe(true)
     recordInflight(state, entry({ id: 'u2', unconfirmed: true, ts: 1_000_000 }))
-    expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => false, now: 1_000_000 + 121_000 })).toBe(1)
-    expect(takeOrphans(state, 'claude-bob').map(e => e.id)).toEqual(['u2'])
+    expect(sweepInflight(state, 'claude-bob', { ...base, landed: () => false, now: 1_000_000 + 121_000 })).toBe(0)
+    expect(sweepInflight(state, 'claude-bob', { ...base, sessionToken: () => null, acceptance: () => 'unresolved' })).toBe(0)
+    expect(readInflight(state, 'claude-bob')).toHaveLength(2)
+    expect(takeOrphans(state, 'claude-bob')).toEqual([])
+    expect(sweepInflight(state, 'claude-bob', { ...base, sessionToken: () => null, acceptance: () => 'delivered' })).toBe(2)
+    expect(takeInterrupted(state, 'claude-bob')).toHaveLength(2)
+    expect(takeOrphans(state, 'claude-bob')).toEqual([])
   })
 
   test('deliveryLanded: a claude queue-operation carrying the envelope counts as landed (busy receiver)', () => {
@@ -311,6 +317,32 @@ describe('processInflight — redeliver, or the sender learns', () => {
   const cfg = () => ({ stateDir: state, eventLogDir: join(root, 'logs') }) as never
   beforeEach(async () => {
     for (const p of ['alice', 'bob']) await upsertPeer({ personality: p, runtime: 'claude', cwd: join(root, p), intelligence: 'artificial' }, { rootDir: join(root, 'iapeer') })
+  })
+  test('Claude old unknowns acquire stable cfg-bound custody on every restart, never replay', async () => {
+    const e = entry({ unconfirmed: true, ts: 1 })
+    recordInflight(state, e)
+    const config = { stateDir: state, eventLogDir: join(root, 'logs'), supervisorRunDir: join(root, 'isolated-supervisor') } as never
+    const env = { HOME: root, IAPEER_ROOT: join(root, 'different-root') }
+    const send = async () => { throw new Error('must not replay unknown') }
+    await processInflight(config, env, {}, { processed: () => false, send: send as never })
+    const id = inflightAcceptanceId(e)!
+    expect(readAcceptance(join(root, 'isolated-supervisor'), id)?.status).toBe('pending')
+    expect(readAcceptance(join(root, 'different-root/state/supervisor'), id)).toBeNull()
+    expect(readInflight(state, e.identity)).toHaveLength(1)
+    await processInflight(config, env, {}, { processed: () => false, send: send as never })
+    expect(readInflight(state, e.identity)).toHaveLength(1)
+    expect(takeOrphans(state, e.identity)).toEqual([])
+  })
+  test('upgrade does not replay an unknown already orphaned by the old daemon', async () => {
+    const e = entry({ unconfirmed: true, ts: 1 })
+    writeFileSync(join(state, e.identity + '.orphans.jsonl'), JSON.stringify(e) + '\n')
+    const env = { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }
+    const sent: any[] = []
+    await processInflight(cfg(), env, {}, { processed: () => false, send: (async (...a: any[]) => { sent.push(a) }) as never })
+    expect(sent).toHaveLength(0)
+    expect(readInflight(state, e.identity)).toHaveLength(1)
+    expect(readAcceptance(join(state, '../supervisor'), inflightAcceptanceId(e)!)?.status).toBe('pending')
+    expect(takeOrphans(state, e.identity)).toEqual([])
   })
   test('orphan → redelivered AS the original sender with a visible prefix', async () => {
     recordInflight(state, entry())

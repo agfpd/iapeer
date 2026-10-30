@@ -1409,7 +1409,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     addTopic(cfg, identity, args.topic?.trim() ?? '')
     trimDeaths(cfg, identity, cfg.crashLoopWindowSecs, Date.now())
     return { status: 'READY', woke: true, runtime, process_address: identity, taskDelivered: true,
-      ...(result.acceptance ? { acceptance: result.acceptance, deliveryId: result.deliveryId } : {}) }
+      ...(result.deliveryId ? { acceptance: result.acceptance, deliveryId: result.deliveryId } : {}) }
   }
 
   try {

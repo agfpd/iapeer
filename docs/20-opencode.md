@@ -241,9 +241,14 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
   send returns `ok` with `unconfirmed: true` instead of «NOT delivered» — the
   sender must not resend. The ledger keeps the entry marked unconfirmed: once any
   record carrying the envelope appears (including a claude `queue-operation`) it
-  is an ordinary pending entry; if none appears within 120 s the paste was
-  swallowed, and the ledger redelivers it. Each message is redelivered at most
-  once; a second miss becomes an explicit notice to the sender.
+  is an ordinary pending entry. Absence after 120 s is NOT proof that a paste was
+  swallowed. Claude unconfirmed entries enter durable acceptance custody: missing
+  native evidence becomes an explicit `delivery-acceptance` unresolved event to the
+  caller and configured alert operator, never a blind replay, including after
+  receiver or daemon death. Late native evidence can still settle them as delivered.
+  Native acceptance followed by death without a completed turn is interrupted work,
+  not grounds to execute that input again. Codex's write-ahead custody and receipt
+  contract are described in [messaging](10-messaging.md).
 
 The real death cause is recorded too: the supervisor waits for the reap, so a
 SIGKILL is logged as `dead_signal=SIGKILL`, never as a clean exit 0.

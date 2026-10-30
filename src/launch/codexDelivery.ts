@@ -58,13 +58,6 @@ export function codexReceiptBaseline(home: string, cwd: string, message: string,
   const history = join(home, 'history.jsonl'), historyOffset = saved?.historyOffset ?? size(history)
   return {
     snapshot: { offsets: [...offsets.entries()], historyOffset },
-    // No inference from an absent/unreadable/truncated rollout. A dead receiver is only a
-    // non-acceptance candidate when its pre-existing native evidence is still readable.
-    readable: () => offsets.size > 0 && [...offsets].every(([p, n]) => {
-      let fd: number | undefined
-      try { fd = openSync(p, 'r'); return statSync(p).size >= n && readSync(fd, Buffer.alloc(1), 0, 1, 0) === 1 }
-      catch { return false } finally { if (fd !== undefined) closeSync(fd) }
-    }),
     landed: () => candidates().some(p => rows(tail(p, offsets.get(p) ?? 0)).some(r => codexUserRecordCarries(r, message))),
     // History alone is NOT a receipt: native submit may later fail. It is only the full-payload half
     // of queue confirmation, paired with the native pending-input UI and a cleared composer.
@@ -180,7 +173,12 @@ export async function deliverCodexToHost(runDir: string, identity: string, messa
     return { ...result, deliveryId: record.id }
   } catch (e) {
     // The write-ahead record is enough for restart recovery even if its final update failed.
-    if (record && existsSync(join(runDir, 'acceptance', `${record.id}.json`))) return { ok: true, acceptance: 'pending', deliveryId: record.id, error: `Codex acceptance pending: ${String(e)}` }
+    if (record && existsSync(join(runDir, 'acceptance', `${record.id}.json`))) {
+      record.status = 'pending'; record.managed = true
+      record.reason = `Codex acceptance pending: ${String(e)}`; record.updatedAt = Date.now()
+      try { writeAcceptance(runDir, record) } catch { /* sending recovery escalates even if this writer stays alive */ }
+      return { ok: true, acceptance: 'pending', deliveryId: record.id, error: record.reason }
+    }
     return { ok: false, error: `Codex acceptance check failed before send: ${String(e)}` }
   }
 }

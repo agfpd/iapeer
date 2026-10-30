@@ -48,12 +48,14 @@ def main():
     root, home = Path(args.root), Path(args.codex_home)
     peers = json.loads((root / "peers-profiles.json").read_text())["peers"]
     cwd_by_peer = {p["personality"]: os.path.realpath(p["cwd"]) for p in peers}
-    deliveries, failures = [], []
+    deliveries, failures, outcomes = [], [], {}
     for r in log_rows(root / "logs/iapeer/delivery.log"):
         try:
             at = instant(r["ts"])
         except (KeyError, ValueError):
             continue
+        if r.get("ev") == "delivery-acceptance" and r.get("id"):
+            outcomes[r["id"]] = r.get("outcome")
         if not since <= at < until or r.get("ev") != "delivery":
             continue
         if r.get("ok") != "true":
@@ -81,6 +83,7 @@ def main():
     for events in turns.values():
         events.sort()
     by_key = collections.defaultdict(list)
+    by_id = {r["deliveryId"]: r for r in deliveries if r.get("deliveryId")}
     for r in deliveries:
         by_key[(r["_cwd"], r["_caller_peer"], r["_caller_runtime"], r.get("topic", ""))].append(r)
     files_read = 0
@@ -97,7 +100,7 @@ def main():
                 if cwd not in wanted:
                     continue
                 files_read += 1
-                for line in f:
+                for line_no, line in enumerate(f):
                     try:
                         native = json.loads(line)
                         payload = native.get("payload", {})
@@ -113,12 +116,22 @@ def main():
                     for part in payload.get("content", []):
                         if not isinstance(part, dict) or part.get("type") != "input_text":
                             continue
-                        for tag in re.finditer(r"<iap\s+([^>]+)>", part.get("text", "")):
+                        text = part.get("text", "")
+                        ids = re.findall(r"\[iapeer deliveryId=([a-f0-9-]{36})\]", text)
+                        if ids:
+                            for delivery_id in ids:
+                                r = by_id.get(delivery_id)
+                                if r and r["_cwd"] == cwd:
+                                    r["_matches"].append({"at": at, "path": str(path), "line": line_no, "envelope_ts": "deliveryId"})
+                            continue
+                        for tag in re.finditer(r"<iap\s+([^>]+)>", text):
                             attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', tag[1]))
                             sender = attrs.get("from", attrs.get("from-personality"))
                             runtime = attrs.get("runtime", attrs.get("from-runtime"))
                             stamp = attrs.get("ts", "")
                             for r in by_key.get((cwd, sender, runtime, attrs.get("topic", "")), []):
+                                if r.get("deliveryId"):
+                                    continue
                                 dispatch = r["_dispatch"]
                                 if at < dispatch - 2:
                                     continue
@@ -135,7 +148,7 @@ def main():
                                 except ValueError:
                                     continue
                                 if min(abs(s - dispatch) for s in stamps) <= 2:
-                                    r["_matches"].append({"at": at, "path": str(path), "envelope_ts": stamp})
+                                    r["_matches"].append({"at": at, "path": str(path), "line": line_no, "envelope_ts": stamp})
     summary = collections.defaultdict(collections.Counter)
     for r in deliveries:
         events = turns[r["to"]]
@@ -145,6 +158,15 @@ def main():
         r["next_turn_start"] = iso(after[0][0]) if after else None
         r["next_turn_start_delay_s"] = round(after[0][0] - r["_dispatch"], 3) if after else None
         matches = sorted(r.pop("_matches"), key=lambda m: m["at"])
+        r["native_user_records"] = len({(m["path"], m["line"]) for m in matches})
+        delivery_id = r.get("deliveryId")
+        r["duplicate_native_input"] = len(matches) > 1 if delivery_id else r["native_user_records"] > 1
+        if delivery_id:
+            try:
+                custody = json.loads((root / "state/supervisor/acceptance" / (delivery_id + ".json")).read_text())
+            except (OSError, ValueError):
+                custody = {}
+            r["acceptance_outcome"] = custody.get("status", outcomes.get(delivery_id, "pending" if r.get("acceptance") == "pending" else "delivered"))
         if matches:
             m = matches[0]
             r["native_input_at"] = iso(m["at"])
@@ -152,7 +174,7 @@ def main():
             r["native_rollout"] = m["path"]
             # A compact time-only stamp may name an older delayed message with the same schedule.
             # Late matches are candidates, never a definitive assertion that THIS delivery landed.
-            r["status"] = "native_input" if r["native_input_delay_s"] <= 120 else "late_native_input_candidate"
+            r["status"] = "native_input" if delivery_id or r["native_input_delay_s"] <= 120 else "late_native_input_candidate"
         else:
             r["status"] = "missing_native_input" if r["_cwd"] else "unknown_recipient_cwd"
         summary[r["to"]][r["status"]] += 1
@@ -161,7 +183,9 @@ def main():
                 del r[k]
     print(json.dumps({"since": args.since, "until": args.until, "scanned_rollouts": files_read,
                       "method": "Match new native USER IAP header by recipient cwd, caller, topic, and dispatch timestamp (delivery end minus ms, ±2s). Late/missing inputs require investigation; turn sampling alone is not proof. Current registry maps recipient cwd; no message bodies emitted.",
-                      "summary": summary, "deliveries": deliveries, "failures": failures}, ensure_ascii=False, indent=2))
+                      "summary": summary, "acceptance_summary": collections.Counter(r.get("acceptance_outcome", "legacy") for r in deliveries),
+                      "duplicate_native_inputs": sum(r["duplicate_native_input"] for r in deliveries),
+                      "deliveries": deliveries, "failures": failures}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

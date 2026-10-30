@@ -1,6 +1,5 @@
 // Reconcile an uncertain native submit. This module never sends input to the original receiver.
-import { existsSync, statSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { rmSync } from 'node:fs'
 import { listAcceptance, writeAcceptance, acceptancePath, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
 import { codexReceiptBaseline } from '../launch/codexDelivery.ts'
 import { pidStartToken } from '../supervisor/paths.ts'
@@ -9,6 +8,7 @@ import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
 import { readAlertTarget } from './bootalert.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
+import { deliveryLanded } from '../transport/index.ts'
 import type { NoticeBoard } from './notices.ts'
 
 export const ACCEPTANCE_ALERT_AFTER_MS = 120_000
@@ -43,28 +43,29 @@ export async function processAcceptance(opts: AcceptanceOptions): Promise<void> 
 async function reconcile(opts: AcceptanceOptions): Promise<void> {
   const now = opts.now ?? Date.now(), isAlive = opts.processAlive ?? alive, send = opts.send ?? routeSend
   for (const r of listAcceptance(opts.runDir)) {
+    const runtime = r.identity.startsWith('claude-') ? 'claude' : 'codex'
+    const personality = r.identity.slice(runtime.length + 1)
     if (r.status === 'rejected' || (r.status === 'delivered' && !r.managed)) {
       if (now - r.updatedAt > FINAL_KEEP_MS) rmSync(acceptancePath(opts.runDir, r.id), { force: true })
       continue
     }
-    if (r.status === 'sending' && isAlive(r.writerPid, r.writerToken)) continue
+    if (r.status === 'sending' && now - r.createdAt < ACCEPTANCE_ALERT_AFTER_MS && isAlive(r.writerPid, r.writerToken)) continue
     const previous = r.status
+    const previousDeadSince = r.deadSince
     if (!['delivered', 'failed'].includes(r.status)) {
-      const receipt = codexReceiptBaseline(r.home, r.cwd, r.message, r.snapshot)
+      const receipt = runtime === 'claude' ? {
+        landed: () => deliveryLanded({ runtime, personality, cwd: r.cwd, ts: r.createdAt, rendered: r.message }, { ...opts.env, HOME: r.home }),
+      } : codexReceiptBaseline(r.home, r.cwd, r.message, r.snapshot)
       r.managed = true
       if (receipt.landed()) { r.status = 'delivered'; r.reason = 'native user-input receipt' }
       else {
         const allNativeDead = r.embeddedNative === true && !!r.nativeProcesses?.length && r.nativeProcesses.every(p => !isAlive(p.pid, p.token))
         if (allNativeDead) r.deadSince ??= now
         else r.deadSince = undefined
-        const history = join(r.home, 'history.jsonl')
-        const historyReadable = existsSync(history) && statSync(history).size >= r.snapshot.historyOffset
-        // A crash at the sending boundary remains unknown. A still-live process, native history
-        // submission, or unreadable evidence also forbids an automatic non-execution assertion.
-        if (r.status !== 'sending' && allNativeDead && now - (r.deadSince ?? now) >= DEAD_DRAIN_MS
-          && receipt.readable() && historyReadable && !receipt.submitted()) {
-          r.status = 'failed'; r.reason = 'original native receiver exited; readable native evidence contains neither input nor submission'
-        } else if (now - r.createdAt >= ACCEPTANCE_ALERT_AFTER_MS || r.status === 'sending') {
+        // Native TurnStart/SteeredUserInput allow background persistence. Process death
+        // can destroy evidence of work already started; empty files NEVER prove refusal.
+        if (now - r.createdAt >= ACCEPTANCE_ALERT_AFTER_MS || r.status === 'sending'
+          || (allNativeDead && now - (r.deadSince ?? now) >= DEAD_DRAIN_MS)) {
           r.status = 'unresolved'; r.reason = 'native acceptance cannot be proved or excluded; do not replay'
         }
       }
@@ -72,12 +73,12 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
         r.callerNotice = undefined; r.operatorNotice = undefined; r.lastAlertAt = undefined
         r.updatedAt = now; writeAcceptance(opts.runDir, r)
         appendDeliveryEvent(opts.logDir, { ev: 'delivery-acceptance', id: r.id, to: r.identity, outcome: r.status })
-      } else if (r.deadSince !== undefined) writeAcceptance(opts.runDir, r)
+      } else if (r.deadSince !== previousDeadSince) writeAcceptance(opts.runDir, r)
     }
     if (r.status === 'pending') continue
     const unresolved = r.status === 'unresolved'
     if (unresolved || r.status === 'failed') {
-      opts.board?.raise({ personality: r.identity.slice('codex-'.length), runtime: 'codex', kind: 'delivery-acceptance',
+      opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
         errorType: `${r.status}:${r.id}`, summary: `${r.status} delivery ${r.id} to ${r.identity}`, content: acceptanceEvent(r) })
       if (unresolved && r.lastAlertAt !== undefined && now - r.lastAlertAt < REMIND_MS) continue
     }
@@ -88,7 +89,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
       // Claim BEFORE sending. A restart in this boundary is visible unresolved notification custody,
       // never a blind repeated fallback task. The original receiver is never replayed.
       if (r[slot] === 'sending') {
-        opts.board?.raise({ personality: r.identity.slice(6), runtime: 'codex', kind: 'delivery-acceptance',
+        opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
           errorType: `notification-uncertain:${r.id}:${slot}`, content: acceptanceEvent(r) })
         return
       }

@@ -12,6 +12,7 @@
 // Files under cfg.stateDir: `<identity>.inflight.jsonl` (append) and `<identity>.orphans.jsonl`.
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 
 export interface InflightEntry {
   /** A separate durable acceptance reconciler owns the unknown paste; this ledger never replays it. */
@@ -39,9 +40,16 @@ export interface InflightEntry {
   unconfirmed?: true
 }
 
-/** How long an unconfirmed delivery may stay unlanded in a live session before the ledger treats the
- *  paste as swallowed and redelivers it (once). Generous: a busy receiver records a queued message late. */
+/** Unknown acceptance escalates after this interval; elapsed time never authorizes replay. */
 export const UNLANDED_AFTER_MS = 120_000
+
+/** Stable across daemon restarts; old Claude unknown entries migrate without rewriting the ledger. */
+export function inflightAcceptanceId(e: InflightEntry): string | undefined {
+  if (e.pendingDeliveryId) return e.pendingDeliveryId
+  if (e.runtime !== 'claude' || !e.unconfirmed) return undefined
+  const h = createHash('sha256').update(JSON.stringify([e.identity, e.id, e.ts])).digest('hex').slice(0, 32)
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
 
 const inflightPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.inflight.jsonl`)
 const orphansPath = (stateDir: string, identity: string) => join(stateDir, `${identity}.orphans.jsonl`)
@@ -133,15 +141,17 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
   const finished = new Set<string>()
   const sessionKey = (e: InflightEntry) => e.sessionToken ?? '∅'
   for (const e of entries) {
-    if (e.pendingDeliveryId && !['delivered', 'failed', 'rejected'].includes(deps.acceptance?.(e.pendingDeliveryId) ?? '')) continue
+    const acceptanceId = inflightAcceptanceId(e)
+    if (acceptanceId && !['delivered', 'failed', 'rejected'].includes(deps.acceptance?.(acceptanceId) ?? '')) continue
     if (safe(deps.completed, e, false) || (!deps.completed && safe(deps.processed, e, false))) {
       finished.add(e.id)
       finishedUpTo.set(sessionKey(e), Math.max(finishedUpTo.get(sessionKey(e)) ?? -Infinity, e.ts))
     }
   }
   for (const e of entries) {
-    if (e.pendingDeliveryId) {
-      const status = deps.acceptance?.(e.pendingDeliveryId)
+    const acceptanceId = inflightAcceptanceId(e)
+    if (acceptanceId) {
+      const status = deps.acceptance?.(acceptanceId)
       if (status === 'failed' || status === 'rejected') continue // reconciler owns fallback
       if (status !== 'delivered') { keep.push(e); continue }
     }
@@ -157,26 +167,12 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
     }
     // Codex native acceptance forbids replay, even if the receiving turn never answered. A
     // pending paste is owned above; after acceptance, death means interrupted work, not a retry.
-    if (e.runtime === 'codex') {
+    if (e.runtime === 'codex' || acceptanceId) {
       if (current !== null && current === e.sessionToken) keep.push(e)
       else interrupted.push(e)
       continue
     }
     if (current !== null && current === e.sessionToken) {
-      // Unknown landing (confirm window ran out): once seen in the session it is a normal pending entry;
-      // still unseen after UNLANDED_AFTER_MS → the paste was swallowed → orphan (redeliver once).
-      if (e.unconfirmed && deps.landed) {
-        let landed = false
-        try {
-          landed = deps.landed(e)
-        } catch {
-          landed = false
-        }
-        if (landed) keep.push({ ...e, unconfirmed: undefined })
-        else if ((deps.now ?? Date.now()) - e.ts > UNLANDED_AFTER_MS) orphaned.push(e)
-        else keep.push(e)
-        continue
-      }
       keep.push(e)
     } else orphaned.push(e)
   }

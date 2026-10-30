@@ -28,3 +28,26 @@ test('read-only Codex audit distinguishes ingestion, busy delay, no receipt and 
     expect(r.deliveries[1].native_input_delay_s).toBe(180)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+test('pending acknowledgement is not ingestion; exact delivery IDs expose final outcomes and duplicate USERs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'iapeer-delivery-audit-id-'))
+  try {
+    const core = join(root, 'core'), home = join(root, 'codex'), cwd = join(root, 'peer')
+    mkdirSync(join(core, 'logs/iapeer'), { recursive: true }); mkdirSync(join(home, 'sessions'), { recursive: true }); mkdirSync(cwd)
+    mkdirSync(join(core, 'state/supervisor/acceptance'), { recursive: true })
+    const ids = ['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222']
+    writeFileSync(join(core, 'peers-profiles.json'), JSON.stringify({ peers: [{ personality: 'p', cwd }] }))
+    writeFileSync(join(core, 'logs/iapeer/delivery.log'), ids.map((id, i) => `ts=2026-10-29T10:00:0${i}Z ev=delivery caller=notifier-timer to=p rt=codex ok=true via=codex-p ms=500 queued=true acceptance=pending deliveryId=${id}\n`).join(''))
+    writeFileSync(join(core, 'state/supervisor/acceptance', ids[0] + '.json'), JSON.stringify({ status: 'delivered' }))
+    writeFileSync(join(core, 'state/supervisor/acceptance', ids[1] + '.json'), JSON.stringify({ status: 'unresolved' }))
+    const user = JSON.stringify({ timestamp: '2026-10-29T10:05:00Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `task [iapeer deliveryId=${ids[0]}]` }] } }) + '\n'
+    writeFileSync(join(home, 'sessions/rollout-id.jsonl'), JSON.stringify({ type: 'session_meta', payload: { cwd } }) + '\n' + user + user)
+    const p = Bun.spawnSync(['python3', resolve(import.meta.dir, 'audit-codex-delivery.py'), '--since', '2026-10-29T09:00:00Z', '--until', '2026-10-29T11:00:00Z', '--root', core, '--codex-home', home])
+    expect(p.exitCode).toBe(0)
+    const r = JSON.parse(p.stdout.toString())
+    expect(r.acceptance_summary).toEqual({ delivered: 1, unresolved: 1 })
+    expect(r.deliveries[0].status).toBe('native_input')
+    expect(r.deliveries[0].native_user_records).toBe(2)
+    expect(r.duplicate_native_inputs).toBe(1)
+    expect(r.deliveries[1].status).toBe('missing_native_input')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

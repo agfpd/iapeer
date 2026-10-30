@@ -19,7 +19,7 @@ export interface AcceptanceRecord {
   writerPid: number
   writerToken: string | null
   nativeProcesses?: { pid: number; token: string | null }[]
-  /** Explicit --no-daemon proves the tracked native process owns persistence, not a shared server. */
+  /** Explicit --no-daemon identifies an embedded writer; its death still cannot prove non-execution. */
   embeddedNative?: boolean
   status: AcceptanceStatus
   reason?: string
@@ -46,6 +46,8 @@ export function writeAcceptance(runDir: string, record: AcceptanceRecord): void 
     writeFileSync(fd, JSON.stringify(record) + '\n'); fsyncSync(fd)
     closeSync(fd); fd = undefined
     renameSync(tmp, path)
+    // The renamed directory entry is part of write-ahead custody, not just the file bytes.
+    fd = openSync(acceptanceDir(runDir), 'r'); fsyncSync(fd); closeSync(fd); fd = undefined
   } finally {
     if (fd !== undefined) closeSync(fd)
     rmSync(tmp, { force: true })

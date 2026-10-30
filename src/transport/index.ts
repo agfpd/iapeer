@@ -339,7 +339,8 @@ const deliverTails = new Map<string, Promise<unknown>>()
 export type WarmReceipt = void | Pick<DeliverResult, 'acceptance' | 'deliveryId'>
 function acceptanceResult(receipt: WarmReceipt): Pick<RouteResult, 'queued' | 'queuedBy' | 'acceptance' | 'deliveryId'> {
   return receipt?.acceptance === 'pending'
-    ? { queued: true, queuedBy: 'acceptance', acceptance: 'pending', deliveryId: receipt.deliveryId } : {}
+    ? { queued: true, queuedBy: 'acceptance', acceptance: 'pending', deliveryId: receipt.deliveryId }
+    : receipt?.deliveryId ? { deliveryId: receipt.deliveryId } : {}
 }
 
 export async function deliverWarm(
@@ -1099,7 +1100,9 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
     for (const line of readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES)).split(/\r?\n/)) {
       if (!line.trim()) continue
       try {
-        if (jsonStringValuesContainAll(JSON.parse(line), needles)) return true
+        const record = JSON.parse(line)
+        if (probe.runtime === 'claude' && record.type !== 'user' && record.type !== 'queue-operation') continue
+        if (jsonStringValuesContainAll(record, needles)) return true
       } catch {
         /* skip */
       }

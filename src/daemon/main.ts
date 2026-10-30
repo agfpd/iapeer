@@ -87,7 +87,8 @@ import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index
 import { randomBytes } from 'crypto'
 import { clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
 import { processAcceptance } from './acceptance.ts'
-import { readAcceptance } from '../launch/acceptanceStore.ts'
+import { readAcceptance, writeAcceptance } from '../launch/acceptanceStore.ts'
+import { inflightAcceptanceId, readInflight } from '../lifecycle/inflight.ts'
 import { hostRunDir, hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
@@ -289,7 +290,7 @@ export function redeliveryMessage(e: InflightEntry): string {
 export function interruptedNotice(e: InflightEntry): string {
   return (
     `iapeer: your message to "${e.personality}" (${e.runtime}), sent ${e.sentAt}${e.topic ? ` topic=${e.topic}` : ''}, ` +
-    `was being worked on when the receiving session died — the turn was INTERRUPTED and its result is not guaranteed ` +
+    `was accepted by the core, but the receiving session ended before completion could be established — work may be INTERRUPTED and its result is not guaranteed ` +
     `(it is NOT redelivered: side effects may already have happened). Check its state and resend if needed. ` +
     `First line: ${e.message.split('\n')[0]!.slice(0, 200)}`
   )
@@ -317,6 +318,7 @@ export async function processInflight(
   routeDeps: RouteDeps,
   seam: { send?: typeof routeSend; processed?: (e: InflightEntry) => boolean; landed?: (e: InflightEntry) => boolean; completed?: (e: InflightEntry) => boolean } = {},
 ): Promise<void> {
+  const acceptanceRunDir = cfg.supervisorRunDir ?? join(cfg.stateDir, '..', 'supervisor')
   const processed = seam.processed ?? ((e: InflightEntry) => deliveryProcessed(e, env))
   const send = seam.send ?? routeSend
   /** A notice FROM the core's system identity to the entry's original sender. Registry-independent
@@ -330,11 +332,23 @@ export async function processInflight(
       return 'false'
     }
   }
+  // Includes old daemon orphans: an upgrade must not revive their blind-replay policy.
+  const ensureUnknownCustody = (e: InflightEntry) => {
+      const id = inflightAcceptanceId(e)
+      if (e.runtime !== 'claude' || !e.unconfirmed || !id || readAcceptance(acceptanceRunDir, id)) return
+      writeAcceptance(acceptanceRunDir, {
+        id, identity: e.identity, token: e.sessionToken ?? '', home: env.HOME ?? '', cwd: e.cwd,
+        message: e.rendered, snapshot: { offsets: [], historyOffset: 0 },
+        status: 'pending', managed: true, createdAt: e.ts, updatedAt: Date.now(),
+        writerPid: process.pid, writerToken: null,
+      })
+  }
   for (const identity of listInflightIdentities(cfg.stateDir)) {
+    for (const e of readInflight(cfg.stateDir, identity)) ensureUnknownCustody(e)
     const selfEnded = readSelfEnded(cfg.stateDir, identity)
     const current = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
     const n = sweepInflight(cfg.stateDir, identity, {
-      acceptance: id => readAcceptance(hostRunDir(env), id)?.status,
+      acceptance: id => readAcceptance(acceptanceRunDir, id)?.status,
       sessionToken: () => current,
       selfEndedToken: selfEnded,
       processed,
@@ -367,6 +381,16 @@ export async function processInflight(
   }
   for (const identity of listOrphanIdentities(cfg.stateDir)) {
     for (const e of takeOrphans(cfg.stateDir, identity)) {
+      if (e.runtime === 'claude' && e.unconfirmed) {
+        ensureUnknownCustody(e)
+        if (!readInflight(cfg.stateDir, identity).some(existing => existing.id === e.id)) recordInflight(cfg.stateDir, e)
+        continue
+      }
+      if (e.runtime === 'codex' || e.pendingDeliveryId) {
+        const notified = await notifySender(e, interruptedNotice(e))
+        appendDeliveryEvent(cfg.eventLogDir, { ev: 'inflight-interrupted', caller: `${e.caller.runtime}-${e.caller.personality}`, to: e.personality, rt: e.runtime, ok: 'false', notified })
+        continue
+      }
       const index = readPeersIndex({ env })
       let reason: string
       try {
@@ -666,7 +690,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       // wake superviseTick inside wakeOrSpawn). The outcomes array drives only the
       // eager relaunch here; the trace does not depend on consuming it.
       tick: async () => {
-        await processAcceptance({ runDir: hostRunDir(env), logDir: cfg.eventLogDir, env, board,
+        await processAcceptance({ runDir: cfg.supervisorRunDir ?? join(cfg.stateDir, '..', 'supervisor'), logDir: cfg.eventLogDir, env, board,
           routeDeps: { env, wake: makeWakeFn(cfg, env), noteInflight } })
         const outcomes = superviseTick(cfg, { env })
         await processEagerRelaunches(cfg, outcomes, { env })
