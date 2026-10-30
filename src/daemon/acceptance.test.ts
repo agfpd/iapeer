@@ -7,6 +7,7 @@ import { codexReceiptBaseline } from '../launch/codexDelivery.ts'
 import { writeAcceptance, readAcceptance, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
 import { processAcceptance } from './acceptance.ts'
 import { ok } from '../core/errors.ts'
+import { NoticeBoard } from './notices.ts'
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'iap-acceptance-test-')))
@@ -143,5 +144,15 @@ test('oversized unresolved event uses durable attachment rather than an undelive
     expect(x.sent[1].message.length).toBeLessThan(16000)
     expect(x.sent[1].attachments).toHaveLength(1)
     expect(JSON.parse(x.sent[1].message).originalEnvelopeFile).toBe(x.sent[1].attachments[0])
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+test('re-reading one unresolved delivery does not inflate the owner occurrence counter', async () => {
+  const x = fixture()
+  try {
+    const board = new NoticeBoard({ env: {}, now: () => 130_000 })
+    await processAcceptance({ ...x.opts, board, now: 130_000, processAlive: () => true })
+    await processAcceptance({ ...x.opts, board, now: 140_000, processAlive: () => true })
+    expect(board.list()).toHaveLength(1)
+    expect(board.list()[0]!.count).toBe(1)
   } finally { rmSync(x.root, { recursive: true, force: true }) }
 })

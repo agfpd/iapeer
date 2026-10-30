@@ -79,8 +79,11 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
     const unresolved = r.status === 'unresolved'
     if (unresolved || r.status === 'failed') {
       opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
+        eventAtMs: r.updatedAt,
         errorType: `${r.status}:${r.id}`, summary: `${r.status} delivery ${r.id} to ${r.identity}`, content: acceptanceEvent(r) })
       if (unresolved && r.lastAlertAt !== undefined && now - r.lastAlertAt < REMIND_MS) continue
+      // Preserve the completed notification checkpoint until a reminder is actually due.
+      if (unresolved && r.lastAlertAt !== undefined && r.operatorNotice === 'sent') r.operatorNotice = undefined
     }
     let from
     try { from = decodeEnvelope(r.message.slice(r.message.indexOf('<iap '))) } catch { /* manual non-IAP input: board/operator only */ }
@@ -90,6 +93,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
       // never a blind repeated fallback task. The original receiver is never replayed.
       if (r[slot] === 'sending') {
         opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
+          eventAtMs: r.updatedAt,
           errorType: `notification-uncertain:${r.id}:${slot}`, content: acceptanceEvent(r) })
         return
       }
@@ -114,8 +118,6 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
     if (operator && r.status !== 'delivered' && from?.fromRuntime !== 'core') await notify('operatorNotice', operator)
     if (unresolved) {
       r.lastAlertAt = now
-      // Reminder is a notification (explicitly unresolved), not a fallback assertion or re-paste.
-      if (r.operatorNotice === 'sent') r.operatorNotice = undefined
       writeAcceptance(opts.runDir, r)
     }
     if (['delivered', 'failed'].includes(r.status) && now - r.updatedAt > FINAL_KEEP_MS
