@@ -239,7 +239,8 @@ process was SIGKILLed before any answer, and the fresh next session never saw it
 - Unknown is not failed. When a live receiver's acceptance record does not appear
   within the confirm window (a busy claude records a queued message late), the
   send returns `ok` with `unconfirmed: true` instead of «NOT delivered» — the
-  sender must not resend. The ledger keeps the entry marked unconfirmed: once any
+  sender must not resend. The CLI prints `unconfirmed acceptance`, never
+  `delivered`, for that acknowledgement. The ledger keeps the entry marked unconfirmed: once any
   record carrying the envelope appears (including a claude `queue-operation`) it
   is an ordinary pending entry. Absence after 120 s is NOT proof that a paste was
   swallowed. Claude unconfirmed entries enter durable acceptance custody: missing

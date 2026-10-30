@@ -318,20 +318,15 @@ try {
       acceptance: files(join(runDir, 'acceptance')).map(p => JSON.parse(read(p))) })
     if (process.argv.includes('--expect-fixed') && (!log.includes('outcome=unresolved') || log.includes('ev=inflight-redeliver'))) throw new Error('unknown was replayed or not escalated')
     process.kill(stoppedChild, 'SIGCONT'); stoppedChild = undefined
-    // A resumed TUI can swallow the buffered submit CR while rendering the paste.
-    // Submit the existing draft once as the test operator; never paste another payload.
-    await Bun.sleep(1000)
-    const { sendControlToHost } = await import('../src/supervisor/deliver.ts')
-    // CSI-u Enter is unambiguous even while Claude's multiline paste heuristic
-    // treats a raw CR as another draft newline (verified on native 2.1.314).
-    const submit = await sendControlToHost(runDir, identity(), [Buffer.from('\x1b[13u')])
-    record('test-operator-submit-existing-draft', { key: 'CSI-u Enter', submit })
-    await until('released native turn', () => completedAfter(t), 60000)
+    // Do NOT rescue the existing draft with operator keystrokes. The core must
+    // either submit normally or keep it truthfully unresolved and visibly escalated.
     await Bun.sleep(3000)
     const userTexts = records().filter(r => r.type === 'user').map(r => typeof r.message?.content === 'string' ? r.message.content : JSON.stringify(r.message?.content))
     const occurrences = userTexts.reduce((n, text) => n + (text?.split(marker).length - 1 || 0), 0)
-    record('unknown-delivery-native-input', { occurrences, userTexts })
-    if (process.argv.includes('--expect-fixed') && occurrences !== 1) throw new Error(`unknown native input appeared ${occurrences} times`)
+    const acceptance = files(join(runDir, 'acceptance')).map(p => JSON.parse(read(p))).find(r => r.message?.includes(marker))
+    const { captureHostState } = await import('../src/supervisor/capture.ts')
+    record('unknown-delivery-native-input', { occurrences, userTexts, acceptance, view: await captureHostState(runDir, identity()), operatorKeystrokes: 0 })
+    if (process.argv.includes('--expect-fixed') && (occurrences > 1 || (occurrences === 0 && acceptance?.status !== 'unresolved') || sent.stdout.includes('delivered to'))) throw new Error('unknown input duplicated or falsely reported delivered')
     success = true
   } else if (process.argv.includes('--blocked-only')) {
     // Contrast: a session whose TUI cannot accept input (SIGSTOP stands in for any modal) still

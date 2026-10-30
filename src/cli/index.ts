@@ -1624,7 +1624,7 @@ const cliWake: WakeFn = req =>
 
 export async function sendMessage(
   opts: SendOptions,
-): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number; acceptance?: 'pending'; deliveryId?: string }> {
+): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number; acceptance?: 'pending'; deliveryId?: string; unconfirmed?: true }> {
   const env = opts.env ?? process.env
   const caller = resolveCallerIdentity(parseIdentity(opts.from), readPeersIndex({ env }))
   // wake_policy:ephemeral M3 parity: the CLI path used
@@ -1678,6 +1678,7 @@ export async function sendMessage(
     queued: result.ok && result.value.queued ? 'true' : undefined,
     qkind: result.ok ? result.value.queuedBy : undefined,
     acceptance: result.ok ? result.value.acceptance : undefined,
+    unconfirmed: result.ok && result.value.unconfirmed ? 'true' : undefined,
     deliveryId: result.ok ? result.value.deliveryId : undefined,
     qd: result.ok ? result.value.queueDepth : undefined,
     ms: Date.now() - t0,
@@ -1704,8 +1705,17 @@ export async function sendMessage(
     queued: result.value.queued,
     queueDepth: result.value.queueDepth,
     acceptance: result.value.acceptance,
+    unconfirmed: result.value.unconfirmed,
     deliveryId: result.value.deliveryId,
   }
+}
+
+export function formatSendResult(r: Awaited<ReturnType<typeof sendMessage>>): string {
+  const target = `${r.delivered_to.personality} (${r.delivered_to.runtime})`
+  if (r.acceptance === 'pending') return `pending acceptance ${r.deliveryId} for ${target} — core owns resolution; do not resend\n`
+  if (r.unconfirmed) return `unconfirmed acceptance for ${target} — core owns resolution; do not resend\n`
+  if (r.queued) return `queued for ${target}, depth ${r.queueDepth ?? '?'} — the daemon tick drains it\n`
+  return `delivered to ${target}\n`
 }
 
 function parseIdentity(identity: string): { personality: string; runtime: Runtime } {
@@ -2767,13 +2777,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           attachments: attachments.length ? attachments : undefined,
           env,
         })
-        out(
-          r.acceptance === 'pending'
-            ? `pending acceptance ${r.deliveryId} for ${r.delivered_to.personality} (${r.delivered_to.runtime}) — core owns resolution; do not resend\n`
-            : r.queued
-            ? `queued for ${r.delivered_to.personality} (${r.delivered_to.runtime}), depth ${r.queueDepth ?? '?'} — the daemon tick drains it\n`
-            : `delivered to ${r.delivered_to.personality} (${r.delivered_to.runtime})\n`,
-        )
+        out(formatSendResult(r))
         return 0
       }
       case 'confirm-send': {

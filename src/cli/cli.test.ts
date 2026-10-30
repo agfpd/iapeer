@@ -8,6 +8,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { addRuntime, compactPeer, defaultRuntime, formatListTable, goalPeer, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
+import { formatSendResult } from './index.ts'
+
+test('CLI never labels unknown native acceptance as delivered', () => {
+  const r = { ok: true as const, delivered_to: { personality: 'bob', runtime: 'claude' } }
+  expect(formatSendResult({ ...r, unconfirmed: true })).toContain('unconfirmed acceptance')
+  expect(formatSendResult({ ...r, unconfirmed: true })).not.toContain('delivered')
+  expect(formatSendResult({ ...r, acceptance: 'pending', deliveryId: 'id' })).toContain('pending acceptance id')
+  expect(formatSendResult(r)).toBe('delivered to bob (claude)\n')
+})
 import { findPeer, readPeersIndex, upsertPeer } from '../registry/index.ts'
 import { transcriptSlug } from '../launch/adapters/claude.ts'
 import { hasFreshNext, hasIdleReaped, isStopped, loadLifecycleConfig, setIdleReaped, setStopped } from '../lifecycle/index.ts'
