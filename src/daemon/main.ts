@@ -86,7 +86,9 @@ import { startCapabilityReloads } from '../capability/reload.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 import { randomBytes } from 'crypto'
 import { clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
-import { hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
+import { processAcceptance } from './acceptance.ts'
+import { readAcceptance } from '../launch/acceptanceStore.ts'
+import { hostRunDir, hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
  *  (claude/codex `--transport http <url>`) bind to a fixed URL, so production needs
@@ -332,6 +334,7 @@ export async function processInflight(
     const selfEnded = readSelfEnded(cfg.stateDir, identity)
     const current = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
     const n = sweepInflight(cfg.stateDir, identity, {
+      acceptance: id => readAcceptance(hostRunDir(env), id)?.status,
       sessionToken: () => current,
       selfEndedToken: selfEnded,
       processed,
@@ -663,6 +666,8 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       // wake superviseTick inside wakeOrSpawn). The outcomes array drives only the
       // eager relaunch here; the trace does not depend on consuming it.
       tick: async () => {
+        await processAcceptance({ runDir: hostRunDir(env), logDir: cfg.eventLogDir, env, board,
+          routeDeps: { env, wake: makeWakeFn(cfg, env), noteInflight } })
         const outcomes = superviseTick(cfg, { env })
         await processEagerRelaunches(cfg, outcomes, { env })
         // Orphaned-eager fallback: a .new-eager whose session died WITHOUT a .session

@@ -36,6 +36,24 @@ function entry(over: Partial<InflightEntry> = {}): InflightEntry {
 }
 
 describe('inflight ledger (OC07)', () => {
+  test('Codex durable pending is never orphan-replayed, even after session death or 120s', () => {
+    const e = entry({ runtime: 'codex', identity: 'codex-bob', pendingDeliveryId: 'delivery', ts: 0 })
+    recordInflight(state, e)
+    sweepInflight(state, e.identity, { sessionToken: () => null, processed: () => false, now: 999999,
+      acceptance: () => 'unresolved' })
+    expect(readInflight(state, e.identity)).toHaveLength(1)
+    expect(takeOrphans(state, e.identity)).toHaveLength(0)
+    sweepInflight(state, e.identity, { sessionToken: () => null, processed: () => false, acceptance: () => 'failed' })
+    expect(readInflight(state, e.identity)).toHaveLength(0)
+    expect(takeOrphans(state, e.identity)).toHaveLength(0)
+  })
+  test('Codex accepted-but-unanswered native input is interrupted, never replayed on death', () => {
+    const e = entry({ runtime: 'codex', identity: 'codex-bob' })
+    recordInflight(state, e)
+    sweepInflight(state, e.identity, { sessionToken: () => null, processed: () => false })
+    expect(takeOrphans(state, e.identity)).toHaveLength(0)
+    expect(takeInterrupted(state, e.identity)).toHaveLength(1)
+  })
   test('sweep: processed leaves; unprocessed stays on the same live session; gone/replaced session → orphan', () => {
     recordInflight(state, entry({ id: 'done' }))
     recordInflight(state, entry({ id: 'pending' }))

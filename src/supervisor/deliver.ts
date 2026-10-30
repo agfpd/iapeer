@@ -16,6 +16,9 @@ const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 export interface DeliverResult {
   ok: boolean
   error?: string
+  /** Durable custody, NOT native acceptance. Never retry the paste on this result. */
+  acceptance?: 'pending'
+  deliveryId?: string
 }
 
 /** A socket flush is not acceptance: a fenced host must reject, not silently swallow, an input.

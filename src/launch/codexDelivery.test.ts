@@ -21,9 +21,9 @@ function io(): CodexDeliveryIO & { sends: number; retries: number } {
 }
 
 describe('Codex acceptance, not socket ACK', () => {
-  test('long paste stuck in composer remains a VISIBLE failure despite successful socket ACKs', async () => {
+  test('long paste stuck in composer transfers durable custody, not a retryable failure', async () => {
     const x = io(), r = await confirmCodexDelivery(message, x)
-    expect(r.ok).toBe(false); expect(r.error).toContain('acceptance unconfirmed')
+    expect(r.ok).toBe(true); expect(r.acceptance).toBe('pending')
     expect(x.sends).toBe(1); expect(x.retries).toBe(2)
   })
   test('retry submits our own paste, then a message-specific native receipt confirms', async () => {
@@ -36,7 +36,7 @@ describe('Codex acceptance, not socket ACK', () => {
     expect((await confirmCodexDelivery(message, x)).ok).toBe(true)
     expect(x.retries).toBe(0)
     x.submitted = () => false
-    expect((await confirmCodexDelivery(message, x)).ok).toBe(false)
+    expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending')
   })
   test('history alone, an old queue for another header, or draft + queue cannot confirm', async () => {
     for (const state of [
@@ -45,7 +45,7 @@ describe('Codex acceptance, not socket ACK', () => {
       { ...queued, composerOccupied: true },
     ]) {
       const x = io(); x.state = async () => state; x.submitted = () => true
-      expect((await confirmCodexDelivery(message, x)).ok).toBe(false)
+      expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending')
     }
   })
   test('external writer is diagnosed before paste; never press r or Enter to take ownership', async () => {
@@ -54,17 +54,28 @@ describe('Codex acceptance, not socket ACK', () => {
     expect(x.sends).toBe(0); expect(x.retries).toBe(0)
     expect(codexDeliveryBlocker('⚠ 1 warning · f2 to view')).toBeNull()
   })
+  test('native receipt appearing during awaited capture wins over the expired deadline', async () => {
+    const x = io()
+    let captured = 0, received = false
+    x.state = async () => {
+      if (captured++ > 0) { await x.sleep!(5000); received = true }
+      return { text: '› Ask Codex to do anything', composerOccupied: false }
+    }
+    x.landed = () => received
+    expect(await confirmCodexDelivery(message, x)).toEqual({ ok: true })
+    expect(x.sends).toBe(1); expect(x.retries).toBe(0)
+  })
   test('unknown modal / absent snapshot / attached human never receives blind submit retries', async () => {
     for (const state of [null, { text: 'Select a dangerous action', composerOccupied: false }]) {
       const x = io(); x.state = async () => state
-      expect((await confirmCodexDelivery(message, x)).ok).toBe(false); expect(x.retries).toBe(0)
+      expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending'); expect(x.retries).toBe(0)
     }
     const x = io(); x.attached = () => true
-    expect((await confirmCodexDelivery(message, x)).ok).toBe(false); expect(x.retries).toBe(0)
+    expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending'); expect(x.retries).toBe(0)
   })
   test('replacement host cannot supply a receipt', async () => {
     const x = io(); x.sameHost = () => x.sends === 0; x.landed = () => true
-    expect((await confirmCodexDelivery(message, x)).ok).toBe(false)
+    expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending')
   })
   test('native receipt counts only user input, not quoted tool/assistant output', () => {
     for (const role of ['assistant', 'tool', 'developer']) expect(codexUserRecordCarries({ type: 'response_item', payload: { type: 'message', role, content: [{ type: 'input_text', text: message }] } }, message)).toBe(false)

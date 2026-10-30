@@ -21,7 +21,7 @@ const artifacts = arg('--artifacts')
 let cliBin = arg('--legacy-bin') ?? bin
 const binSHA256 = createHash('sha256').update(readFileSync(bin)).digest('hex')
 const legacyBinSHA256 = arg('--legacy-bin') ? createHash('sha256').update(readFileSync(resolve(arg('--legacy-bin')!))).digest('hex') : undefined
-const root = mkdtempSync(`/tmp/iap-installed-${runtime}-operators-`), home = join(root, 'home'), iap = join(root, 'iapeer')
+const root = realpathSync(mkdtempSync(`/tmp/iap-installed-${runtime}-operators-`)), home = join(root, 'home'), iap = join(root, 'iapeer')
 let personality = 'operator-proof', cwd = join(root, personality)
 mkdirSync(cwd, { recursive: true }); mkdirSync(home, { recursive: true })
 const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { return '' } }
@@ -135,6 +135,15 @@ try {
   mkdirSync(join(home, '.codex'), { recursive: true })
   writeFileSync(join(home, '.codex/config.toml'), `model = "gpt-5.4"\nmodel_provider = "probe"\ncheck_for_update_on_startup = false\n[model_providers.probe]\nname = "Loopback proof only"\nbase_url = "${provider.url.origin}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\n`)
   await initPeer({ cwd, runtime, personality, intelligence: 'artificial', env })
+  if (process.argv.includes('--wake-delivery-only')) {
+    if (runtime !== 'codex') throw new Error('--wake-delivery-only requires codex')
+    // Real native hook latency, not a mocked receipt or a delayed provider response. The first
+    // USER record is produced after SessionStart; resume runs it again. No host hooks are loaded.
+    mkdirSync(join(cwd, '.codex'), { recursive: true })
+    writeFileSync(join(cwd, '.codex/hooks.json'), JSON.stringify({ hooks: {
+      SessionStart: [{ matcher: '*', hooks: [{ type: 'command', command: '/bin/sleep 8', timeout: 20 }] }],
+    } }))
+  }
   if (runtime === 'codex') writeFileSync(peerLaunchEnvPath(cwd, runtime), "PEER_START_ARGS='--no-daemon -c model_reasoning_effort=low'\n")
   const senderCwd = join(root, 'sender')
   writePeerProfileAtomic(senderCwd, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
@@ -200,6 +209,25 @@ try {
       if (kind === 'stale' ? hosting().pid || !lifecycleLog.includes('outcome=skipped-nondefault') : !lifecycleLog.includes('outcome=nudged') || !turnCompleted) throw new Error('wrong continuation outcome')
       if (kind === 'explicit' && nativeSession() !== original) throw new Error('explicit task did not resume its original native session')
       if (process.argv.includes('--ephemeral') && (!isEphemeralPeer(cwd) || !lifecycleLog.includes('ev=ephemeral-drain'))) throw new Error('ephemeral proof never exercised the FIFO')
+    }
+    success = true
+  } else if (process.argv.includes('--wake-delivery-only')) {
+    let coldSession: string | undefined
+    for (const marker of ['COLD_DELAYED_DELIVERY_PROOF', 'RESUMED_DELAYED_DELIVERY_PROOF']) {
+      const t = Date.now()
+      const sent = await cli('send', personality, '--runtime', runtime, '--from', 'notifier-sender', '--topic', 'operator-proof', '--message', marker)
+      await until('delayed native USER and complete', () => completedAfter(t), 60000)
+      const nativeUsers = records().filter(r => r.type === 'response_item' && r.payload?.role === 'user' && r.payload.content?.some((c: any) => c.type === 'input_text' && c.text.includes(marker)))
+      record('wake-delivery', { marker, sent, nativeUsers: nativeUsers.map(r => ({ timestamp: r.timestamp, path: r.path })), session: nativeSession() })
+      if (coldSession && coldSession !== nativeSession()) throw new Error('idle-reaped proof did not resume the original session')
+      coldSession = nativeSession()
+      if (nativeUsers.length !== 1) throw new Error(`expected exactly one native USER for ${marker}, got ${nativeUsers.length}`)
+      if (process.argv.includes('--expect-fixed') && sent.code !== 0) throw new Error(`false failure for ${marker}`)
+      // On the buggy binary, failure exits wake before recording its topic. Preserve the intended
+      // resume discriminator in the fixture, otherwise the second run tests another fresh wake.
+      const { addTopic, loadLifecycleConfig } = await import('../src/lifecycle/index.ts')
+      addTopic(loadLifecycleConfig(env), identity(), 'operator-proof')
+      await until('natural idle reap', () => existsSync(join(lifecycle, identity() + '.idle-reaped')) && !hosting().pid, 100000)
     }
     success = true
   } else {

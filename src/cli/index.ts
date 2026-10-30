@@ -1624,7 +1624,7 @@ const cliWake: WakeFn = req =>
 
 export async function sendMessage(
   opts: SendOptions,
-): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number }> {
+): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number; acceptance?: 'pending'; deliveryId?: string }> {
   const env = opts.env ?? process.env
   const caller = resolveCallerIdentity(parseIdentity(opts.from), readPeersIndex({ env }))
   // wake_policy:ephemeral M3 parity: the CLI path used
@@ -1677,6 +1677,8 @@ export async function sendMessage(
     woke: result.ok ? String(result.value.woke) : undefined,
     queued: result.ok && result.value.queued ? 'true' : undefined,
     qkind: result.ok ? result.value.queuedBy : undefined,
+    acceptance: result.ok ? result.value.acceptance : undefined,
+    deliveryId: result.ok ? result.value.deliveryId : undefined,
     qd: result.ok ? result.value.queueDepth : undefined,
     ms: Date.now() - t0,
     len: opts.message.length,
@@ -1701,6 +1703,8 @@ export async function sendMessage(
     delivered_to: result.value.delivered_to,
     queued: result.value.queued,
     queueDepth: result.value.queueDepth,
+    acceptance: result.value.acceptance,
+    deliveryId: result.value.deliveryId,
   }
 }
 
@@ -2764,7 +2768,9 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           env,
         })
         out(
-          r.queued
+          r.acceptance === 'pending'
+            ? `pending acceptance ${r.deliveryId} for ${r.delivered_to.personality} (${r.delivered_to.runtime}) — core owns resolution; do not resend\n`
+            : r.queued
             ? `queued for ${r.delivered_to.personality} (${r.delivered_to.runtime}), depth ${r.queueDepth ?? '?'} — the daemon tick drains it\n`
             : `delivered to ${r.delivered_to.personality} (${r.delivered_to.runtime})\n`,
         )

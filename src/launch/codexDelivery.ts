@@ -7,6 +7,10 @@ import { codexSessionCwd } from './adapters/transcriptTail.ts'
 import { deliverToHost, sendControlToHost, type DeliverResult } from '../supervisor/deliver.ts'
 import { pidPath, servePath } from '../supervisor/paths.ts'
 import { captureHostState } from '../supervisor/capture.ts'
+import { randomUUID } from 'node:crypto'
+import { pidStartToken } from '../supervisor/paths.ts'
+import { writeAcceptance, type AcceptanceRecord, type ReceiptSnapshot } from './acceptanceStore.ts'
+import { spawnSync } from 'node:child_process'
 
 export interface CodexInputState { text: string; composerOccupied: boolean }
 const normalize = (s: string) => s.replace(/\r/g, '').trim()
@@ -35,7 +39,7 @@ export function codexUserRecordCarries(r: any, message: string): boolean {
 }
 
 /** Snapshot offsets BEFORE paste. A later session file is included from zero (fresh rollouts are lazy). */
-export function codexReceiptBaseline(home: string, cwd: string, message: string) {
+export function codexReceiptBaseline(home: string, cwd: string, message: string, saved?: ReceiptSnapshot) {
   const root = join(home, 'sessions'), target = canonical(cwd)
   const candidates = (): string[] => {
     const out: string[] = []
@@ -50,9 +54,17 @@ export function codexReceiptBaseline(home: string, cwd: string, message: string)
     }
     visit(root); return out
   }
-  const offsets = new Map(candidates().map(p => [p, size(p)]))
-  const history = join(home, 'history.jsonl'), historyOffset = size(history)
+  const offsets = new Map(saved?.offsets ?? candidates().map(p => [p, size(p)] as [string, number]))
+  const history = join(home, 'history.jsonl'), historyOffset = saved?.historyOffset ?? size(history)
   return {
+    snapshot: { offsets: [...offsets.entries()], historyOffset },
+    // No inference from an absent/unreadable/truncated rollout. A dead receiver is only a
+    // non-acceptance candidate when its pre-existing native evidence is still readable.
+    readable: () => offsets.size > 0 && [...offsets].every(([p, n]) => {
+      let fd: number | undefined
+      try { fd = openSync(p, 'r'); return statSync(p).size >= n && readSync(fd, Buffer.alloc(1), 0, 1, 0) === 1 }
+      catch { return false } finally { if (fd !== undefined) closeSync(fd) }
+    }),
     landed: () => candidates().some(p => rows(tail(p, offsets.get(p) ?? 0)).some(r => codexUserRecordCarries(r, message))),
     // History alone is NOT a receipt: native submit may later fail. It is only the full-payload half
     // of queue confirmation, paired with the native pending-input UI and a cleared composer.
@@ -107,36 +119,53 @@ export async function confirmCodexDelivery(message: string, io: CodexDeliveryIO)
   if (blocked) return { ok: false, error: blocked }
   if (!io.sameHost()) return { ok: false, error: 'Codex hosting changed before delivery' }
   const sent = await io.send()
-  if (!sent.ok) return sent
+  if (!sent.ok) return { ok: true, acceptance: 'pending', error: sent.error }
   const deadline = now() + (io.graceMs ?? 4000)
   let retryAt = now() + 1500
   while (true) {
-    if (!io.sameHost()) return { ok: false, error: 'Codex hosting changed during acceptance check; acceptance unconfirmed' }
+    if (!io.sameHost()) return { ok: true, acceptance: 'pending', error: 'Codex hosting changed during acceptance check' }
     if (io.landed()) return { ok: true }
     const state = await io.state()
     const blocker = state && codexDeliveryBlocker(state.text)
-    if (blocker) return { ok: false, error: blocker }
+    // Input may have been accepted while capture awaited its snapshot; always reconcile again
+    // before interpreting a blocker or the deadline (the −0.8s production false failure).
+    if (io.landed()) return { ok: true }
+    if (blocker) return { ok: true, acceptance: 'pending', error: blocker }
     if (state && io.submitted() && codexQueueCarries(state, message)) return { ok: true }
     if (now() >= deadline) break
     // No blind CR into arbitrary modals or a human draft. Retry only this still-visible paste.
     if (state && now() >= retryAt && !io.attached() && ownDraft(state, message)) {
       const retried = await io.resubmit()
-      if (!retried.ok) return retried
+      if (!retried.ok) return { ok: true, acceptance: 'pending', error: retried.error }
       retryAt = now() + 1500
     }
     await sleep(100)
   }
-  return { ok: false, error: 'Codex acceptance unconfirmed: no new native user-input receipt or matching native queue; message may remain in composer or be consumed later' }
+  return { ok: true, acceptance: 'pending', error: 'Codex acceptance pending: native receipt not yet available; core owns resolution, do not resend' }
 }
 
 export async function deliverCodexToHost(runDir: string, identity: string, message: string, env: NodeJS.ProcessEnv): Promise<DeliverResult> {
+  let record: AcceptanceRecord | undefined
   try {
     const spec = JSON.parse(readFileSync(servePath(runDir, identity), 'utf8'))
     const token = readFileSync(pidPath(runDir, identity), 'utf8')
     const home = spec.env?.CODEX_HOME || env.CODEX_HOME || (spec.env?.HOME || env.HOME ? join(spec.env?.HOME || env.HOME, '.codex') : undefined)
     if (!home || typeof spec.cwd !== 'string') return { ok: false, error: 'Codex receipt paths unavailable' }
+    const id = randomUUID()
+    // Preserve the routed envelope verbatim (inflight/provenance readers still find it), while
+    // preventing a recurring compact time-only envelope from confirming another day's input.
+    message += `\n[iapeer deliveryId=${id}]`
     const receipt = codexReceiptBaseline(home, spec.cwd, message)
-    return await confirmCodexDelivery(message, {
+    const parent = Number(token.trim().split(/\s/)[0])
+    const children = spawnSync('pgrep', ['-P', String(parent)], { encoding: 'utf8' }).stdout?.trim().split(/\s+/).map(Number).filter(n => n > 0) ?? []
+    record = { id, identity, token, home, cwd: spec.cwd, message, snapshot: receipt.snapshot,
+      nativeProcesses: children.map(pid => ({ pid, token: pidStartToken(pid) })),
+      embeddedNative: Array.isArray(spec.argv) && spec.argv.includes('--no-daemon'),
+      createdAt: Date.now(), updatedAt: Date.now(), writerPid: process.pid, writerToken: pidStartToken(process.pid), status: 'sending' }
+    // If durable custody cannot be written, abort BEFORE any paste. Thereafter an exception is
+    // unknown, never a retryable refusal. Recovery reconciles even a crash during send.
+    writeAcceptance(runDir, record)
+    const result = await confirmCodexDelivery(message, {
       ...receipt,
       state: () => captureHostState(runDir, identity),
       send: () => deliverToHost(runDir, identity, message),
@@ -144,5 +173,14 @@ export async function deliverCodexToHost(runDir: string, identity: string, messa
       sameHost: () => { try { return readFileSync(pidPath(runDir, identity), 'utf8') === token } catch { return false } },
       attached: () => existsSync(join(runDir, `${identity}.attached`)),
     })
-  } catch (e) { return { ok: false, error: `Codex acceptance check failed: ${String(e)}` } }
+    record.status = result.acceptance === 'pending' ? 'pending' : result.ok ? 'delivered' : 'rejected'
+    record.managed = result.acceptance === 'pending'
+    record.reason = result.error; record.updatedAt = Date.now()
+    writeAcceptance(runDir, record)
+    return { ...result, deliveryId: record.id }
+  } catch (e) {
+    // The write-ahead record is enough for restart recovery even if its final update failed.
+    if (record && existsSync(join(runDir, 'acceptance', `${record.id}.json`))) return { ok: true, acceptance: 'pending', deliveryId: record.id, error: `Codex acceptance pending: ${String(e)}` }
+    return { ok: false, error: `Codex acceptance check failed before send: ${String(e)}` }
+  }
 }

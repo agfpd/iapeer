@@ -91,7 +91,9 @@ export function codexSessionCwd(file: string): string | null {
     const entry = JSON.parse(firstLine) as { type?: unknown; payload?: { cwd?: unknown } }
     if (entry.type === 'session_meta' && typeof entry.payload?.cwd === 'string') cwd = entry.payload.cwd
   } catch {
-    cwd = null
+    // A rollout is visible before its first (potentially large) JSON line has finished writing.
+    // A parse failure is not a definitive negative and must not poison receipt discovery forever.
+    return null
   }
   codexCwdCache.set(file, cwd)
   return cwd

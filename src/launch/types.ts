@@ -489,6 +489,8 @@ export interface LaunchResult {
   identity: string
   process_address: string
   reason?: string
+  acceptance?: 'pending'
+  deliveryId?: string
   /** Set iff the bring-up failed FAST on an unrecognized boot modal (waitHostReady fail-fast). */
   bootModal?: { content: string; option1: string }
 }

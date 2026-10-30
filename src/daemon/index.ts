@@ -278,6 +278,8 @@ export async function callTool(
       // depth at accept time — a stuck queue is visible.
       queued: sent.ok && sent.value.queued ? 'true' : undefined,
       qkind: sent.ok ? sent.value.queuedBy : undefined,
+      acceptance: sent.ok ? sent.value.acceptance : undefined,
+      deliveryId: sent.ok ? sent.value.deliveryId : undefined,
       qd: sent.ok ? sent.value.queueDepth : undefined,
       ms: Date.now() - t0,
       len: input.message.length,

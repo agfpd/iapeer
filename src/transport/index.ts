@@ -336,6 +336,11 @@ export interface WarmDeliverSeam {
 // through the SINGLE daemon process; a rare CLI in-process `iapeer send` is a separate process this chain
 // does not span (fully hermetic serialization would live in the supervisor as a per-session transaction).
 const deliverTails = new Map<string, Promise<unknown>>()
+export type WarmReceipt = void | Pick<DeliverResult, 'acceptance' | 'deliveryId'>
+function acceptanceResult(receipt: WarmReceipt): Pick<RouteResult, 'queued' | 'queuedBy' | 'acceptance' | 'deliveryId'> {
+  return receipt?.acceptance === 'pending'
+    ? { queued: true, queuedBy: 'acceptance', acceptance: 'pending', deliveryId: receipt.deliveryId } : {}
+}
 
 export async function deliverWarm(
   target: DeliveryTarget,
@@ -343,7 +348,7 @@ export async function deliverWarm(
   cwd?: string,
   seam: WarmDeliverSeam = {},
   env: NodeJS.ProcessEnv = process.env,
-): Promise<Result<void>> {
+): Promise<Result<WarmReceipt>> {
   // Envelope-compaction F: an AGENT target (claude/codex — an LLM reads the text)
   // receives the compact presentation; a bridge target (telegram/notifier/…)
   // receives the WIRE form its parser expects. Rendered BEFORE deliverViaHost so
@@ -382,7 +387,7 @@ async function deliverViaHost(
   cwd: string | undefined,
   seam: WarmDeliverSeam,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<Result<void>> {
+): Promise<Result<WarmReceipt>> {
   const adapter = getAdapter(target.runtime)
   // STRUCTURAL runtime (opencode): no pty paste at all — the adapter's deliver acknowledges only once
   // THIS message is persisted natively (docs/20), so its ack IS the message-specific landed-confirm.
@@ -416,7 +421,7 @@ async function deliverViaHost(
   // delivery-level confirm (parity with the legacy tmux router C-j path).
   if (adapter.kind === 'router') return ok(undefined)
   // Codex's shared cold/warm host leaf already required native acceptance, not a socket ACK.
-  if (adapter.deliveryConfirm === 'host-receipt') return ok(undefined)
+  if (adapter.deliveryConfirm === 'host-receipt') return ok({ acceptance: sent.acceptance, deliveryId: sent.deliveryId })
   // 'socket-ack' TUI runtimes (codex): the input queue is DURABLE — a mid-turn submit is HELD and
   // processed at the next turn boundary, however long that is (verified live 2026-06-25: an 80s turn
   // still ingested + replied; the send false-FAILed at the 8s grace, the message was NOT lost). codex
@@ -1105,6 +1110,7 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
 
 /** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
 export interface InflightNote {
+  pendingDeliveryId?: string
   acceptedAtMs?: number
   /** Caller explicitly selected the receiving runtime (not the registry's then-default). */
   explicitRuntime?: true
@@ -1404,7 +1410,9 @@ export interface RouteResult {
    *  task queue; `composer` is the daemon's in-memory busy-human-composer queue.
    *  Both surface as `queued:true`, but only `composer` means "not yet delivered
    *  and may still fail with an explicit sender notification". */
-  queuedBy?: 'ephemeral' | 'composer'
+  queuedBy?: 'ephemeral' | 'composer' | 'acceptance'
+  acceptance?: 'pending'
+  deliveryId?: string
   /** Queue depth right after the enqueue (observability; only with queued). */
   queueDepth?: number
   /** The bytes reached the live session but its acceptance record did not appear within the confirm
@@ -1443,6 +1451,8 @@ export interface WakeOutcome {
    *  envelope via the live path. undefined → assumed delivered (legacy impls keep
    *  their prior behavior; the in-repo wakeOrSpawn always sets it explicitly). */
   taskDelivered?: boolean
+  acceptance?: 'pending'
+  deliveryId?: string
 }
 export type WakeFn = (req: WakeRequest) => Promise<WakeOutcome>
 
@@ -1572,7 +1582,7 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   }
 }
 
-type InflightInfo = { coreNotice?: boolean; acceptedAtMs?: number; sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean; explicitRuntime?: true }
+type InflightInfo = { pendingDeliveryId?: string; coreNotice?: boolean; acceptedAtMs?: number; sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean; explicitRuntime?: true }
 
 /** Best-effort inflight record (OC07) — only for agent (tui) endpoints. */
 function noteInflight(
@@ -1587,6 +1597,7 @@ function noteInflight(
     if (getAdapter(target.runtime).kind !== 'tui') return
     deps.noteInflight({
       acceptedAtMs: info.acceptedAtMs,
+      pendingDeliveryId: info.pendingDeliveryId,
       sentAt: info.sentAt,
       identity: target.address,
       personality: target.personality,
@@ -1638,7 +1649,7 @@ export interface ComposerDeliveryQueueOptions {
   sessionAlive?: (job: ComposerQueuedDelivery) => boolean
   /** Delivery sink. Production default is the HOST-AWARE deliverWarm (tmux target → deliverViaTmux
    *  verbatim, hosted target → the supervisor socket). May be async. */
-  deliver?: (target: DeliveryTarget, envelope: string, cwd?: string) => Result<void> | Promise<Result<void>>
+  deliver?: (target: DeliveryTarget, envelope: string, cwd?: string) => Result<WarmReceipt> | Promise<Result<WarmReceipt>>
   notifyFailed: (job: ComposerQueuedDelivery, reason: string) => void | Promise<void>
   noteLiveTopic?: (identity: string, topic: string) => void
   /** В7 — stamp a confirmed queued delivery (same seam as RouteDeps.noteDelivered). */
@@ -1779,7 +1790,7 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
       // failure the exactly-once contract forbids). The head stayed queued during the composer poll-wait
       // above (still undelivered → failAll correctly fails it); it leaves the queue only at this commit.
       q.shift()
-      let delivered: Result<void>
+      let delivered: Result<WarmReceipt>
       try {
         delivered = await deliver(job.target, job.envelope, job.peer.cwd)
       } catch (e) {
@@ -1797,7 +1808,8 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         } catch {
           /* best-effort */
         }
-        if (job.inflight) noteInflight({ noteInflight: opts.noteInflight }, job.target, job.peer.cwd, job.inflight, opts.env ?? process.env)
+        if (job.inflight) noteInflight({ noteInflight: opts.noteInflight }, job.target, job.peer.cwd,
+          { ...job.inflight, pendingDeliveryId: delivered.value?.acceptance === 'pending' ? delivered.value.deliveryId : undefined }, opts.env ?? process.env)
         try {
           opts.onDelivered?.(job.caller)
         } catch {
@@ -2095,13 +2107,15 @@ async function routeSendInner(
     if (!delivered.ok) return delivered
     noteTopic(deps, target.value.address, topic)
     noteDelivered(deps, target.value.address) // В7 — floor the idle proxy so this delivery isn't reaped away
-    noteInflight(deps, target.value, peer.cwd, { ...inflightInfo, unconfirmed }, env)
+    noteInflight(deps, target.value, peer.cwd, { ...inflightInfo, unconfirmed,
+      pendingDeliveryId: delivered.value?.acceptance === 'pending' ? delivered.value.deliveryId : undefined }, env)
     return ok({
       ok: true,
       delivered_to: { personality: target.value.personality, runtime: target.value.runtime },
       woke: false,
       ts: sentAt,
       ...(unconfirmed ? { unconfirmed: true as const } : {}),
+      ...acceptanceResult(delivered.value),
     })
   }
 
@@ -2129,12 +2143,14 @@ async function routeSendInner(
       const delivered = await deliverWarm(revived.value, envelope, peer.cwd, {}, env)
       if (delivered.ok) {
         noteTopic(deps, revived.value.address, topic)
-        noteInflight(deps, revived.value, peer.cwd, inflightInfo, env)
+        noteInflight(deps, revived.value, peer.cwd, { ...inflightInfo,
+          pendingDeliveryId: delivered.value?.acceptance === 'pending' ? delivered.value.deliveryId : undefined }, env)
         return ok({
           ok: true,
           delivered_to: { personality: revived.value.personality, runtime: revived.value.runtime },
           woke: false,
           ts: sentAt,
+          ...acceptanceResult(delivered.value),
         })
       }
       // resolved but the deliver didn't land (session still settling) → keep polling
@@ -2176,20 +2192,24 @@ async function routeSendInner(
     const delivered = await deliverWarm(live.value, envelope, peer.cwd, {}, env)
     if (!delivered.ok) return delivered
     noteTopic(deps, live.value.address, topic)
-    noteInflight(deps, live.value, peer.cwd, inflightInfo, env)
+    noteInflight(deps, live.value, peer.cwd, { ...inflightInfo,
+      pendingDeliveryId: delivered.value?.acceptance === 'pending' ? delivered.value.deliveryId : undefined }, env)
     return ok({
       ok: true,
       delivered_to: { personality: live.value.personality, runtime: live.value.runtime },
       woke: false, // honest: this sender's envelope went the LIVE path, not a boot
       ts: sentAt,
+      ...acceptanceResult(delivered.value),
     })
   }
   // The envelope was delivered as the boot first-message during wake.
-  noteInflight(deps, live.value, peer.cwd, inflightInfo, env)
+  noteInflight(deps, live.value, peer.cwd, { ...inflightInfo,
+    pendingDeliveryId: woke.acceptance === 'pending' ? woke.deliveryId : undefined }, env)
   return ok({
     ok: true,
     delivered_to: { personality: live.value.personality, runtime: live.value.runtime },
     woke: true,
     ts: sentAt,
+    ...acceptanceResult(woke),
   })
 }

@@ -1032,6 +1032,8 @@ export interface WakeResult {
    *  deliver the envelope itself via the live path, or the second sender's
    *  message is silently lost behind a false ok (contract forbids silent loss). */
   taskDelivered?: boolean
+  acceptance?: 'pending'
+  deliveryId?: string
   pending?: boolean
 }
 
@@ -1406,7 +1408,8 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     if (!mode.resume) resetTopics(cfg, identity)
     addTopic(cfg, identity, args.topic?.trim() ?? '')
     trimDeaths(cfg, identity, cfg.crashLoopWindowSecs, Date.now())
-    return { status: 'READY', woke: true, runtime, process_address: identity, taskDelivered: true }
+    return { status: 'READY', woke: true, runtime, process_address: identity, taskDelivered: true,
+      ...(result.acceptance ? { acceptance: result.acceptance, deliveryId: result.deliveryId } : {}) }
   }
 
   try {

@@ -14,6 +14,8 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSy
 import { join } from 'node:path'
 
 export interface InflightEntry {
+  /** A separate durable acceptance reconciler owns the unknown paste; this ledger never replays it. */
+  pendingDeliveryId?: string
   explicitRuntime?: true
   id: string
   /** Epoch ms of the confirmed delivery. */
@@ -88,6 +90,7 @@ export function readInflight(stateDir: string, identity: string): InflightEntry[
 }
 
 export interface InflightSweepDeps {
+  acceptance?: (id: string) => string | undefined
   /** Hosting token of a session that ENDED ITSELF (self-fresh) — its started entries are settled, not
    *  reported interrupted. Absent → none. */
   selfEndedToken?: string | null
@@ -130,12 +133,18 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
   const finished = new Set<string>()
   const sessionKey = (e: InflightEntry) => e.sessionToken ?? '∅'
   for (const e of entries) {
+    if (e.pendingDeliveryId && !['delivered', 'failed', 'rejected'].includes(deps.acceptance?.(e.pendingDeliveryId) ?? '')) continue
     if (safe(deps.completed, e, false) || (!deps.completed && safe(deps.processed, e, false))) {
       finished.add(e.id)
       finishedUpTo.set(sessionKey(e), Math.max(finishedUpTo.get(sessionKey(e)) ?? -Infinity, e.ts))
     }
   }
   for (const e of entries) {
+    if (e.pendingDeliveryId) {
+      const status = deps.acceptance?.(e.pendingDeliveryId)
+      if (status === 'failed' || status === 'rejected') continue // reconciler owns fallback
+      if (status !== 'delivered') { keep.push(e); continue }
+    }
     if (finished.has(e.id) || e.ts < (finishedUpTo.get(sessionKey(e)) ?? -Infinity)) continue
     const done = safe(deps.processed, e, false)
     if (done) {
@@ -143,6 +152,13 @@ export function sweepInflight(stateDir: string, identity: string, deps: Inflight
       // may have happened — never redelivered, the sender is told).
       if (current !== null && current === e.sessionToken) keep.push(e)
       else if (deps.selfEndedToken && e.sessionToken === deps.selfEndedToken) continue // the peer ended it itself
+      else interrupted.push(e)
+      continue
+    }
+    // Codex native acceptance forbids replay, even if the receiving turn never answered. A
+    // pending paste is owned above; after acceptance, death means interrupted work, not a retry.
+    if (e.runtime === 'codex') {
+      if (current !== null && current === e.sessionToken) keep.push(e)
       else interrupted.push(e)
       continue
     }

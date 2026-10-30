@@ -112,6 +112,13 @@ describe('readFirstLine — bounded first-line read (V3: no full-file read for l
 })
 
 describe('codexSessionCwd — parses + memoizes session cwd', () => {
+  test('a partial session_meta never poisons the cwd cache while the first line grows', () => {
+    const full = JSON.stringify({ type: 'session_meta', payload: { cwd: '/growing', instructions: 'x'.repeat(80000) } }) + '\n'
+    const f = tmpFile(full.slice(0, 100))
+    expect(codexSessionCwd(f)).toBeNull()
+    writeFileSync(f, full)
+    expect(codexSessionCwd(f)).toBe('/growing')
+  })
   test('reads session_meta cwd; non-session_meta / no-cwd → null', () => {
     const f = tmpFile(JSON.stringify({ type: 'session_meta', payload: { cwd: '/Users/macmini/Peers/boris' } }) + '\n')
     expect(codexSessionCwd(f)).toBe('/Users/macmini/Peers/boris')
