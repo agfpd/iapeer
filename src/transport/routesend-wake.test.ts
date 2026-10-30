@@ -19,6 +19,7 @@ import { join } from 'path'
 import { hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
 import { ok } from '../core/errors.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
+import { systemCaller } from '../identity/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
 import { hostRunDir } from '../launch/ptyHost.ts'
 
@@ -74,6 +75,7 @@ beforeAll(() => {
         { personality: TARGET, runtime: 'telegram', runtimes: ['telegram'], description: '', intelligence: 'artificial', cwd: root },
         { personality: TUI_TARGET, runtime: 'codex', runtimes: ['codex'], description: '', intelligence: 'artificial', cwd: root },
         { personality: MULTI_TARGET, default_runtime: 'codex', runtimes: ['codex', 'claude'], description: '', intelligence: 'artificial', cwd: root },
+        { personality: 'router-origin', default_runtime: 'codex', runtimes: ['codex', 'notifier'], description: '', intelligence: 'artificial', cwd: root },
       ],
     }),
   )
@@ -83,6 +85,31 @@ afterAll(() => {
   if (prevRoot === undefined) delete process.env.IAPEER_ROOT
   else process.env.IAPEER_ROOT = prevRoot
   rmSync(root, { recursive: true, force: true })
+})
+
+test('core status follows current agent default and suppresses launch-seed; explicit work keeps its runtime', async () => {
+  for (const coreNotice of [true, false]) {
+    let req: Parameters<WakeFn>[0] | undefined
+    await routeSend(systemCaller(), { personality: MULTI_TARGET, runtime: 'claude', message: 'core status' }, {
+      coreNotice, wake: async r => { req = r; return { status: 'FAILED', woke: false, reason: 'test-only' } },
+    })
+    expect(req?.runtime).toBe(coreNotice ? 'codex' : 'claude')
+    expect(req?.suppressInitialPrompt).toBe(true)
+  }
+  let req: Parameters<WakeFn>[0] | undefined
+  await routeSend(caller, { personality: MULTI_TARGET, runtime: 'claude', message: 'explicit task' }, {
+    wake: async r => { req = r; return { status: 'FAILED', woke: false, reason: 'test-only' } },
+  })
+  expect(req?.runtime).toBe('claude')
+  expect(req?.suppressInitialPrompt).toBeUndefined()
+})
+
+test('core status preserves router return channels rather than substituting an agent runtime', async () => {
+  let req: Parameters<WakeFn>[0] | undefined
+  await routeSend(systemCaller(), { personality: 'router-origin', runtime: 'notifier', message: 'status' }, {
+    coreNotice: true, wake: async r => { req = r; return { status: 'FAILED', woke: false, reason: 'test-only' } },
+  })
+  expect(req?.runtime).toBe('notifier')
 })
 
 // default_runtime is the routing selector, not merely a wake fallback. This is

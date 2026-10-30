@@ -441,7 +441,10 @@ Artifacts (rollout, injector, config): `docs/internals/forensics/model-limit-202
 ## 9. Limit-resume — a peer stopped by a limit continues by itself after the reset
 
 **Invariant.** A peer whose turn was stopped by an exhausted model limit that STATED its reset
-continues after that reset without a human. Incident 18.10.2026: the fleet hit the claude
+continues after that reset without a human **on its current default agent endpoint, or on a
+non-default endpoint with recorded explicit runtime-addressed work still unfinished at the
+limit event**. A runtime named in an old park is not itself authorization to start another
+working thread. Incident 18.10.2026: the fleet hit the claude
 five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reaped the sessions at
 ~05:55, nothing woke them after the reset and every peer stood still until a manual ping at 10:12.
 
@@ -455,7 +458,17 @@ five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reape
    traced once per park): the context stays warm and the runtime's own continuation can fire.
    Bounded: a reset more than 6 h after the event (a weekly wall) is not held — the session is
    reaped normally and step 3 resumes it.
-3. **Nudge.** After `resetsAt + 3 min`, if the session made no progress since the event (claude: a
+3. **Nudge.** Re-read the current registry before acting. A non-default park needs delivery
+   provenance: a non-core caller explicitly addressed that runtime, the delivery belongs to the
+   limited hosting, and its turn had not completed before the limit. This provenance is captured
+   in the park from `<identity>.work-origin.json`; `<identity>.last-hosting` invalidates it even
+   after a replacement hosting has already reaped. Pre-upgrade parks without it are unverified,
+   not implicitly authorized. A stale
+   or unverified non-default park is cleared with `outcome=skipped-nondefault` and a status notice
+   to the peer's current default (so unfinished work is not silently forgotten); its continuation
+   is never transplanted to another runtime. A replacement hosting invalidates the old authorization.
+   Failure of that status notice is retried with the same bounded backoff as a nudge.
+   After `resetsAt + 3 min`, if the session made no progress since the event (claude: a
    real, non-`<synthetic>` assistant line after it; codex: a `task_complete` with a message whose
    `completed_at` is after it), the core delivers ONE continuation message through the normal
    route — wake-on-miss RESUMES a reaped session: the nudge carries an explicit continue-work
@@ -471,8 +484,25 @@ five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reape
    same identity now signs the OC07 interrupted/undelivered notices and the composer-queue
    failure notices.
 
+**Core-event routing.** Autonomous continuation and maintenance are distinct from explicitly
+addressed work. Core status notices (inflight interrupted/undelivered, composer failure, skipped
+limit continuation) target the current default agent endpoint, not a sender's historical agent
+runtime. Human/router return channels remain exact. An explicitly configured boot-alert runtime
+remains an operator-selected destination. Explicit task redelivery and ephemeral FIFO drains
+retain their addressed endpoints; `/new`, `self-fresh`, attach and other operator commands retain
+their existing semantics. Capability maintenance on a non-default endpoint waits for its next
+ordinary launch instead of creating a new working turn.
+Delayed composer/FIFO core status notices re-check the current default at drain: a status whose
+endpoint ceased to be default fails with a durable delivery/lifecycle record instead of starting
+a secondary turn. Explicit queued work is unaffected.
+
+Core-originated message wakes never prepend `initial_prompt`, even when a soft-reload or crash
+requires a fresh session. Their first turn contains only the core event; a launch-seed such as
+“tell the owner I started” is not permission for autonomous contact with a human. This does not
+change the seed semantics of explicit message/operator wakes.
+
 Every decision is in `lifecycle.log`: `ev=limit-park`, `outcome=limit-hold`, `ev=limit-resume
-outcome=nudged|progressed|retry|gave-up|dropped`.
+outcome=nudged|progressed|retry|gave-up|dropped|skipped-nondefault`.
 
 **Not covered:** opencode (its `session.error` states no reset) and a claude per-model bucket
 (no reset stated) — both still raise the notice; the owner resumes by hand.

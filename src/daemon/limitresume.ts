@@ -24,6 +24,8 @@ import {
 } from '../lifecycle/limitpark.ts'
 import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
+import { findPeer, readPeersIndex } from '../registry/index.ts'
+import { workOriginStillValid } from '../lifecycle/workOrigin.ts'
 
 
 export function limitResumeMessage(p: LimitPark): string {
@@ -63,6 +65,28 @@ export async function processLimitResumes(
   for (const p of listLimitParks(cfg)) {
     if (now < p.resetsAtMs + LIMIT_RESUME_GRACE_MS) continue
     if (p.lastAttemptMs && now - p.lastAttemptMs < LIMIT_RETRY_BACKOFF_MS) continue
+    const peer = findPeer(readPeersIndex({ env }), p.personality)
+    if (!peer) {
+      clearLimitPark(cfg, p.identity)
+      log({ identity: p.identity, outcome: 'dropped', err: 'peer no longer registered' })
+      continue
+    }
+    if (p.runtime !== peer.runtime && !workOriginStillValid(cfg, p.workOrigin, p.identity, p.eventAtMs, env)) {
+      // Do not transplant another runtime's work. Tell the working personality what was skipped,
+      // without instructing it to resume that work or contact a human.
+      let notified = 'false'
+      try {
+        const n = await send(systemCaller(), { personality: p.personality,
+          message: `[iapeer] Automatic continuation of ${p.identity} was skipped: it is not the current default and has no valid unfinished explicitly addressed work provenance. Its limit event was ${new Date(p.eventAtMs).toISOString()}. The old work may need review; this status notice does not request a reply or a message to the owner.`,
+          topic: 'limit-resume-skipped' }, { ...routeDeps, env, coreNotice: true })
+        notified = String(n.ok)
+      } catch { /* logged below; never wake the unverified endpoint */ }
+      const attempts = (p.attempts ?? 0) + 1
+      if (notified === 'true' || attempts >= LIMIT_MAX_NUDGE_ATTEMPTS) clearLimitPark(cfg, p.identity)
+      else updateLimitPark(cfg, { ...p, attempts, lastAttemptMs: now })
+      log({ identity: p.identity, outcome: 'skipped-nondefault', default_runtime: peer.runtime, notified, attempts })
+      continue
+    }
     if (seam.justReaped?.has(p.identity)) continue
     let moved = false
     try {
@@ -80,7 +104,7 @@ export async function processLimitResumes(
       // Topic = the stopped session's own thread (captured at park time), so the topic set still
       // follows the work; the RESUME itself rides the explicit continue-work intent, not the topic.
       const topic = p.topic || 'limit-resume'
-      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic }, { ...routeDeps, wakeContinueWork: true })
+      const r = await send(systemCaller(), { personality: p.personality, runtime: p.runtime, message: limitResumeMessage(p), topic }, { ...routeDeps, env, wakeContinueWork: true })
       if (r.ok) {
         clearLimitPark(cfg, p.identity)
         log({ identity: p.identity, outcome: 'nudged', woke: String(r.value.woke), resets: new Date(p.resetsAtMs).toISOString() })

@@ -77,6 +77,7 @@ import { NoticeBoard } from './notices.ts'
 import { startMuteWatch } from './mutewatch.ts'
 import { processLimitResumes } from './limitresume.ts'
 import { recordLimitPark } from '../lifecycle/limitpark.ts'
+import { noteWorkOrigin, workOriginAtLimit } from '../lifecycle/workOrigin.ts'
 import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
 import { startVoiceSweep } from '../voice/sweep.ts'
@@ -143,7 +144,7 @@ const DAEMON_MAIN_PATH = fileURLToPath(import.meta.url)
 export function makeWakeFn(cfg: LifecycleConfig, env: NodeJS.ProcessEnv): WakeFn {
   return (req: WakeRequest): Promise<WakeOutcome> =>
     wakeOrSpawn(
-      { personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task, ...(req.continueWork ? { continueWork: true } : {}) },
+      { personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task, ...(req.continueWork ? { continueWork: true } : {}), ...(req.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) },
       { cfg, env },
     )
 }
@@ -218,13 +219,13 @@ export function makeEphemeralRouteDeps(
 ): EphemeralRouteDeps {
   return {
     isEphemeral: cwd => isEphemeralPeer(cwd),
-    deliver: async ({ peer, envelope, topic, runtime, sentAt }) => {
+    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
       const identity = buildProcessAddress(rt.value, peer.personality)
       let depth: number
       try {
-        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic })
+        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
       } catch (e) {
         return err(
           `ephemeral enqueue failed for "${peer.personality}": ${e instanceof Error ? e.message : String(e)}; message NOT queued`,
@@ -268,7 +269,11 @@ function queuedFailureMessage(job: ComposerQueuedDelivery, reason: string): stri
 
 /** The transport hook → the inflight ledger. Best-effort by contract (transport swallows throws). */
 export function makeNoteInflight(cfg: LifecycleConfig): (note: InflightNote) => void {
-  return note => recordInflight(cfg.stateDir, { ...note, id: randomBytes(6).toString('hex'), ts: Date.now() })
+  return note => {
+    const entry = { ...note, id: randomBytes(6).toString('hex'), ts: Date.now() }
+    recordInflight(cfg.stateDir, entry)
+    noteWorkOrigin(cfg, entry)
+  }
 }
 
 /** The redelivery prefix — the model sees it is a re-send, not a duplicate of something it answered. */
@@ -317,7 +322,7 @@ export async function processInflight(
    *  peer named `iapeer`, and a host without it skipped the notice silently (linus 18.10). */
   const notifySender = async (e: InflightEntry, message: string): Promise<string> => {
     try {
-      const n = await send(systemCaller(), { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, routeDeps)
+      const n = await send(systemCaller(), { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, { ...routeDeps, coreNotice: true })
       return String(n.ok)
     } catch {
       return 'false'
@@ -423,10 +428,12 @@ export function makeComposerQueueRouteDeps(cfg: LifecycleConfig, env: NodeJS.Pro
         // drops the remaining notifications (the very silent loss failAll exists to prevent) and stalls
         // the restart. An ephemeral sender still gets a DURABLE-queued notification (ephemeral dep); a
         // non-ephemeral offline sender degrades to a delivery.log record (best-effort) — never a wake.
-        { ephemeral, noteLiveTopic },
+        { env, ephemeral, noteLiveTopic, coreNotice: true },
       )
       appendDeliveryEvent(cfg.eventLogDir, {
         ev: 'composer-queue-failed-notify',
+        target: job.target.address,
+        reason: reason.slice(0, 300),
         caller: sender.address,
         to: job.caller.personality,
         rt: job.caller.runtime,
@@ -533,6 +540,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       const identity = `${d.runtime}-${d.personality}`
       if (d.resetsAtMs === undefined) return
       const fresh = recordLimitPark(cfg, {
+        workOrigin: workOriginAtLimit(cfg, identity, d.atMs, env, d.file),
         identity,
         personality: d.personality,
         runtime: d.runtime,

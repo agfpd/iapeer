@@ -20,17 +20,20 @@ import { limitResumeMessage, processLimitResumes } from '../daemon/limitresume.t
 import { claudeResetsAtMs, parseClaudeTranscript } from '../daemon/mutewatch.ts'
 import { ok, err } from '../core/errors.ts'
 import { SYSTEM_PERSONALITY } from '../core/constants.ts'
+import { upsertPeer } from '../registry/index.ts'
+import { noteHostingGeneration } from './workOrigin.ts'
 
 let root: string
 let laDir: string
 let env: NodeJS.ProcessEnv
 let cfg: LifecycleConfig
-beforeEach(() => {
+beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'iapeer-limitpark-'))
   laDir = mkdtempSync(join(tmpdir(), 'iapeer-limitpark-la-'))
   env = { ...process.env, IAPEER_ROOT: root, IAPEER_LAUNCHAGENTS_DIR: laDir, IAPEER_SOCK_DIR: join(root, 'socks') }
   cfg = loadLifecycleConfig(env)
   mkdirSync(cfg.stateDir, { recursive: true })
+  await upsertPeer({ personality: 'iapeer', runtime: 'claude', runtimes: ['claude', 'codex'], cwd: root, intelligence: 'artificial' }, { env })
 })
 afterEach(() => {
   rmSync(root, { recursive: true, force: true })
@@ -191,6 +194,31 @@ describe('NUDGE — after the reset the core continues the stopped turn, no huma
     recordLimitPark(cfg, park({ identity: 'claude-s', personality: 's' }))
     await processLimitResumes(cfg, env, {}, { send: spy(sent, 'stopped'), progressed: () => false, now: () => t + 10 * 60_000 })
     expect(readLimitPark(cfg, 'claude-s')).toBeNull()
+  })
+  test('legacy/non-default park never nudges its endpoint, even when already live; status follows default', async () => {
+    recordLimitPark(cfg, park({ identity: 'codex-iapeer', runtime: 'codex' }))
+    const sent: Sent[] = []
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ runtime: undefined, topic: 'limit-resume-skipped' })
+    expect(listLimitParks(cfg)).toHaveLength(0)
+  })
+  test('unfinished explicit non-default work resumes on its addressed endpoint, not the default', async () => {
+    noteHostingGeneration(cfg, 'codex-iapeer', 'limited-host')
+    recordLimitPark(cfg, park({ identity: 'codex-iapeer', runtime: 'codex', workOrigin: { sessionToken: 'limited-host', deliveredAtMs: T0 - 1000, caller: { personality: 'pm', runtime: 'claude' } } }))
+    const sent: Sent[] = []
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => RESET + LIMIT_RESUME_GRACE_MS })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ runtime: 'codex', topic: 'limit-resume' })
+  })
+  test('a failed skipped-work status is retried, never replaced by a secondary continuation', async () => {
+    recordLimitPark(cfg, park({ identity: 'codex-iapeer', runtime: 'codex' }))
+    const sent: Sent[] = [], t = RESET + LIMIT_RESUME_GRACE_MS
+    await processLimitResumes(cfg, env, {}, { send: spy(sent, 'fail'), progressed: () => false, now: () => t })
+    expect(listLimitParks(cfg)).toHaveLength(1)
+    await processLimitResumes(cfg, env, {}, { send: spy(sent), progressed: () => false, now: () => t + 6 * 60_000 })
+    expect(listLimitParks(cfg)).toHaveLength(0)
+    expect(sent.every(s => s.runtime === undefined)).toBe(true)
   })
 })
 

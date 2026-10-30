@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import type { LifecycleConfig } from './index.ts'
 import { writeFileAtomic } from '../storage/index.ts'
 import { readSessionSlices } from '../daemon/sessionfiles.ts'
+import type { WorkOrigin } from './workOrigin.ts'
 
 /** Wait this long past the stated reset before nudging: the runtime's own continuation (and a clock
  *  skew between the provider and this host) gets to win first. */
@@ -36,6 +37,8 @@ export const LIMIT_RETRY_BACKOFF_MS = 5 * 60_000
 export const LIMIT_RESOLVE_WINDOW_MS = LIMIT_RESUME_GRACE_MS + LIMIT_MAX_NUDGE_ATTEMPTS * LIMIT_RETRY_BACKOFF_MS + 60_000
 
 export interface LimitPark {
+  /** Proven unfinished, explicitly runtime-addressed work at the limit event. Legacy parks lack it. */
+  workOrigin?: WorkOrigin
   identity: string
   personality: string
   runtime: string

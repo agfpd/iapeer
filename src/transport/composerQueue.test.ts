@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { upsertPeer } from '../registry/index.ts'
 import { ok } from '../core/errors.ts'
 import { getAdapter } from '../launch/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
@@ -47,6 +51,21 @@ function args(envelope = '<iap>hello</iap>'): ComposerQueueTryEnqueueArgs {
 }
 
 describe('createComposerDeliveryQueue', () => {
+  test('a delayed core status does not start work on an endpoint that is no longer default', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'iap-core-composer-'))
+    try {
+      const env = { ...process.env, IAPEER_ROOT: root }
+      await upsertPeer({ personality: 'target', runtime: 'claude', runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd: root }, { env })
+      const failed: string[] = [], delivered: string[] = []
+      const q = createComposerDeliveryQueue({ env, pollMs: 1, shouldQueue: () => true, hasHumanInput: () => false, sessionToken: () => 'host', sessionAlive: () => true,
+        deliver: (_, text) => { delivered.push(text); return ok(undefined) }, notifyFailed: (_, reason) => { failed.push(reason) } })
+      await q.tryEnqueue({ ...args(), inflight: { caller, sentAt: 'now', message: 'status', envelope: '<iap>status</iap>', coreNotice: true } })
+      await sleep(15)
+      expect(delivered).toHaveLength(0)
+      expect(failed[0]).toContain('default runtime changed')
+      await q.failAll?.('test complete')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
   test('queued ack is immediate; drain waits until composer clears, then delivers silently', async () => {
     let held = true
     const delivered: string[] = []

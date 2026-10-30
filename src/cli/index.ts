@@ -1620,7 +1620,7 @@ export interface SendOptions extends CliEnvOptions {
 }
 
 const cliWake: WakeFn = req =>
-  wakeOrSpawn({ personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task })
+  wakeOrSpawn({ personality: req.personality, runtime: req.runtime, topic: req.topic, task: req.task, ...(req.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) })
 
 export async function sendMessage(
   opts: SendOptions,

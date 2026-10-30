@@ -62,6 +62,7 @@ export async function applyReloads(cfg: LifecycleConfig, identity: string, env: 
   }
   if (isStopped(cfg, identity)) { update('pending', 'endpoint is stopped; waiting for its next ordinary launch'); return }
   if (isLaunchdManaged(newest.personality, env)) { update('pending', 'launchd-owned endpoint; waiting for its owning lifecycle to restart it'); return }
+  if (newest.runtime !== peer.runtime) { update('pending', 'non-default endpoint; next ordinary launch will apply the surfaces'); return }
   const recovery = requests.find(r => r.resumeRef)
   if (!alive && !recovery) { update('pending', 'endpoint is asleep; next ordinary launch will apply the surfaces'); return }
   try {
@@ -69,6 +70,7 @@ export async function applyReloads(cfg: LifecycleConfig, identity: string, env: 
       personality: newest.personality,
       runtime: newest.runtime,
       task: '',
+      suppressInitialPrompt: true,
       reloadRequestIds: requests.map(r => r.id),
       ...(alive ? { reload: true } : { reloadResumeRef: recovery!.resumeRef, resume: true }),
       beforeReloadRetire: ref => update('replacing', 'idle hosting fenced; automatic resume replacement is owed', ref),

@@ -15,6 +15,16 @@ beforeEach(async () => {
   await upsertPeer({ personality: 'probe', cwd: root, runtime: 'claude', intelligence: 'artificial' }, { env })
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
+test('non-default maintenance stays pending even for live/recovery endpoints; explicit work can launch normally', async () => {
+  await upsertPeer({ personality: 'probe', cwd: root, runtime: 'codex', intelligence: 'artificial' }, { env })
+  const r = requestReload(cfg, 'probe', 'codex')
+  saveReload(cfg, { ...r, resumeRef: 'old-dialogue' })
+  for (const live of [true, false]) {
+    await applyReloads(cfg, 'codex-probe', env, { alive: () => live, replace: async () => { throw new Error('autonomous secondary work') } })
+    expect(readReload(cfg, r).state).toBe('pending')
+    expect(readReload(cfg, r).detail).toContain('non-default')
+  }
+})
 test('asleep/stopped endpoints stay asleep; their ordinary configuration-reading launch acknowledges the snapshot', async () => {
   const r = requestReload(cfg, 'probe', 'claude')
   await applyReloads(cfg, 'claude-probe', env, { alive: () => false, replace: async () => { throw new Error('must stay asleep') } })

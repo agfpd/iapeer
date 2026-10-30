@@ -13,6 +13,7 @@
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
 import { limitHoldActive } from './limitpark.ts'
+import { noteHostingGeneration } from './workOrigin.ts'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -51,7 +52,7 @@ import {
   type LaunchSpec,
 } from '../launch/index.ts'
 import { composeSystemPrompt, gatherPromptInput } from '../launch/composeSystemPrompt.ts'
-import { clearHostReady, hostRunDir, hostSessionAlive, hostSessionReady, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
+import { clearHostReady, hostRunDir, hostSessionAlive, hostSessionReady, hostSessionToken, hostStartedMs, killPtyHost, listHostedPeers } from '../launch/ptyHost.ts'
 import { sessionAlive as hostDaemonAlive } from '../supervisor/client.ts'
 import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 import { fenceHost } from '../supervisor/reload.ts'
@@ -185,10 +186,11 @@ function sessionStatePath(cfg: LifecycleConfig, identity: string): string {
   return join(cfg.stateDir, `${identity}.session`)
 }
 
-function writeSessionState(cfg: LifecycleConfig, state: SessionState): void {
+function writeSessionState(cfg: LifecycleConfig, state: SessionState, env: NodeJS.ProcessEnv): void {
   mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 })
   try {
     writeFileSync(sessionStatePath(cfg, state.identity), JSON.stringify(state), { mode: 0o600 })
+    noteHostingGeneration(cfg, state.identity, hostSessionToken(state.identity, env, cfg.supervisorRunDir ?? hostRunDir(env)))
   } catch {
     /* best-effort — supervision degrades to liveness scan, never blocks a wake */
   }
@@ -957,14 +959,14 @@ function composePeerPrompt(
  * the task. The seed is read from the local profile best-effort: a profile read error
  * yields no seed and never blocks the wake (the seed is optional).
  */
-export function composeFirstMessage(cwd: string, task: string, fresh: boolean): string {
+export function composeFirstMessage(cwd: string, task: string, fresh: boolean, suppressInitialPrompt = false): string {
   // Envelope-compaction F: the boot first-message enters an LLM context (wake
   // targets are agent runtimes by construction — launchd-held bridges are never
   // woken, H4), so the routed WIRE envelope is rendered into the compact
   // agent-facing presentation here — the boot-side twin of deliverWarm's render.
   // fail-open inside the renderer (non-envelope/empty task passes through as-is).
   const presented = task ? renderEnvelopeForAgent(task) : task
-  if (!fresh) return presented
+  if (!fresh || suppressInitialPrompt) return presented
   let seed: string | undefined
   try {
     seed = readPeerProfile(cwd)?.initial_prompt
@@ -982,6 +984,8 @@ export function composeFirstMessage(cwd: string, task: string, fresh: boolean): 
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface WakeArgs {
+  /** Autonomous core events must not execute the peer's operator-facing launch-seed. */
+  suppressInitialPrompt?: boolean
   personality: string
   runtime?: string
   topic?: string
@@ -1184,7 +1188,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       if (sessionAlive(sock, identity, env)) return { status: 'FAILED', woke: false, runtime, reason: 'never-ready host did not terminate; retry after recovery' }
     }
     if (sessionAlive(sock, identity, env)) {
-      writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
+      writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() }, env)
       // taskDelivered:false — the winning concurrent wake delivered ITS OWN task as
       // the boot first-message; THIS caller's task was not delivered by anything.
       return { status: 'READY', woke: false, runtime, process_address: identity, taskDelivered: false }
@@ -1306,7 +1310,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // opening directive, then the IAP message (with its from-* to reply to). NOT on
     // resume (a resumed session already holds its context). Best-effort read: a
     // profile read hiccup must never block the wake (the seed is optional).
-    const firstMessage = composeFirstMessage(cwd, args.task, fresh)
+    const firstMessage = composeFirstMessage(cwd, args.task, fresh, args.suppressInitialPrompt)
     // A damaged reload request must not block an ordinary wake: the launch reads the current surfaces
     // anyway; the request simply stays pending and visible in `capability list` / lifecycle.log.
     let capabilitySnapshot: ReturnType<typeof pendingReloads> = []
@@ -1352,7 +1356,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       if (sessionAlive(sock, identity, env)) {
         applyConsumed() // a live remnant IS this bring-up's session — its markers are spent
         try {
-          writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
+          writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() }, env)
         } catch { /* keep the original FAILED reason — enroll is best-effort */ }
       } else {
         // В14 — the launch FAILED and left NO live remnant → a genuine boot-crash (broken binary /
@@ -1378,7 +1382,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
     // the only thing that enrolls this session into the activity-aware idle-reap — a
     // failed write leaves it UNSUPERVISED with no TTL backstop, hence the loud WARN.
     try {
-      writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() })
+      writeSessionState(cfg, { identity, runtime, personality: args.personality, cwd, wokeAt: Date.now() }, env)
     } catch (e) {
       process.stderr.write(
         `[iapeer] WARN session-state write failed for ${identity} — session is live but UNSUPERVISED (not enrolled in idle-reap; self-TTL removed): ${e instanceof Error ? e.message : String(e)}\n`,
@@ -1967,6 +1971,11 @@ export async function drainEphemeralQueue(
   if (sessionAlive(sock, identity, env)) return null // one task per session — wait for its reap
   const item = peekEphemeralTask(cfg, identity)
   if (!item) return null
+  if (item.coreNotice && findPeer(readPeersIndex({ env }), personality)?.runtime !== runtime) {
+    appendLifecycleEvent(cfg.eventLogDir, { ev: 'ephemeral-core-notice-skipped', identity, seq: item.seq, reason: 'default runtime changed before drain' }, { env })
+    removeEphemeralTask(cfg, identity, item.seq) // stale STATUS, never an addressed work item
+    return null
+  }
   // Durable drain trace: which item, how deep the queue.
   appendLifecycleEvent(
     cfg.eventLogDir,
@@ -1974,7 +1983,7 @@ export async function drainEphemeralQueue(
     { env },
   )
   const wake = deps.wakeFn ?? wakeOrSpawn
-  const result = await wake({ personality, runtime, topic: item.topic, task: item.task }, { cfg, env })
+  const result = await wake({ personality, runtime, topic: item.topic, task: item.task, ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }, { cfg, env })
   // Remove ONLY when THIS wake actually delivered the task. On the live-session fast
   // path (READY, taskDelivered:false) a CONCURRENT wake delivered ITS OWN task — ours
   // was NOT delivered. Deleting it here would silently drop a queued task (the loss the

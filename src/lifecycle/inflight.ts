@@ -14,6 +14,7 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSy
 import { join } from 'node:path'
 
 export interface InflightEntry {
+  explicitRuntime?: true
   id: string
   /** Epoch ms of the confirmed delivery. */
   ts: number

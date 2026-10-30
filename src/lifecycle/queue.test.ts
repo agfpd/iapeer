@@ -9,6 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawnSync } from 'child_process'
 import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
+import { upsertPeer } from '../registry/index.ts'
 import {
   drainAllEphemeralQueues,
   drainEphemeralQueue,
@@ -41,6 +42,26 @@ function mkCfg(): LifecycleConfig {
     eventLogDir: join(root, 'logs'),
   } as LifecycleConfig
 }
+
+test('queued core events suppress launch-seed; stale core status does not wake an old default endpoint', async () => {
+  const cfg = mkCfg(), root = mkTmp()
+  const env = { ...process.env, IAPEER_ROOT: root, IAPEER_SOCK_DIR: join(root, 's'), IAPEER_LAUNCHAGENTS_DIR: join(root, 'la') }
+  await upsertPeer({ personality: 'w', runtime: 'claude', runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd: root }, { env })
+  const seen: WakeArgs[] = []
+  const wakeFn = async (a: WakeArgs): Promise<WakeResult> => { seen.push(a); return { status: 'READY', woke: true } }
+  enqueueEphemeralTask(cfg, 'claude-w', { task: 'core status', coreNotice: true, suppressInitialPrompt: true })
+  await drainEphemeralQueue(cfg, 'w', 'claude', { env, wakeFn })
+  expect(seen[0]?.suppressInitialPrompt).toBe(true)
+  enqueueEphemeralTask(cfg, 'codex-w', { task: 'stale core status', coreNotice: true, suppressInitialPrompt: true })
+  await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn })
+  expect(seen).toHaveLength(1)
+  expect(ephemeralQueueDepth(cfg, 'codex-w')).toBe(0)
+  // Explicit addressed WORK is not subject to the default gate.
+  enqueueEphemeralTask(cfg, 'codex-w', { task: 'explicit work' })
+  await drainEphemeralQueue(cfg, 'w', 'codex', { env, wakeFn })
+  expect(seen).toHaveLength(2)
+  expect(seen[1]?.runtime).toBe('codex')
+})
 
 describe('ephemeral queue primitives (FIFO)', () => {
   test('enqueue returns depth; peek is non-destructive; remove consumes; strict FIFO', () => {

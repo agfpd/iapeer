@@ -832,6 +832,8 @@ export function transcriptCarriesEnvelope(
 /** The shape transport needs to judge one inflight delivery (a subset of lifecycle's InflightEntry —
  *  transport never imports lifecycle). */
 export interface ProcessedProbe {
+  /** Restrict a provenance probe to the transcript that actually reported the limit. */
+  file?: string
   runtime: string
   personality: string
   cwd: string
@@ -940,7 +942,7 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
     }
     return false
   }
-  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+  for (const path of probe.file ? [probe.file] : compactCandidateFiles(probe.runtime, probe.cwd, env)) {
     let st
     try {
       st = statSync(path)
@@ -991,7 +993,7 @@ function isInterruptMarkerLine(o: { message?: unknown }): boolean {
   return texts.some(t => /^\[Request interrupted by user/.test(t.trim()))
 }
 
-export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env): boolean {
+export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env, beforeMs?: number): boolean {
   const needles = confirmNeedles(probe.rendered)
   if (!needles.length || needles.every(n => !n)) return false
   if (getAdapter(probe.runtime).deliveryConfirm === 'structural') {
@@ -1023,7 +1025,7 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
     }
     return false
   }
-  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+  for (const path of probe.file ? [probe.file] : compactCandidateFiles(probe.runtime, probe.cwd, env)) {
     let st
     try {
       st = statSync(path)
@@ -1031,7 +1033,16 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       continue
     }
     if (st.mtimeMs < probe.ts - 5000) continue
-    const tail = readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES))
+    const rawTail = readFileTailFrom(path, Math.max(0, st.size - PROCESSED_TAIL_BYTES))
+    // Limit provenance asks whether work had finished BEFORE the refusal, not whether the refusal
+    // itself closed the runtime turn. Unknown timestamps cannot prove earlier completion.
+    const tail = beforeMs === undefined ? rawTail : rawTail.split('\n').filter(line => {
+      try {
+        const o = JSON.parse(line)
+        const at = o.payload?.completed_at ? Date.parse(o.payload.completed_at) : Date.parse(o.timestamp)
+        return Number.isFinite(at) && at < beforeMs
+      } catch { return false }
+    }).join('\n')
     if (probe.runtime === 'claude') {
       const semantic = claudeDeliveryState(tail, needles)
       if (semantic) { if (semantic.completed) return true; continue }
@@ -1072,7 +1083,7 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
   if (getAdapter(probe.runtime).deliveryConfirm === 'structural') return true
   const needles = confirmNeedles(probe.rendered)
   if (!needles.length || needles.every(n => !n)) return false
-  for (const path of compactCandidateFiles(probe.runtime, probe.cwd, env)) {
+  for (const path of probe.file ? [probe.file] : compactCandidateFiles(probe.runtime, probe.cwd, env)) {
     let st
     try {
       st = statSync(path)
@@ -1094,6 +1105,9 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
 
 /** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
 export interface InflightNote {
+  acceptedAtMs?: number
+  /** Caller explicitly selected the receiving runtime (not the registry's then-default). */
+  explicitRuntime?: true
   sentAt: string
   identity: string
   personality: string
@@ -1410,6 +1424,8 @@ export interface WakeRequest {
   task: string
   /** Explicit "continue THIS work" intent (core-originated limit-resume only). */
   continueWork?: boolean
+  /** Core event wakes carry their own task; a launch-seed is not permission to contact the owner. */
+  suppressInitialPrompt?: boolean
 }
 export interface WakeOutcome {
   status: 'READY' | 'FAILED'
@@ -1441,6 +1457,8 @@ export interface EphemeralRouteDeps {
    *  ack. MUST NOT block on the wake (the sender's content-level answer is the
    *  worker's own reply, not this transport ack). */
   deliver: (args: {
+    suppressInitialPrompt?: boolean
+    coreNotice?: boolean
     peer: PeerRecord
     envelope: string
     topic?: string
@@ -1485,6 +1503,8 @@ export interface ComposerQueueRouteDeps {
 }
 
 export interface RouteDeps {
+  /** Internal core status notice: agent destinations follow their CURRENT default; router origins stay exact. */
+  coreNotice?: boolean
   /** A wake triggered by THIS send carries the "continue THIS work" intent (resume an idle-reaped
    *  session regardless of topic). Set only by the core's limit-resume pass — never from a request. */
   wakeContinueWork?: boolean
@@ -1551,7 +1571,7 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   }
 }
 
-type InflightInfo = { sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean }
+type InflightInfo = { coreNotice?: boolean; acceptedAtMs?: number; sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean; explicitRuntime?: true }
 
 /** Best-effort inflight record (OC07) — only for agent (tui) endpoints. */
 function noteInflight(
@@ -1565,6 +1585,7 @@ function noteInflight(
   try {
     if (getAdapter(target.runtime).kind !== 'tui') return
     deps.noteInflight({
+      acceptedAtMs: info.acceptedAtMs,
       sentAt: info.sentAt,
       identity: target.address,
       personality: target.personality,
@@ -1573,6 +1594,7 @@ function noteInflight(
       sessionToken: hostSessionToken(target.address, env),
       caller: { personality: info.caller.personality, runtime: info.caller.runtime },
       message: info.message,
+      ...(info.explicitRuntime ? { explicitRuntime: true as const } : {}),
       ...(info.topic ? { topic: info.topic } : {}),
       ...(info.attachments?.length ? { attachments: info.attachments } : {}),
       rendered: renderEnvelopeForAgent(info.envelope),
@@ -1736,6 +1758,11 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
       if (!sessionAliveFn(job)) {
         q.shift()
         await notifyFailed(job, `queued delivery to ${job.target.personality} (${job.target.runtime}) failed: target session vanished or was replaced before delivery`)
+        continue
+      }
+      if (job.inflight?.coreNotice && findPeer(readPeersIndex({ env }), job.target.personality)?.runtime !== job.target.runtime) {
+        q.shift()
+        await notifyFailed(job, 'queued core status became stale: the peer default runtime changed before delivery')
         continue
       }
 
@@ -1931,7 +1958,8 @@ async function routeSendInner(
   input: SendToPeerInput,
   deps: RouteDeps = {},
 ): Promise<Result<RouteResult>> {
-  const { personality, runtime, message } = input
+  const { personality, message } = input
+  let runtime = input.runtime
   const topic = truncateTopic(input.topic)
   const attachmentsResult = validateAttachments(input.attachments ?? [])
   if (!attachmentsResult.ok) return attachmentsResult
@@ -1958,6 +1986,7 @@ async function routeSendInner(
   if (!peer) {
     return err(`peer "${personality}" is not in the iapeer peers index; message NOT delivered`)
   }
+  if (deps.coreNotice && peer.intelligence === 'artificial' && getAdapter(runtime ?? peer.runtime).kind === 'tui') runtime = peer.runtime
 
   // Origin-guard (docs/18) — an agent's PRESUMED REPLY to a human (the human's latest
   // inbound to this agent is unanswered) must target the channel the human wrote from.
@@ -2024,7 +2053,8 @@ async function routeSendInner(
     message,
   })
   // OC07 — what the inflight ledger needs to redeliver this message if the receiving session dies first.
-  const inflightInfo = { sentAt, caller, message, topic, attachments: spooled.value.paths, envelope }
+  const inflightInfo = { coreNotice: deps.coreNotice, acceptedAtMs: Date.now(), sentAt, caller, message, topic, attachments: spooled.value.paths, envelope,
+    ...(runtime && caller.runtime !== 'core' ? { explicitRuntime: true as const } : {}) }
 
   // M3 wake_policy:"ephemeral" — an ephemeral target is NEVER injected into a live
   // session and never woken synchronously here: the delivery is ALWAYS enqueued
@@ -2034,7 +2064,8 @@ async function routeSendInner(
   // would deadlock its own die-after-reply reap on a forever-non-empty queue).
   if (deps.ephemeral?.isEphemeral(peer.cwd)) {
     if (caller.personality === peer.personality) return err('cannot send to self')
-    return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt })
+    return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt,
+      ...(caller.runtime === 'core' ? { suppressInitialPrompt: true } : {}), ...(deps.coreNotice ? { coreNotice: true } : {}) })
   }
 
   const target = resolvePeerDeliveryTarget(personality, runtime, peer, env)
@@ -2111,7 +2142,8 @@ async function routeSendInner(
         `(restart window outlasted the grace?) — message NOT delivered; retry`,
     )
   }
-  const woke = await deps.wake({ personality, runtime, topic, task: envelope, ...(deps.wakeContinueWork ? { continueWork: true } : {}) })
+  const woke = await deps.wake({ personality, runtime, topic, task: envelope, ...(deps.wakeContinueWork ? { continueWork: true } : {}),
+    ...(caller.runtime === 'core' ? { suppressInitialPrompt: true } : {}) })
   if (woke.status === 'FAILED') {
     // C1 — a durably STOPPED peer is a deliberate halt, not a transient miss:
     // surface the explicit "stopped" reason (no "offline and wake failed" wrapping).

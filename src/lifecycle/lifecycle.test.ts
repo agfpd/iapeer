@@ -489,6 +489,14 @@ describe('C2 initial_prompt (composeFirstMessage)', () => {
       rmSync(cwd, { recursive: true, force: true })
     }
   })
+  test('autonomous fresh (soft-reload/crash) carries only its event, not a human-facing launch-seed', () => {
+    const cwd = withProfile('Tell the owner I started.')
+    try {
+      expect(composeFirstMessage(cwd, 'CORE_STATUS', true, true)).toBe('CORE_STATUS')
+      expect(composeFirstMessage(cwd, '', true, true)).toBe('')
+      expect(composeFirstMessage(cwd, 'EXPLICIT_TASK', true)).toContain('Tell the owner I started.')
+    } finally { rmSync(cwd, { recursive: true, force: true }) }
+  })
 
   test('fresh wake, NO initial_prompt → task only', () => {
     const cwd = withProfile(undefined)

@@ -28,6 +28,7 @@ const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { ret
 const files = (dir: string): string[] => existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]) : []
 const wire: any[] = [], results: any[] = []
 let toolAction: 'sleep' | 'self-fresh' | undefined
+let contactSent = false
 let useSurface = false, busyNext = false, busyReceived = false, releaseBusy: (() => void) | undefined
 const surface = surfaceProofServer()
 const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
@@ -36,6 +37,8 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   if (path.includes('count_tokens')) return Response.json({ input_tokens: 100 })
   if (!path.endsWith('/messages') && !path.endsWith('/responses')) return Response.json({})
   const id = wire.length
+  const contact = process.argv.includes('--limit-resume-only') && !contactSent && JSON.stringify(body).includes('AUTONOMOUS_CONTACT_PROOF')
+  if (contact) contactSent = true
   // Telemetry/title requests are not the instructed native turn. Consume an
   // action only when its test input reaches a tool-capable inference request.
   const toolCapable = JSON.stringify(body.tools ?? []).includes(runtime === 'claude' ? '"Bash"' : '"exec_command"')
@@ -48,11 +51,11 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
   if (surfaceTool) useSurface = false
   const action = toolAction && toolCapable && JSON.stringify(body).includes(toolAction === 'sleep' ? 'INTERRUPT_OPERATOR_PROOF' : 'SELF_FRESH_OPERATOR_PROOF') ? toolAction : undefined
   if (action) toolAction = undefined
-  const command = action === 'sleep' ? `echo $$ > ${JSON.stringify(join(root, 'sleep.pid'))}; exec /bin/sleep 180` : `${JSON.stringify(bin)} self-fresh`
+  const command = contact ? `${JSON.stringify(bin)} send sender --runtime notifier --from ${runtime}-${personality} --message AUTONOMOUS_CONTACT_PROOF` : action === 'sleep' ? `echo $$ > ${JSON.stringify(join(root, 'sleep.pid'))}; exec /bin/sleep 180` : `${JSON.stringify(bin)} self-fresh`
   const text = `PROBE_REPLY_${id}`
   const event = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
   if (runtime === 'codex') {
-    const item = surfaceTool ? { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: surfaceTool, ...(surfaceNamespace ? { namespace: surfaceNamespace } : {}), arguments: '{}' } : action
+    const item = surfaceTool ? { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: surfaceTool, ...(surfaceNamespace ? { namespace: surfaceNamespace } : {}), arguments: '{}' } : action || contact
       ? { type: 'function_call', id: `fc_${id}`, call_id: `call_${id}`, name: 'exec_command', arguments: JSON.stringify({ cmd: command, yield_time_ms: 10000 }) }
       : { type: 'message', id: `msg_${id}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] }
     const response = { id: `resp_${id}`, object: 'response', status: 'completed', output: [item], usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } }
@@ -62,10 +65,10 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
       event('response.completed', { type: 'response.completed', response }),
     ].join(''), { headers: { 'content-type': 'text/event-stream' } })
   }
-  const content = surfaceTool ? [{ type: 'tool_use' as const, id: `toolu_${id}`, name: surfaceTool, input: {} }] : action
+  const content = surfaceTool ? [{ type: 'tool_use' as const, id: `toolu_${id}`, name: surfaceTool, input: {} }] : action || contact
     ? [{ type: 'tool_use' as const, id: `toolu_${id}`, name: 'Bash', input: { command, timeout: 300000, description: 'Isolated native operator proof' } }]
     : [{ type: 'text' as const, text }]
-  const message = { id: `msg_${id}`, type: 'message', role: 'assistant', model: body.model ?? 'claude-sonnet-4-5', content, stop_reason: action || surfaceTool ? 'tool_use' : 'end_turn', stop_sequence: null, usage: { input_tokens: 100, output_tokens: 10 } }
+  const message = { id: `msg_${id}`, type: 'message', role: 'assistant', model: body.model ?? 'claude-sonnet-4-5', content, stop_reason: action || surfaceTool || contact ? 'tool_use' : 'end_turn', stop_sequence: null, usage: { input_tokens: 100, output_tokens: 10 } }
   if (!body.stream) return Response.json(message)
   let stream = event('message_start', { type: 'message_start', message: { ...message, content: [], stop_reason: null } })
   for (const [index, block] of content.entries()) {
@@ -83,7 +86,7 @@ const env: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, '.codex'), TERM: 'xterm-256color',
   IAPEER_ROOT: iap, IAPEER_LAUNCHAGENTS_DIR: join(root, 'LaunchAgents'), IAPEER_SOCK_DIR: join(root, 's'),
   IAPEER_PORT: String(port), IAPEER_DAEMON_SOCKET: join(root, 'router.sock'),
-  IAPEER_CLAUDE_BIN: native, IAPEER_CODEX_BIN: native, IAPEER_IDLE_SECS: '15',
+  IAPEER_CLAUDE_BIN: process.argv.includes('--limit-resume-only') ? join(hostHome, '.local/bin/claude') : native, IAPEER_CODEX_BIN: process.argv.includes('--limit-resume-only') ? '/opt/homebrew/bin/codex' : native, IAPEER_IDLE_SECS: '15',
   ANTHROPIC_BASE_URL: provider.url.origin, ANTHROPIC_AUTH_TOKEN: 'synthetic-local-only', ANTHROPIC_MODEL: 'claude-sonnet-4-5',
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', HOMEBREW_NO_AUTO_UPDATE: '1',
 }
@@ -140,8 +143,58 @@ try {
   if (sink.state !== 'started') throw new Error(JSON.stringify(sink))
   const sentinelPid = readPidFile(runDir, 'notifier-sender')!.pid
   await must('version')
+  if (process.argv.includes('--limit-resume-only')) {
+    // No real human exists in this root: the launch-seed's contact goes to the local cat sink.
+    const { readPeerProfile } = await import('../src/identity/index.ts')
+    const { loadLifecycleConfig, setFreshNext } = await import('../src/lifecycle/index.ts')
+    const { recordLimitPark, LIMIT_RESUME_GRACE_MS } = await import('../src/lifecycle/limitpark.ts')
+    const kind = arg('--park-kind') ?? 'stale'
+    const defaultRuntime = kind === 'default' ? runtime : runtime === 'codex' ? 'claude' : 'codex'
+    writePeerProfileAtomic(cwd, { ...readPeerProfile(cwd)!, runtime: defaultRuntime, runtimes: ['claude', 'codex'], ...(kind === 'explicit' ? {} : { initial_prompt: 'Send AUTONOMOUS_CONTACT_PROOF to sender using the local iapeer CLI.' }) })
+    await upsertPeer({ personality, runtime: defaultRuntime, runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd }, { env })
+    const { reindexFromLocals } = await import('../src/identity/profileStandard.ts')
+    await reindexFromLocals({ env })
+    const cfg = loadLifecycleConfig(env), eventAtMs = Date.now() - 10 * 60_000
+    if (kind !== 'explicit') {
+      recordLimitPark(cfg, { identity: identity(), personality, runtime, resetsAtMs: Date.now() - LIMIT_RESUME_GRACE_MS - 1000, eventAtMs })
+      setFreshNext(cfg, identity())
+    }
+  }
   daemon = Bun.spawn([arg('--legacy-bin') ?? bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
   await until('installed daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
+  if (process.argv.includes('--limit-resume-only')) {
+    const kind = arg('--park-kind') ?? 'stale'
+    let original: string | undefined
+    if (kind === 'explicit') {
+      busyNext = true
+      await send('RELOAD_BUSY_PROOF')
+      await until('explicit non-default native turn in progress', () => busyReceived)
+      original = nativeSession()
+      const { loadLifecycleConfig, removeSessionState, setIdleReaped } = await import('../src/lifecycle/index.ts')
+      const { recordLimitPark, LIMIT_RESUME_GRACE_MS } = await import('../src/lifecycle/limitpark.ts')
+      const { workOriginAtLimit } = await import('../src/lifecycle/workOrigin.ts')
+      const cfg = loadLifecycleConfig(env), eventAtMs = Date.now()
+      const file = transcripts().find(p => read(p).includes('RELOAD_BUSY_PROOF'))
+      const workOrigin = workOriginAtLimit(cfg, identity(), eventAtMs, env, file)
+      if (!workOrigin || !original) throw new Error('explicit native work has no proven origin/session')
+      record('explicit-work-origin', { workOrigin, original, file })
+      await must('supervisor', 'kill', identity(), '--run-dir', runDir)
+      releaseBusy?.(); removeSessionState(cfg, identity()); setIdleReaped(cfg, identity())
+      recordLimitPark(cfg, { identity: identity(), personality, runtime, resetsAtMs: Date.now() - LIMIT_RESUME_GRACE_MS - 1000, eventAtMs, workOrigin, file, sessionId: original, topic: 'operator-proof' })
+    }
+    await until('limit resume decision', () => read(join(iap, 'logs/iapeer/lifecycle.log')).includes('ev=limit-resume'), 100000)
+    await Bun.sleep(10000)
+    const lifecycleLog = read(join(iap, 'logs/iapeer/lifecycle.log'))
+    const defaultRuntime = JSON.parse(read(join(iap, 'peers-profiles.json'))).peers.find((p: any) => p.personality === personality)?.default_runtime
+    const turnCompleted = completedAfter(Date.now() - 20000)
+    record('limit-resume-observed', { kind, defaultRuntime, original, session: nativeSession(), turnCompleted, hosting: hosting(), contactSent, outbound: read(join(root, 'sender.log')), lifecycle: lifecycleLog })
+    if (process.argv.includes('--expect-fixed')) {
+      if (contactSent) throw new Error('autonomous wake ran the contact launch-seed')
+      if (kind === 'stale' ? hosting().pid || !lifecycleLog.includes('outcome=skipped-nondefault') : !lifecycleLog.includes('outcome=nudged') || !turnCompleted) throw new Error('wrong continuation outcome')
+      if (kind === 'explicit' && nativeSession() !== original) throw new Error('explicit task did not resume its original native session')
+    }
+    success = true
+  } else {
   await turn('FIRST_OPERATOR_PROOF')
   const original = nativeSession()
   if (!original) throw new Error('native session ID missing')
@@ -277,6 +330,7 @@ try {
   if (read(join(iap, 'peers-profiles.json')).includes(personality) || !existsSync(cwd)) throw new Error('remove left registry entry or deleted user data')
   record('remove-live-guard-force-keeps-cwd', {})
   success = true
+  }
   }
 } finally {
   releaseBusy?.()
