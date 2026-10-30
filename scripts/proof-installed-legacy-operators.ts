@@ -294,7 +294,7 @@ try {
     process.kill(stoppedChild, 'SIGKILL'); stoppedChild = undefined
     await until('dead native unresolved and both notices accepted', () => {
       const r = acceptance()
-      return r?.status === 'unresolved' && r.callerNotice === 'sent' && r.lastAlertAt !== undefined
+      return r?.status === 'unresolved' && r.callerNotice === 'sent' && r.operatorNotice === 'sent'
     }, 150000)
     const nativeUsers = records().filter(r => r.type === 'response_item' && r.payload?.role === 'user' && JSON.stringify(r.payload).includes(marker))
     const log = read(join(iap, 'logs/iapeer/delivery.log')), sender = read(join(root, 'sender.log'))
