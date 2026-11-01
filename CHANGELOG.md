@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Operator delivery resolutions release caller custody.** A closed case sends one final
+  caller-only acceptance event with `operatorResolved: true` and the audited `resolution`.
+  Its durable notification checkpoint is separate from native acceptance notices. Consumers
+  release custody without fallback, including manual `failed`; closed pre-upgrade cases are
+  notified after restart. Operator channels remain silent.
+
 - **Codex startup drafts are not delivery-ready.** Cold and warm sends reject provisional
   composers before paste; slow `account/read` cannot swallow a message before bootstrap fails.
   Proven pre-paste refusals retain synchronous sender fallback; ambiguous post-paste cases still

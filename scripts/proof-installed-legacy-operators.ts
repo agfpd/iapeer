@@ -323,10 +323,14 @@ try {
     record('death-after-paste-unresolved', { sent, acceptance: r, nativeUsers, log, sender })
     if (r?.status !== 'unresolved' || nativeUsers.length || log.includes('ev=inflight-redeliver') || !sender.includes(r.id)) throw new Error('death was failed/replayed or escalation missing')
     await must('delivery', 'resolve', r.id, 'dismissed', '--reason', 'isolated proof operator handled')
+    const { readResolutionNotice } = await import('../src/launch/acceptanceStore.ts')
+    await until('operator closure callback durably delivered to caller', () => readResolutionNotice(runDir, r.id)?.status === 'sent')
+    await Bun.sleep(500)
     // Simulate a due reminder after restart without waiting 30 minutes.
     const path = join(runDir, 'acceptance', r.id + '.json')
     writeFileSync(path, JSON.stringify({ ...JSON.parse(read(path)), lastAlertAt: 0 }))
     const before = read(join(root, 'sender.log'))
+    if (!before.includes('"operatorResolved":true')) throw new Error('caller did not receive operator resolution')
     await Bun.sleep(5000)
     const { readAcceptance } = await import('../src/launch/acceptanceStore.ts')
     if (readAcceptance(runDir, r.id)?.status !== 'dismissed' || read(join(root, 'sender.log')) !== before) throw new Error('operator case reopened/notified')
@@ -504,7 +508,7 @@ try {
   surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
-    for (const p of files(root).filter(p => (/(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) || p.includes('/acceptance/') && /\.(?:json|resolved)$/.test(p)) && !p.includes('/node_modules/'))) {
+    for (const p of files(root).filter(p => (/(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) || p.includes('/acceptance/') && /\.(?:json|resolved|resolution-notice)$/.test(p)) && !p.includes('/node_modules/'))) {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))

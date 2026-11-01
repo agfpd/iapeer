@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { codexReceiptBaseline } from '../launch/codexDelivery.ts'
-import { writeAcceptance, readAcceptance, resolveAcceptance, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
+import { writeAcceptance, readAcceptance, resolveAcceptance, readResolutionNotice, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
 import { processAcceptance } from './acceptance.ts'
 import { ok } from '../core/errors.ts'
 import { NoticeBoard } from './notices.ts'
@@ -176,7 +176,13 @@ for (const outcome of ['delivered', 'failed', 'dismissed'] as const) {
       writeAcceptance(x.opts.runDir, x.r) // concurrent stale acceptance writer cannot reopen
       appendFileSync(x.p, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: x.r.message }] } }) + '\n')
       await processAcceptance({ ...x.opts, now: 90_000_000, processAlive: () => true })
-      expect(x.read().status).toBe(outcome); expect(x.sent).toHaveLength(2)
+      expect(x.read().status).toBe(outcome); expect(x.sent).toHaveLength(3)
+      const event = JSON.parse(x.sent[2].message)
+      expect(x.sent[2].personality).toBe('sender')
+      expect(event).toMatchObject({ outcome, operatorResolved: true, resolution })
+      expect(readResolutionNotice(x.opts.runDir, x.r.id)?.status).toBe('sent')
+      await processAcceptance({ ...x.opts, now: 91_000_000, processAlive: () => true })
+      expect(x.sent).toHaveLength(3)
       expect(x.read().resolution).toEqual(resolution)
     } finally { rmSync(x.root, { recursive: true, force: true }) }
   })
@@ -190,5 +196,39 @@ test('prepared checkpoint proves no paste after writer death; live preparation i
     await processAcceptance({ ...x.opts, now: 140_000, processAlive: () => false })
     expect(x.read().status).toBe('failed')
     expect(x.sent.map(r => JSON.parse(r.message).outcome)).toEqual(['failed', 'failed'])
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+
+test('resolution callback retries explicit refusal; an ambiguous claim is visible, never blindly repeated', async () => {
+  const x = fixture()
+  try {
+    resolveAcceptance(x.opts.runDir, x.r.id, { outcome: 'failed', reason: 'manual recovery done', actor: 'operator', at: 140_000 })
+    await processAcceptance({ ...x.opts, send: async () => ({ ok: false, error: { code: 'OFFLINE', message: 'offline' } }) as never, now: 150_000 })
+    expect(readResolutionNotice(x.opts.runDir, x.r.id)).toBeUndefined()
+    await processAcceptance({ ...x.opts, send: async () => { throw new Error('connection lost after submit') }, now: 160_000 })
+    expect(readResolutionNotice(x.opts.runDir, x.r.id)?.status).toBe('sending')
+    const raised: any[] = []
+    await processAcceptance({ ...x.opts, now: 170_000, board: { raise: (n: any) => raised.push(n) } as never })
+    expect(x.sent).toHaveLength(0)
+    expect(raised[0].errorType).toContain('resolution-notification-uncertain')
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+
+test('old closed cases notify caller on startup; oversized callback retains resolution metadata', async () => {
+  const x = fixture()
+  try {
+    x.r.message = x.r.message.replace('do once', 'x'.repeat(16000))
+    x.r.callerNotice = 'sent'; x.r.operatorNotice = 'sent'
+    writeAcceptance(x.opts.runDir, x.r)
+    const resolution = { outcome: 'dismissed' as const, reason: 'handled', actor: 'operator', at: 140_000 }
+    resolveAcceptance(x.opts.runDir, x.r.id, resolution)
+    await processAcceptance({ ...x.opts, now: 150_000 })
+    expect(x.sent).toHaveLength(1)
+    expect(x.sent[0].personality).toBe('sender')
+    expect(JSON.parse(x.sent[0].message)).toMatchObject({ outcome: 'dismissed', operatorResolved: true, resolution })
+    expect(x.sent[0].attachments).toHaveLength(1)
+    writeAcceptance(x.opts.runDir, x.r) // stale primary writer cannot repeat the callback
+    await processAcceptance({ ...x.opts, now: 160_000 })
+    expect(x.sent).toHaveLength(1)
   } finally { rmSync(x.root, { recursive: true, force: true }) }
 })

@@ -44,7 +44,9 @@ export const acceptancePath = (runDir: string, id: string) => {
   return join(acceptanceDir(runDir), `${id}.json`)
 }
 export function writeAcceptance(runDir: string, record: AcceptanceRecord): void {
-  const path = acceptancePath(runDir, record.id)
+  writeDurableJson(runDir, acceptancePath(runDir, record.id), record)
+}
+function writeDurableJson(runDir: string, path: string, record: unknown): void {
   mkdirSync(acceptanceDir(runDir), { recursive: true, mode: 0o700 })
   const tmp = `${path}.${randomUUID()}.tmp`
   let fd: number | undefined
@@ -59,6 +61,19 @@ export function writeAcceptance(runDir: string, record: AcceptanceRecord): void 
     if (fd !== undefined) closeSync(fd)
     rmSync(tmp, { force: true })
   }
+}
+export interface ResolutionNotice { status: 'sending' | 'sent'; at: number }
+export function readResolutionNotice(runDir: string, id: string): ResolutionNotice | undefined {
+  try {
+    const r = JSON.parse(readFileSync(acceptancePath(runDir, id) + '.resolution-notice', 'utf8'))
+    if (!['sending', 'sent'].includes(r.status)) throw new Error('invalid resolution notification checkpoint')
+    return r
+  } catch (e: any) { if (e.code === 'ENOENT') return undefined; throw e }
+}
+export function writeResolutionNotice(runDir: string, id: string, notice: ResolutionNotice | undefined): void {
+  const path = acceptancePath(runDir, id) + '.resolution-notice'
+  if (notice) writeDurableJson(runDir, path, notice)
+  else rmSync(path, { force: true }) // only after an explicit pre-custody refusal
 }
 export function readAcceptance(runDir: string, id: string): AcceptanceRecord | null {
   try {
