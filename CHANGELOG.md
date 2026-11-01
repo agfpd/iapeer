@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex startup drafts are not delivery-ready.** Cold and warm sends reject provisional
+  composers before paste; slow `account/read` cannot swallow a message before bootstrap fails.
+  Proven pre-paste refusals retain synchronous sender fallback; ambiguous post-paste cases still
+  never authorize replay. Prepared/sending checkpoints distinguish the two boundaries.
+- **Acceptance cases have an operator closure and no periodic message reminders.**
+  `delivery list` and `delivery resolve <id> delivered|failed|dismissed --reason <text>` expose and
+  close cases durably, with audit metadata. Immutable resolution checkpoints override concurrent
+  writers and prevent inflight replay; unresolved alerts are once per outcome rather than every
+  30 minutes. Manual closure does not itself resend a task or invoke fallback.
+
 - **An operator `stop` of an always-on channel is durable.** It used to be a bare `launchctl bootout`:
   the plist stayed loaded-able and not disabled, so the host monitor read it as
   `gone-without-disable` and an SRE peer re-bootstrapped it (26.10.2026: a stopped voicetalk channel

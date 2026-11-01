@@ -1,11 +1,17 @@
 // Durable custody for an input that may already have crossed the native submit boundary.
 // This store is deliberately NOT a retry queue: no consumer is allowed to paste its payload.
-import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 export interface ReceiptSnapshot { offsets: [string, number][]; historyOffset: number }
-export type AcceptanceStatus = 'sending' | 'pending' | 'delivered' | 'failed' | 'unresolved' | 'rejected'
+export type AcceptanceStatus = 'prepared' | 'sending' | 'pending' | 'delivered' | 'failed' | 'unresolved' | 'rejected' | 'dismissed'
+export interface AcceptanceResolution {
+  outcome: 'delivered' | 'failed' | 'dismissed'
+  reason: string
+  actor: string
+  at: number
+}
 export interface AcceptanceRecord {
   id: string
   identity: string
@@ -30,6 +36,7 @@ export interface AcceptanceRecord {
   lastAlertAt?: number
   callerNotice?: 'sending' | 'sent'
   operatorNotice?: 'sending' | 'sent'
+  resolution?: AcceptanceResolution
 }
 export const acceptanceDir = (runDir: string) => join(runDir, 'acceptance')
 export const acceptancePath = (runDir: string, id: string) => {
@@ -54,7 +61,32 @@ export function writeAcceptance(runDir: string, record: AcceptanceRecord): void 
   }
 }
 export function readAcceptance(runDir: string, id: string): AcceptanceRecord | null {
-  try { return JSON.parse(readFileSync(acceptancePath(runDir, id), 'utf8')) } catch { return null }
+  try {
+    const r: AcceptanceRecord = JSON.parse(readFileSync(acceptancePath(runDir, id), 'utf8'))
+    try {
+      r.resolution = JSON.parse(readFileSync(acceptancePath(runDir, id) + '.resolved', 'utf8'))
+      r.status = r.resolution!.outcome
+    } catch (e: any) { if (e.code !== 'ENOENT') throw e }
+    return r
+  } catch { return null }
+}
+/** Independent immutable checkpoint: a concurrent writer can never reopen a closed case. */
+export function resolveAcceptance(runDir: string, id: string, resolution: AcceptanceResolution): AcceptanceRecord {
+  if (!['delivered', 'failed', 'dismissed'].includes(resolution.outcome) || !resolution.reason.trim()) throw new Error('outcome and nonempty reason required')
+  const r = readAcceptance(runDir, id)
+  if (!r) throw new Error(`delivery not found: ${id}`)
+  if (r.resolution) {
+    if (r.resolution.outcome !== resolution.outcome || r.resolution.reason !== resolution.reason) throw new Error('delivery already resolved differently')
+    return r
+  }
+  const path = acceptancePath(runDir, id) + '.resolved', tmp = `${path}.${randomUUID()}.tmp`
+  let fd: number | undefined
+  try {
+    fd = openSync(tmp, 'wx', 0o600); writeFileSync(fd, JSON.stringify(resolution) + '\n'); fsyncSync(fd); closeSync(fd); fd = undefined
+    linkSync(tmp, path) // exclusive publish; no partial record and no overwriting another operator
+    fd = openSync(acceptanceDir(runDir), 'r'); fsyncSync(fd); closeSync(fd); fd = undefined
+  } finally { if (fd !== undefined) closeSync(fd); rmSync(tmp, { force: true }) }
+  return readAcceptance(runDir, id)!
 }
 export function listAcceptance(runDir: string): AcceptanceRecord[] {
   let names: string[]

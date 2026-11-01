@@ -15,6 +15,8 @@ const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
 export interface DeliverResult {
   ok: boolean
+  /** Proven refusal before any paste-frame write. Absence means uncertainty. */
+  inputStarted?: false
   error?: string
   /** Durable custody, NOT native acceptance. Never retry the paste on this result. */
   acceptance?: 'pending'
@@ -50,7 +52,8 @@ export async function deliverToHost(
   opts: { submitDelayMs?: number } = {},
 ): Promise<DeliverResult> {
   const sock = sockPath(runDir, session)
-  if (!existsSync(sock)) return { ok: false, error: `no supervisor socket for "${session}"` }
+  if (!existsSync(sock)) return { ok: false, inputStarted: false, error: `no supervisor socket for "${session}"` }
+  let inputStarted = false
   let conn: Awaited<ReturnType<typeof Bun.connect>> | undefined
   let writer: BackpressureWriter | undefined
   const ack = inputAcks(existsSync(inputProtocolPath(runDir, session)))
@@ -74,6 +77,7 @@ export async function deliverToHost(
     const c = conn
     writer = new BackpressureWriter(b => c.write(b))
     const paste = `\x1b[200~${message}\x1b[201~` // bracketed paste — atomic, like paste-buffer -p
+    inputStarted = true
     if (!writer.send(frame(FRAME_DATA, Buffer.from(paste, 'utf8')))) return { ok: false, error: 'socket dead during paste' }
     if (!(await drainFully(writer))) return { ok: false, error: 'paste not fully flushed (socket stalled)' }
     const pasteError = await ack.wait()
@@ -86,7 +90,7 @@ export async function deliverToHost(
     await sleep(50) // let the CR land before we close the connection
     return { ok: true }
   } catch (e) {
-    return { ok: false, error: `deliver to host failed: ${(e as Error).message}` }
+    return { ok: false, ...(!inputStarted ? { inputStarted: false as const } : {}), error: `deliver to host failed: ${(e as Error).message}` }
   } finally {
     try {
       conn?.end()

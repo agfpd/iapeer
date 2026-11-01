@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { pidStartToken } from '../supervisor/paths.ts'
 import { writeAcceptance, type AcceptanceRecord, type ReceiptSnapshot } from './acceptanceStore.ts'
 import { spawnSync } from 'node:child_process'
+import { codexInputReady } from './codexReadiness.ts'
 
 export interface CodexInputState { text: string; composerOccupied: boolean }
 const normalize = (s: string) => s.replace(/\r/g, '').trim()
@@ -93,6 +94,7 @@ function ownDraft(state: CodexInputState, message: string): boolean {
 }
 
 export interface CodexDeliveryIO {
+  beforeSend?: () => void
   state: () => Promise<CodexInputState | null>
   send: () => Promise<DeliverResult>
   resubmit: () => Promise<DeliverResult>
@@ -110,8 +112,11 @@ export async function confirmCodexDelivery(message: string, io: CodexDeliveryIO)
   const before = await io.state()
   const blocked = before && codexDeliveryBlocker(before.text)
   if (blocked) return { ok: false, error: blocked }
+  if (!before || !codexInputReady(before.text)) return { ok: false, error: 'Codex input surface not ready before paste' }
   if (!io.sameHost()) return { ok: false, error: 'Codex hosting changed before delivery' }
+  io.beforeSend?.()
   const sent = await io.send()
+  if (!sent.ok && sent.inputStarted === false) return sent
   if (!sent.ok) return { ok: true, acceptance: 'pending', error: sent.error }
   const deadline = now() + (io.graceMs ?? 4000)
   let retryAt = now() + 1500
@@ -154,12 +159,13 @@ export async function deliverCodexToHost(runDir: string, identity: string, messa
     record = { id, identity, token, home, cwd: spec.cwd, message, snapshot: receipt.snapshot,
       nativeProcesses: children.map(pid => ({ pid, token: pidStartToken(pid) })),
       embeddedNative: Array.isArray(spec.argv) && spec.argv.includes('--no-daemon'),
-      createdAt: Date.now(), updatedAt: Date.now(), writerPid: process.pid, writerToken: pidStartToken(process.pid), status: 'sending' }
+      createdAt: Date.now(), updatedAt: Date.now(), writerPid: process.pid, writerToken: pidStartToken(process.pid), status: 'prepared' }
     // If durable custody cannot be written, abort BEFORE any paste. Thereafter an exception is
     // unknown, never a retryable refusal. Recovery reconciles even a crash during send.
     writeAcceptance(runDir, record)
     const result = await confirmCodexDelivery(message, {
       ...receipt,
+      beforeSend: () => { record!.status = 'sending'; writeAcceptance(runDir, record!) },
       state: () => captureHostState(runDir, identity),
       send: () => deliverToHost(runDir, identity, message),
       resubmit: () => sendControlToHost(runDir, identity, [Buffer.from('\r')]),
@@ -174,6 +180,11 @@ export async function deliverCodexToHost(runDir: string, identity: string, messa
   } catch (e) {
     // The write-ahead record is enough for restart recovery even if its final update failed.
     if (record && existsSync(join(runDir, 'acceptance', `${record.id}.json`))) {
+      if (record.status === 'prepared') {
+        record.status = 'rejected'; record.managed = false; record.reason = `failed before paste: ${String(e)}`
+        try { writeAcceptance(runDir, record) } catch { /* durable prepared checkpoint proves no paste */ }
+        return { ok: false, deliveryId: record.id, error: record.reason }
+      }
       record.status = 'pending'; record.managed = true
       record.reason = `Codex acceptance pending: ${String(e)}`; record.updatedAt = Date.now()
       try { writeAcceptance(runDir, record) } catch { /* sending recovery escalates even if this writer stays alive */ }

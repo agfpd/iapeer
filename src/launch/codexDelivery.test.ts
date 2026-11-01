@@ -21,6 +21,20 @@ function io(): CodexDeliveryIO & { sends: number; retries: number } {
 }
 
 describe('Codex acceptance, not socket ACK', () => {
+  test('bootstrap and unreadable pre-paste state refuse without entering the send boundary', async () => {
+    for (const text of [null, 'Resuming session…\n› Ask Codex to do anything', 'loading\n› Ask Codex to do anything', 'Error: account/read failed during TUI bootstrap: timed out']) {
+      const x = io(); x.state = async () => text === null ? null : { text, composerOccupied: false }
+      let boundary = false; x.beforeSend = () => { boundary = true }
+      expect((await confirmCodexDelivery(message, x)).ok).toBe(false)
+      expect(x.sends).toBe(0); expect(boundary).toBe(false)
+    }
+  })
+  test('proven connect failure is failed, but partial send stays pending', async () => {
+    const x = io(); x.send = async () => ({ ok: false, inputStarted: false, error: 'connect refused' })
+    expect((await confirmCodexDelivery(message, x)).ok).toBe(false)
+    x.send = async () => ({ ok: false, error: 'partial write' })
+    expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending')
+  })
   test('long paste stuck in composer transfers durable custody, not a retryable failure', async () => {
     const x = io(), r = await confirmCodexDelivery(message, x)
     expect(r.ok).toBe(true); expect(r.acceptance).toBe('pending')
@@ -66,9 +80,9 @@ describe('Codex acceptance, not socket ACK', () => {
     expect(x.sends).toBe(1); expect(x.retries).toBe(0)
   })
   test('unknown modal / absent snapshot / attached human never receives blind submit retries', async () => {
-    for (const state of [null, { text: 'Select a dangerous action', composerOccupied: false }]) {
+    for (const state of [{ text: 'Select a dangerous action', composerOccupied: false }]) {
       const x = io(); x.state = async () => state
-      expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending'); expect(x.retries).toBe(0)
+      expect((await confirmCodexDelivery(message, x)).ok).toBe(false); expect(x.retries).toBe(0); expect(x.sends).toBe(0)
     }
     const x = io(); x.attached = () => true
     expect((await confirmCodexDelivery(message, x)).acceptance).toBe('pending'); expect(x.retries).toBe(0)

@@ -27,6 +27,21 @@ function clock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
 }
 
 describe('boot fail-fast on an unrecognized modal', () => {
+  test('Codex placeholder composer stays blocked throughout slow bootstrap, then accepts readiness or death', async () => {
+    const loading = '>_ OpenAI Codex (v0.164.0)\nResuming session…\n› Ask Codex to do anything'
+    expect(codexAdapter.isInputReady(loading)).toBe(false)
+    expect(codexAdapter.isInputReady('loading\n› Ask Codex to do anything')).toBe(false)
+    expect(codexAdapter.isInputReady('>_ OpenAI Codex (v0.164.0)\n/path/to/peer\n› Ask Codex to do anything')).toBe(false)
+    expect(codexAdapter.isInputReady('>_ OpenAI Codex (v0.164.0)\n/path/to/peer\n› Ask Codex to do anything\n? for shortcuts')).toBe(true)
+    const c = clock()
+    const result = await waitHostReady({ identity: 'codex-x', logDir: '/nonexistent', adapter: codexAdapter, bootDeadlineSecs: 60 },
+      c.sleep, c.now, { alive: () => true, viewport: async () => c.now() < 20_000 ? loading : '› Ask Codex to do anything' })
+    expect(result.ready).toBe(true); expect(c.now()).toBe(20_000)
+    const d = clock()
+    const dead = await waitHostReady({ identity: 'codex-x', logDir: '/nonexistent', adapter: codexAdapter, bootDeadlineSecs: 60 },
+      d.sleep, d.now, { alive: () => d.now() < 20_000, viewport: async () => loading })
+    expect(dead.ready).toBe(false); expect(d.now()).toBe(20_000)
+  })
   test('genericBootPrompt: select footer + cursor row → modal; a booting composer is not', () => {
     expect(genericBootPrompt(UNKNOWN)?.option1).toBe('Keep going')
     expect(genericBootPrompt('✻ Resuming… (esc to interrupt)\n❯ Try "edit <file>"')).toBeNull()

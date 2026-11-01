@@ -40,6 +40,7 @@
 // .sh:94-122 runs the currency gate OUTSIDE the tmux launch; it is not ported.)
 
 import { homedir } from 'os'
+import { codexInputReady } from '../codexReadiness.ts'
 import { join } from 'path'
 import { existsSync, readdirSync, realpathSync, statSync } from 'fs'
 import { preSeedCodexHooksTrust } from '../codexHooksTrust.ts'
@@ -364,18 +365,15 @@ export const codexAdapter: RuntimeAdapter = {
    * the splash box off the top of capture-pane — the predicate then stays false
    * for the entire boot deadline while the composer sits ready, failing the wake
    * `never-became-ready` and LOSING the triggering message (observed live with a
-   * tall replayed history). A replayed history message also
-   * renders with a leading '› ', so this can fire a frame before the composer
-   * activates — benign: the paste/Enter queue in the pty and land in the
-   * composer, and the ready-gate still verifies a real model turn (activity
-   * mtime advance) before declaring READY.
+   * tall replayed history). Startup drafts also render that arrow before
+   * account/read completes. The shared predicate excludes provisional startup
+   * rows and a splash/placeholder without an initialized footer; pasting into
+   * that draft is NOT safe (bootstrap can fail and discard it).
    */
   // mode is accepted for interface parity but ignored: codex's ready marker (the '› '
   // composer arrow) is the same whether or not it launched with the YOLO bypass flag.
   isInputReady(pane: string, _mode?: ApprovalMode): boolean {
-    if (pane.includes('Press enter to continue')) return false
-    // A numbered select row (`› 1. Trust and continue`) is a modal, never the composer.
-    return pane.split(/\r?\n/).some(line => { const l = line.trimStart(); return l.startsWith('› ') && !/^› \d+\. /.test(l) })
+    return codexInputReady(pane)
   },
 
   /**

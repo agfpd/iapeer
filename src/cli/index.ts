@@ -1845,6 +1845,7 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     sig: 'confirm-send <id> [--runtime <rt>]',
     desc: 'deliver a held send (origin-guard, docs/18): as addressed, or --runtime redirects it to the origin channel — no re-send of the message text',
   },
+  { sig: 'delivery list | resolve <deliveryId> delivered|failed|dismissed --reason <text>', desc: 'inspect open acceptance cases or close one after operator investigation (no automatic replay/fallback)' },
   { sig: '<runtime>', desc: "launch the cwd's peer FRESH; on a TTY drop into it (like attach), else detached" },
   { sig: 'connect telegram <peer> [--token <t>]', desc: 'attach a telegram bot to a peer (bot add → interface → router restart; asks only the token). Alias: `iapeer enable telegram <peer>`' },
   { sig: 'connect <runtime> <peer>', desc: 'attach another always-on presence channel (web, voicetalk, …) to an EXISTING peer: per-runtime plist → the package self-config hook → load. Same as `add-runtime <runtime> --peer <peer>`' },
@@ -2746,6 +2747,25 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         } else if (o.action === 'absent') errOut(`rename: "${o.oldPersonality}" not registered\n`)
         else errOut(`rename: ${o.reason}\n`)
         return o.action === 'renamed' ? 0 : 1
+      }
+      case 'delivery': {
+        const { listAcceptance, resolveAcceptance } = await import('../launch/acceptanceStore.ts')
+        const runDir = hostRunDir(env)
+        if (positionals[0] === 'list') {
+          out(JSON.stringify(listAcceptance(runDir).filter(r => !r.resolution && ['prepared', 'sending', 'pending', 'unresolved'].includes(r.status))
+            .map(r => ({ deliveryId: r.id, recipient: r.identity, status: r.status, reason: r.reason, createdAt: r.createdAt })), null, 2) + '\n')
+          return 0
+        }
+        const [action, id, outcome] = positionals
+        if (action !== 'resolve' || !id || !['delivered', 'failed', 'dismissed'].includes(outcome ?? '') || typeof flags.reason !== 'string' || !flags.reason.trim()) {
+          return argErr(errOut, 'usage: iapeer delivery list | resolve <deliveryId> delivered|failed|dismissed --reason <text>')
+        }
+        const r = resolveAcceptance(runDir, id, { outcome: outcome as 'delivered' | 'failed' | 'dismissed',
+          reason: flags.reason, actor: env.PEER_IDENTITY ?? env.USER ?? 'operator', at: Date.now() })
+        const { appendDeliveryEvent } = await import('../daemon/deliverylog.ts')
+        appendDeliveryEvent(loadLifecycleConfig(env).eventLogDir, { ev: 'delivery-resolution', id, to: r.identity, outcome, actor: r.resolution!.actor, reason: r.resolution!.reason })
+        out(JSON.stringify({ deliveryId: id, status: r.status, resolution: r.resolution }) + '\n')
+        return 0
       }
       case 'send': {
         // Message body from EITHER --message <text> OR --message-file <f> (f='-' →

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { codexReceiptBaseline } from '../launch/codexDelivery.ts'
-import { writeAcceptance, readAcceptance, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
+import { writeAcceptance, readAcceptance, resolveAcceptance, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
 import { processAcceptance } from './acceptance.ts'
 import { ok } from '../core/errors.ts'
 import { NoticeBoard } from './notices.ts'
@@ -154,5 +154,41 @@ test('re-reading one unresolved delivery does not inflate the owner occurrence c
     await processAcceptance({ ...x.opts, board, now: 140_000, processAlive: () => true })
     expect(board.list()).toHaveLength(1)
     expect(board.list()[0]!.count).toBe(1)
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+
+test('unresolved alerts once across days/restarts, but late evidence still settles', async () => {
+  const x = fixture()
+  try {
+    for (const now of [130_000, 2_000_000, 90_000_000]) await processAcceptance({ ...x.opts, now, processAlive: () => true })
+    expect(x.sent).toHaveLength(2)
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+for (const outcome of ['delivered', 'failed', 'dismissed'] as const) {
+  test(`operator ${outcome} closes case despite stale writer and late receipt`, async () => {
+    const x = fixture()
+    try {
+      await processAcceptance({ ...x.opts, now: 130_000, processAlive: () => true })
+      const resolution = { outcome, reason: 'investigated manually', actor: 'operator', at: 140_000 }
+      resolveAcceptance(x.opts.runDir, x.r.id, resolution)
+      resolveAcceptance(x.opts.runDir, x.r.id, resolution)
+      expect(() => resolveAcceptance(x.opts.runDir, x.r.id, { ...resolution, reason: 'changed' })).toThrow()
+      writeAcceptance(x.opts.runDir, x.r) // concurrent stale acceptance writer cannot reopen
+      appendFileSync(x.p, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: x.r.message }] } }) + '\n')
+      await processAcceptance({ ...x.opts, now: 90_000_000, processAlive: () => true })
+      expect(x.read().status).toBe(outcome); expect(x.sent).toHaveLength(2)
+      expect(x.read().resolution).toEqual(resolution)
+    } finally { rmSync(x.root, { recursive: true, force: true }) }
+  })
+}
+test('prepared checkpoint proves no paste after writer death; live preparation is not failed', async () => {
+  const x = fixture()
+  try {
+    x.r.status = 'prepared'; writeAcceptance(x.opts.runDir, x.r)
+    await processAcceptance({ ...x.opts, now: 130_000, processAlive: () => true })
+    expect(x.read().status).toBe('prepared'); expect(x.sent).toHaveLength(0)
+    await processAcceptance({ ...x.opts, now: 140_000, processAlive: () => false })
+    expect(x.read().status).toBe('failed')
+    expect(x.sent.map(r => JSON.parse(r.message).outcome)).toEqual(['failed', 'failed'])
   } finally { rmSync(x.root, { recursive: true, force: true }) }
 })

@@ -1,6 +1,6 @@
 // Reconcile an uncertain native submit. This module never sends input to the original receiver.
 import { rmSync } from 'node:fs'
-import { listAcceptance, writeAcceptance, acceptancePath, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
+import { listAcceptance, readAcceptance, writeAcceptance, acceptancePath, type AcceptanceRecord } from '../launch/acceptanceStore.ts'
 import { codexReceiptBaseline } from '../launch/codexDelivery.ts'
 import { pidStartToken } from '../supervisor/paths.ts'
 import { decodeEnvelope } from '../codec/index.ts'
@@ -12,7 +12,6 @@ import { deliveryLanded } from '../transport/index.ts'
 import type { NoticeBoard } from './notices.ts'
 
 export const ACCEPTANCE_ALERT_AFTER_MS = 120_000
-const REMIND_MS = 30 * 60_000
 const DEAD_DRAIN_MS = 5000
 const FINAL_KEEP_MS = 7 * 24 * 60 * 60_000
 function alive(pid: number, token: string | null): boolean {
@@ -43,6 +42,7 @@ export async function processAcceptance(opts: AcceptanceOptions): Promise<void> 
 async function reconcile(opts: AcceptanceOptions): Promise<void> {
   const now = opts.now ?? Date.now(), isAlive = opts.processAlive ?? alive, send = opts.send ?? routeSend
   for (const r of listAcceptance(opts.runDir)) {
+    if (r.resolution) continue // immutable operator disposition overrides every writer/tick
     const runtime = r.identity.startsWith('claude-') ? 'claude' : 'codex'
     const personality = r.identity.slice(runtime.length + 1)
     if (r.status === 'rejected' || (r.status === 'delivered' && !r.managed)) {
@@ -52,6 +52,12 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
     if (r.status === 'sending' && now - r.createdAt < ACCEPTANCE_ALERT_AFTER_MS && isAlive(r.writerPid, r.writerToken)) continue
     const previous = r.status
     const previousDeadSince = r.deadSince
+    if (r.status === 'prepared') {
+      if (isAlive(r.writerPid, r.writerToken)) continue // preparation may still enter send
+      r.status = 'failed'; r.managed = true; r.reason = 'writer died before paste boundary'
+      r.updatedAt = now; writeAcceptance(opts.runDir, r)
+      appendDeliveryEvent(opts.logDir, { ev: 'delivery-acceptance', id: r.id, to: r.identity, outcome: r.status })
+    }
     if (!['delivered', 'failed'].includes(r.status)) {
       const receipt = runtime === 'claude' ? {
         landed: () => deliveryLanded({ runtime, personality, cwd: r.cwd, ts: r.createdAt, rendered: r.message }, { ...opts.env, HOME: r.home }),
@@ -81,13 +87,11 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
       opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
         eventAtMs: r.updatedAt,
         errorType: `${r.status}:${r.id}`, summary: `${r.status} delivery ${r.id} to ${r.identity}`, content: acceptanceEvent(r) })
-      if (unresolved && r.lastAlertAt !== undefined && now - r.lastAlertAt < REMIND_MS) continue
-      // Preserve the completed notification checkpoint until a reminder is actually due.
-      if (unresolved && r.lastAlertAt !== undefined && r.operatorNotice === 'sent') r.operatorNotice = undefined
     }
     let from
     try { from = decodeEnvelope(r.message.slice(r.message.indexOf('<iap '))) } catch { /* manual non-IAP input: board/operator only */ }
     const notify = async (slot: 'callerNotice' | 'operatorNotice', target: { peer: string; runtime?: string }) => {
+      if (readAcceptance(opts.runDir, r.id)?.resolution) return
       if (r[slot] === 'sent') return
       // Claim BEFORE sending. A restart in this boundary is visible unresolved notification custody,
       // never a blind repeated fallback task. The original receiver is never replayed.
@@ -116,7 +120,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
     // Accepted inputs need a sender completion event, not an operator fallback. System notifications
     // themselves never recursively generate operator notifications if that operator is unavailable.
     if (operator && r.status !== 'delivered' && from?.fromRuntime !== 'core') await notify('operatorNotice', operator)
-    if (unresolved) {
+    if (unresolved && r.lastAlertAt === undefined) {
       r.lastAlertAt = now
       writeAcceptance(opts.runDir, r)
     }

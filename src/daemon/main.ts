@@ -348,7 +348,7 @@ export async function processInflight(
     const selfEnded = readSelfEnded(cfg.stateDir, identity)
     const current = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
     const n = sweepInflight(cfg.stateDir, identity, {
-      acceptance: id => readAcceptance(acceptanceRunDir, id)?.status,
+      acceptance: id => { const r = readAcceptance(acceptanceRunDir, id); return r?.resolution ? 'rejected' : r?.status },
       sessionToken: () => current,
       selfEndedToken: selfEnded,
       processed,

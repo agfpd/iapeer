@@ -86,10 +86,12 @@ const env: NodeJS.ProcessEnv = {
   PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, '.codex'), TERM: 'xterm-256color',
   IAPEER_ROOT: iap, IAPEER_LAUNCHAGENTS_DIR: join(root, 'LaunchAgents'), IAPEER_SOCK_DIR: join(root, 's'),
   IAPEER_PORT: String(port), IAPEER_DAEMON_SOCKET: join(root, 'router.sock'),
-  IAPEER_CLAUDE_BIN: process.argv.includes('--limit-resume-only') ? join(hostHome, '.local/bin/claude') : native, IAPEER_CODEX_BIN: process.argv.includes('--limit-resume-only') ? '/opt/homebrew/bin/codex' : native, IAPEER_IDLE_SECS: ['--unknown-delivery-only', '--death-delivery-only', '--refusal-delivery-only'].some(flag => process.argv.includes(flag)) ? '600' : '15',
+  IAPEER_CLAUDE_BIN: process.argv.includes('--limit-resume-only') ? join(hostHome, '.local/bin/claude') : native, IAPEER_CODEX_BIN: process.argv.includes('--limit-resume-only') ? '/opt/homebrew/bin/codex' : native, IAPEER_IDLE_SECS: ['--unknown-delivery-only', '--death-delivery-only', '--refusal-delivery-only', '--bootstrap-delivery-only'].some(flag => process.argv.includes(flag)) ? '600' : '15',
   ANTHROPIC_BASE_URL: provider.url.origin, ANTHROPIC_AUTH_TOKEN: 'synthetic-local-only', ANTHROPIC_MODEL: 'claude-sonnet-4-5',
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', HOMEBREW_NO_AUTO_UPDATE: '1',
 }
+const bootstrap = process.argv.includes('--bootstrap-delivery-only')
+const bootProxy = bootstrap ? (await import('./bootstrap-proof.ts')).bootstrapProxy(native, env) : undefined
 for (const k of Object.keys(process.env)) delete process.env[k]
 Object.assign(process.env, env)
 const { initPeer } = await import('../src/init/index.ts')
@@ -145,7 +147,7 @@ try {
       SessionStart: [{ matcher: '*', hooks: [{ type: 'command', command: '/bin/sleep 8', timeout: 20 }] }],
     } }))
   }
-  if (runtime === 'codex') writeFileSync(peerLaunchEnvPath(cwd, runtime), "PEER_START_ARGS='--no-daemon -c model_reasoning_effort=low'\n")
+  if (runtime === 'codex') writeFileSync(peerLaunchEnvPath(cwd, runtime), `PEER_START_ARGS='${bootProxy ? `--remote ${bootProxy.url}` : '--no-daemon'} -c model_reasoning_effort=low'\n`)
   const senderCwd = join(root, 'sender')
   writePeerProfileAtomic(senderCwd, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
   await upsertPeer({ personality: 'sender', runtime: 'notifier', intelligence: 'absent', cwd: senderCwd }, { env })
@@ -244,12 +246,23 @@ try {
     }
     success = true
   } else {
-  await turn('FIRST_OPERATOR_PROOF')
+  if (bootProxy) {
+    const t = Date.now(), pending = send('SLOW_BOOTSTRAP_NO_EARLY_PASTE')
+    await until('native account/read held', () => bootProxy.blocked(), 60000)
+    await Bun.sleep(10000)
+    const log = read(join(iap, 'logs/lifecycle', identity() + '.log'))
+    const { captureHostState } = await import('../src/supervisor/capture.ts')
+    record('slow-bootstrap-no-paste', { hosting: hosting(), view: await captureHostState(runDir, identity()), events: bootProxy.events })
+    if (hosting().ready || log.includes('SLOW_BOOTSTRAP_NO_EARLY_PASTE') || files(join(runDir, 'acceptance')).length) throw new Error('paste boundary entered while account/read held')
+    bootProxy.release(); await pending
+    await until('native turn after bootstrap released', () => completedAfter(t), 60000)
+    record('bootstrap-release-native-turn', { sessionID: nativeSession() })
+  } else await turn('FIRST_OPERATOR_PROOF')
   const original = nativeSession()
   if (!original) throw new Error('native session ID missing')
   record('cold-turn', { sessionID: original, hosting: hosting() })
 
-  if (process.argv.includes('--refusal-delivery-only')) {
+  if (process.argv.includes('--refusal-delivery-only') || bootstrap) {
     // Real installed notifier policy, not a stand-in retry/fallback implementation.
     // Its registration store still reads HOME/.iapeer rather than IAPEER_ROOT.
     // Keep both names within this isolated root; never borrow the host registry.
@@ -259,6 +272,7 @@ try {
     writePeerProfileAtomic(senderCwd, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'artificial' })
     await upsertPeer({ personality: 'sender', runtime: 'notifier', intelligence: 'artificial', cwd: senderCwd }, { env })
     await must('stop', personality, runtime)
+    if (bootProxy) { await must('start', personality, runtime); bootProxy.reject() }
     const watcherCwd = join(root, 'watcher')
     writePeerProfileAtomic(watcherCwd, { personality: 'watcher', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
     await upsertPeer({ personality: 'watcher', runtime: 'notifier', intelligence: 'absent', cwd: watcherCwd }, { env })
@@ -274,8 +288,15 @@ try {
     const marker = 'PROVEN_PREPASTE_REFUSAL_FALLBACK', script = join(root, 'signal.sh')
     writeFileSync(script, `#!/bin/sh\nprintf '%s\\n' '${marker}'\nexec /bin/sleep 300\n`); chmodSync(script, 0o700)
     await must('send', 'watcher', '--runtime', 'notifier', '--from', 'notifier-sender', '--message', JSON.stringify({
-      script, target: personality, fallback: 'sender', id: 'prepaste-refusal-proof', topic: 'prepaste-refusal-proof',
+      script, target: personality, fallback: 'sender', id: 'prepaste-refusal-proof', topic: bootstrap ? 'operator-proof' : 'prepaste-refusal-proof',
     }))
+    if (bootProxy) {
+      await until('second native account/read held', () => bootProxy.blocked(), 60000)
+      await Bun.sleep(10000)
+      const log = read(join(iap, 'logs/lifecycle', identity() + '.log'))
+      if (log.includes(marker) || hostSessionReady(identity(), env)) throw new Error('paste before bootstrap error')
+      bootProxy.release()
+    }
     await until('real notifier automatic fallback', () => read(join(root, 'sender.log')).includes(marker), 90000)
     const nativeUsers = records().filter(r => r.type === 'response_item' && r.payload?.role === 'user' && JSON.stringify(r.payload).includes(marker))
     const log = read(join(iap, 'logs/iapeer/delivery.log'))
@@ -301,6 +322,15 @@ try {
     const r = acceptance()
     record('death-after-paste-unresolved', { sent, acceptance: r, nativeUsers, log, sender })
     if (r?.status !== 'unresolved' || nativeUsers.length || log.includes('ev=inflight-redeliver') || !sender.includes(r.id)) throw new Error('death was failed/replayed or escalation missing')
+    await must('delivery', 'resolve', r.id, 'dismissed', '--reason', 'isolated proof operator handled')
+    // Simulate a due reminder after restart without waiting 30 minutes.
+    const path = join(runDir, 'acceptance', r.id + '.json')
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(read(path)), lastAlertAt: 0 }))
+    const before = read(join(root, 'sender.log'))
+    await Bun.sleep(5000)
+    const { readAcceptance } = await import('../src/launch/acceptanceStore.ts')
+    if (readAcceptance(runDir, r.id)?.status !== 'dismissed' || read(join(root, 'sender.log')) !== before) throw new Error('operator case reopened/notified')
+    record('operator-closed-no-repeat', readAcceptance(runDir, r.id))
     success = true
   } else if (process.argv.includes('--unknown-delivery-only')) {
     if (runtime !== 'claude') throw new Error('--unknown-delivery-only requires claude')
@@ -467,12 +497,14 @@ try {
   if (daemon) { daemon.kill(); await daemon.exited }
   for (const p of ['operator-proof', 'operator-renamed']) await cli('supervisor', 'kill', `${runtime}-${p}`, '--run-dir', runDir)
   await cli('supervisor', 'kill', 'notifier-sender', '--run-dir', runDir)
-  if (process.argv.includes('--refusal-delivery-only')) await cli('supervisor', 'kill', 'notifier-watcher', '--run-dir', runDir)
+  if (process.argv.includes('--refusal-delivery-only') || bootstrap) await cli('supervisor', 'kill', 'notifier-watcher', '--run-dir', runDir)
+  bootProxy?.close()
+  if (bootProxy) results.push({ bootstrapEvents: bootProxy.events })
   provider.stop(true)
   surface.stop()
   if (artifacts) {
     mkdirSync(artifacts, { recursive: true })
-    for (const p of files(root).filter(p => (/(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) || p.includes('/acceptance/') && p.endsWith('.json')) && !p.includes('/node_modules/'))) {
+    for (const p of files(root).filter(p => (/(?:\.jsonl|\.log|\.out|\.err|installed_plugins\.json|known_marketplaces\.json|\/settings\.json|\.mcp\.json|config\.toml)$/.test(p) || p.includes('/acceptance/') && /\.(?:json|resolved)$/.test(p)) && !p.includes('/node_modules/'))) {
       const dest = join(artifacts, p.slice(root.length + 1)); mkdirSync(resolve(dest, '..'), { recursive: true }); cpSync(p, dest)
     }
     writeFileSync(join(artifacts, 'wire.json'), JSON.stringify(wire, null, 2))
