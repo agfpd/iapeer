@@ -324,14 +324,14 @@ try {
     if (r?.status !== 'unresolved' || nativeUsers.length || log.includes('ev=inflight-redeliver') || !sender.includes(r.id)) throw new Error('death was failed/replayed or escalation missing')
     await must('delivery', 'resolve', r.id, 'dismissed', '--reason', 'isolated proof operator handled')
     const { readResolutionNotice } = await import('../src/launch/acceptanceStore.ts')
-    await until('operator closure callback durably delivered to caller', () => readResolutionNotice(runDir, r.id)?.status === 'sent')
+    await until('operator closure callback durably delivered to caller', () => readResolutionNotice(runDir, r.id)?.status === 'sent', 90000)
     await Bun.sleep(500)
-    // Simulate a due reminder after restart without waiting 30 minutes.
+    // A stale old reminder timestamp must not repeat the terminal callback.
     const path = join(runDir, 'acceptance', r.id + '.json')
     writeFileSync(path, JSON.stringify({ ...JSON.parse(read(path)), lastAlertAt: 0 }))
     const before = read(join(root, 'sender.log'))
     if (!before.includes('"operatorResolved":true')) throw new Error('caller did not receive operator resolution')
-    await Bun.sleep(5000)
+    await Bun.sleep(65000) // cross another real 60s acceptance sweep, not just an idle gap
     const { readAcceptance } = await import('../src/launch/acceptanceStore.ts')
     if (readAcceptance(runDir, r.id)?.status !== 'dismissed' || read(join(root, 'sender.log')) !== before) throw new Error('operator case reopened/notified')
     record('operator-closed-no-repeat', readAcceptance(runDir, r.id))
