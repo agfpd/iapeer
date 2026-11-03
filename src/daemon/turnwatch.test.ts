@@ -215,6 +215,33 @@ function makeTree(): { root: string; claudeDir: string; codexDir: string } {
 const peerByCwd = (c: string): string | undefined => (c === CWD ? 'thing' : undefined)
 
 describe('scanTurnStates', () => {
+  test('cd into another peer cannot transfer turn ownership, even past the tail window', () => {
+    const { root, claudeDir, codexDir } = makeTree()
+    try {
+      const file = join(claudeDir, '-Users-x-Projects-thing', 's.jsonl')
+      const prefix = JSON.stringify({ type: 'file-history-snapshot' }) + '\n'
+        + claudeUser() + '\n' + JSON.stringify({ padding: 'x'.repeat(150_000) }) + '\n'
+      const board = new ActivityBoard()
+      const logDir = join(root, 'logs')
+      const deps = { claudeProjectsDir: claudeDir, codexSessionsDir: codexDir,
+        peerByCwd: (cwd: string) => cwd === CWD ? 'thing' : cwd === '/peer-b' ? 'b' : undefined,
+        board, logDir, env: {} }
+      writeFileSync(file, prefix + claudeAssistant('tool_use', { cwd: '/peer-b' }))
+      expect(turnWatchTick(deps, 0).transitions).toBe(1)
+      writeFileSync(file, prefix + claudeAssistant('end_turn', { cwd: '/peer-b', timestamp: '2026-07-16T07:01:00Z' }))
+      expect(turnWatchTick(deps, 0).transitions).toBe(1)
+      expect(board.size()).toBe(1)
+      expect(board.get('thing', 'claude', TMS)).toBe('idle')
+      expect(board.get('b', 'claude', TMS)).toBeUndefined()
+      const log = readFileSync(turnsLogPath(logDir), 'utf8')
+      expect(log).toContain('personality=thing')
+      expect(log).not.toContain('personality=b ')
+      // A non-peer session visiting B must not acquire B's identity either.
+      writeFileSync(file, prefix.replace(CWD, '/human') + claudeAssistant('tool_use', { cwd: '/peer-b' }))
+      expect(scanTurnStates(deps, 0)).toEqual([])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   test('attributes both runtimes off their own session files', () => {
     const { root, claudeDir, codexDir } = makeTree()
     try {

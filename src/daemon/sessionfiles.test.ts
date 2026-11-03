@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_FIRST_LINE_BYTES, readFirstLine, readSessionSlices } from './sessionfiles.ts'
+import { MAX_FIRST_LINE_BYTES, readClaudeSessionCwd, readFirstLine, readSessionSlices } from './sessionfiles.ts'
 
 function tmp(content: string | Buffer): { path: string; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'iapeer-sessionfiles-'))
@@ -10,6 +10,31 @@ function tmp(content: string | Buffer): { path: string; dir: string } {
   writeFileSync(path, content)
   return { path, dir }
 }
+
+describe('readClaudeSessionCwd', () => {
+  test('skips prefix records and sidechains; first main-chain cwd wins after cd', () => {
+    const { path, dir } = tmp([
+      '{}', '{garbled', JSON.stringify({ cwd: '/sidechain', isSidechain: true }),
+      JSON.stringify({ cwd: '/owner' }), JSON.stringify({ cwd: '/visitor' }),
+    ].join('\n'))
+    try { expect(readClaudeSessionCwd(path)).toBe('/owner') }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  test('bounded prefix without an anchor never falls back to a later cwd', () => {
+    const { path, dir } = tmp(JSON.stringify({ padding: 'x'.repeat(MAX_FIRST_LINE_BYTES) }) + '\n{"cwd":"/visitor"}\n')
+    try { expect(readClaudeSessionCwd(path)).toBeUndefined() }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+    expect(readClaudeSessionCwd('/no/such/file')).toBeUndefined()
+  })
+
+  test('handles a Unicode cwd split across read chunks and no final newline', () => {
+    const prefix = '{"padding":"' + 'x'.repeat(65536 - 25) + '","cwd":"'
+    const { path, dir } = tmp(prefix + '/агент"}')
+    try { expect(readClaudeSessionCwd(path)).toBe('/агент') }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
 
 describe('readFirstLine', () => {
   test('returns the first line without its newline', () => {

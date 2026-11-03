@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NoticeBoard } from './notices.ts'
@@ -336,6 +336,19 @@ describe('scanMuteEvents — attribution across a real-shaped tree', () => {
     expect(found[0]!.personality).toBe('probe')
     expect(found[0]!.runtime).toBe('claude')
     expect(found[0]!.errorType).toBe('rate_limit')
+  })
+
+  test('a Claude error after cd belongs to the session owner, not the visited peer', () => {
+    const { home, paths } = tree()
+    try {
+      const start = JSON.stringify({ type: 'user', cwd: '/owner', sessionId: 's' })
+      writeFileSync(join(paths.claudeProjectsDir, '-Users-macmini-Peers-probe', 's.jsonl'),
+        start + '\n' + JSON.stringify({ padding: 'x'.repeat(150_000) }) + '\n' + REAL_CLAUDE_RATE_LIMIT_LINE)
+      const found = scanMuteEvents({ ...paths, peerByCwd: cwd => cwd === '/owner' ? 'owner' : 'visited' }, 0)
+      expect(found).toHaveLength(1)
+      expect(found[0]!.personality).toBe('owner')
+      expect(found[0]!.cwd).toBe('/owner')
+    } finally { rmSync(home, { recursive: true, force: true }) }
   })
 
   // The dir name is a red herring by construction — attribution must come from the content,

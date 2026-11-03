@@ -138,8 +138,10 @@ mtime, never a reconstruction:
   `working` forever. An operator interrupt ends the turn with a user line whose text is
   `[Request interrupted by user]` / `[Request interrupted by user for tool use]` → `idle` (it
   used to read `working` forever on a stopped session, 18.10.2026).
-- **Attribution** — a session is the peer whose registered cwd is the session's cwd or its
-  nearest ancestor (a peer that `cd`-ed into a subdirectory stays itself).
+- **Attribution** — match the session's **initial** cwd to the registered peer or its nearest
+  ancestor: Claude's first non-sidechain cwd in the transcript, Codex's `session_meta.cwd`.
+  Later event cwd values are working-directory data, never identity: even `cd` into another
+  peer's directory cannot transfer ownership. Missing initial evidence means no attribution.
 
 ### Bounds a client can rely on
 

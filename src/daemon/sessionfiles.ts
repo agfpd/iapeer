@@ -24,9 +24,42 @@
 // costs one extra chunk read only for the files that need it.
 
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
+import { StringDecoder } from 'node:string_decoder'
 
 /** Chunk size for the forward scan. One read covers the common case. */
 const HEAD_CHUNK_BYTES = 64 * 1024
+
+/** Session anchor, not the current event cwd (Bash cd changes the latter). Read from
+ * the beginning even when the turn/error evidence is in a tail slice. No usable
+ * main-chain cwd inside the bounded prefix means no attribution, never a tail fallback. */
+export function readClaudeSessionCwd(path: string): string | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const buf = Buffer.alloc(HEAD_CHUNK_BYTES)
+    const decoder = new StringDecoder('utf8')
+    let pending = ''
+    let offset = 0
+    while (offset < MAX_FIRST_LINE_BYTES) {
+      const got = readSync(fd, buf, 0, Math.min(buf.length, MAX_FIRST_LINE_BYTES - offset), offset)
+      if (!got) break
+      offset += got
+      pending += decoder.write(buf.subarray(0, got))
+      const lines = pending.split('\n')
+      pending = lines.pop()!
+      // A final unterminated JSON record is also usable, but a bounded cut is not.
+      if (offset >= fstatSync(fd).size) { lines.push(pending); pending = '' }
+      for (const line of lines) {
+        try {
+          const d = JSON.parse(line)
+          if (d.isSidechain !== true && typeof d.cwd === 'string' && d.cwd) return d.cwd
+        } catch { /* malformed/non-record prefix is not identity evidence */ }
+      }
+    }
+  } catch { /* unreadable session: fail closed */ }
+  finally { if (fd !== undefined) closeSync(fd) }
+  return undefined
+}
 
 /**
  * Upper bound on the first line. Generous on purpose — a doctrine can grow, and the cost of

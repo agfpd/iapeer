@@ -70,14 +70,15 @@
 // which is a claude-specific naming convention we do not own, and codex has no cwd in its path at
 // all (YYYY/MM/DD/rollout-*). One attribution rule that works for both runtimes beats two derivation
 // schemes: scan the session files that CHANGED, read the cwd each file states about ITSELF (claude:
-// the `cwd` field on every line; codex: session_meta.payload.cwd), and match that against the
-// registry. A file whose cwd is no peer's is ignored — a human's own session never notifies.
+// the FIRST main-chain cwd, not a later event's mutable cwd; codex: session_meta.payload.cwd),
+// and match that against the registry. A file whose initial cwd is no peer's is ignored —
+// a human's own session never notifies, even after visiting a peer's directory.
 
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import type { NoticeBoard } from './notices.ts'
-import { readSessionSlices } from './sessionfiles.ts'
+import { readClaudeSessionCwd, readSessionSlices } from './sessionfiles.ts'
 import { endpointPrivateDir } from '../storage/index.ts'
 import { readOpencodeState } from '../opencode/journal.ts'
 
@@ -569,7 +570,11 @@ export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[]
   // claude: ~/.claude/projects/<slug>/<sessionId>.jsonl — one level of slug dirs.
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
     const t = readSessionSlices(file, TAIL_BYTES)
-    if (t) push(parseClaudeTranscript(t.tail, floor), 'claude', file)
+    if (t) {
+      const cwd = readClaudeSessionCwd(file)
+      const detection = parseClaudeTranscript(t.tail, floor)
+      if (cwd && detection) push({ ...detection, cwd }, 'claude', file)
+    }
   }
   // codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {

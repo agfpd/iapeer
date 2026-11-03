@@ -61,7 +61,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LifecycleConfig } from '../lifecycle/index.ts'
 import { appendTurnEvent } from './turnslog.ts'
-import { readSessionSlices } from './sessionfiles.ts'
+import { readClaudeSessionCwd, readSessionSlices } from './sessionfiles.ts'
 
 /** Tail parsed per session file. The turn marker is always at the very end. */
 const TAIL_BYTES = 128 * 1024
@@ -325,7 +325,11 @@ export function scanTurnStates(deps: TurnScanDeps, sinceMs: number): TurnObserva
   }
   for (const file of changedJsonl(deps.claudeProjectsDir, floor, 1)) {
     const t = readSessionSlices(file, TAIL_BYTES)
-    if (t) push(parseClaudeTurn(t.tail), 'claude')
+    if (t) {
+      const cwd = readClaudeSessionCwd(file)
+      const state = parseClaudeTurn(t.tail)
+      if (cwd && state) push({ ...state, cwd }, 'claude')
+    }
   }
   for (const file of changedJsonl(deps.codexSessionsDir, floor, CODEX_WALK_DEPTH)) {
     const t = readSessionSlices(file, TAIL_BYTES)

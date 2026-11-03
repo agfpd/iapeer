@@ -335,7 +335,8 @@ is the product here, and the 60 s supervise tick would put the worst case at the
 nothing to spare). A sweep only opens files whose mtime moved since the last pass.
 
 Attribution does not derive the path from `cwd`. It reads the cwd each file states **about
-itself** (claude: the `cwd` field on every line; codex: `session_meta.payload.cwd`) and matches
+itself** (claude: the first non-sidechain cwd, read from the beginning of the transcript;
+codex: `session_meta.payload.cwd`) and matches
 it against the registry, case-insensitively — the peer whose cwd is that path or its NEAREST
 ancestor (a peer that `cd`-ed into a subdirectory stays itself, 18.10.2026; ancestors shallower
 than `/<a>/<b>/<c>` match only exactly). A file whose cwd belongs to no peer is ignored —
