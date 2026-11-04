@@ -451,6 +451,11 @@ five-hour wall at 04:55; claude painted «resets 8:30am», the daemon idle-reape
 
 **Mechanism** (`lifecycle/limitpark.ts`, `daemon/limitresume.ts`):
 
+Provider failover adds an ownership fence: a quarantined native session's park is
+dropped with `outcome=skipped-failover`, even if an overlapping detector recreated
+the park. Automatically assigned replacement work has durable failover provenance
+and can continue on its assigned non-default endpoint. See [23](23-failover.md).
+
 1. **Park.** A `peer-mute` detection that carries `resetsAtMs` writes one record per endpoint
    (`state/lifecycle/limit-parks/<runtime>-<personality>.json`: reset, event time, session file).
    A newer limit event supersedes it; the overlapping sweep re-reading the same line does not.

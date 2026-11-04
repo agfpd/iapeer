@@ -37,7 +37,7 @@ The copy is recipient-owned state, not cache: it is not age-GCed and lives for t
 
 ## The delivery path
 
-The daemon finds the recipient in the registry and selects its endpoint first. With no explicit `runtime`, the endpoint is always the recipient's `default_runtime`; liveness of other declared runtimes does not change that choice. An explicit `runtime` selects that exact surface. The daemon then looks at the selected endpoint's state:
+The daemon finds the recipient in the registry and selects its endpoint first. With no explicit `runtime`, it prefers the recipient's `default_runtime`; liveness of other declared runtimes alone does not change that choice. Positive provider-refusal evidence permits [safe automatic failover](23-failover.md) across the peer's declared, non-stopped agent runtimes. An explicit non-default `runtime` selects that exact working thread. Human/presence channels remain exact. The daemon then looks at the selected endpoint's state:
 
 - **alive** — the daemon writes the message into the peer's session through the supervisor socket onto the session's input. The daemon waits for confirmation that the input was accepted (the input field cleared); the answer is `delivered`.
 - **busy** (the agent is mid-turn, the input field isn't empty) — the message goes into the composer queue and is delivered as soon as the agent is free; the answer to the sender is `queued`. The queue waits up to 120 seconds, then force-delivers.
@@ -60,7 +60,7 @@ Closure sends one final `delivery-acceptance` event **only to the original calle
 
 Codex's startup placeholder composer (including `Resuming session…`, `loading`, or a new-thread splash without an initialized footer) is **not ready**. Both cold and warm delivery check readiness before paste. Bootstrap death before readiness returns a synchronous failure to the sender, preserving its normal fallback policy. A durable `prepared` record proves the paste boundary was not entered; a `sending` record does not. Existing cases where an old ready-gate already pasted into a booting TUI remain uncertain, even if bootstrap subsequently failed.
 
-The guarantee covers one routed send and core-owned retries, not independent business-equivalent sends with different IDs, caller transport failures before receiving an acknowledgement, or exactly-once external side effects of an interrupted agent turn. Native acceptance forbids automatic re-paste of that input; interrupted work is reported rather than replayed.
+The guarantee covers one routed send and core-owned retries, not independent business-equivalent sends with different IDs, caller transport failures before receiving an acknowledgement, or exactly-once external side effects of an interrupted agent turn. Native acceptance forbids blind automatic re-paste of that input. A positive provider refusal before any model work may authorize [cross-runtime transfer](23-failover.md), only after the old hosting ends and its native session is quarantined. Interrupted work with possible effects is reviewed rather than replayed.
 
 Codex's **“This conversation is open in another app”** view is a read-only thread-ownership conflict, not a normal warning. Delivery fails with that reason; the core does not seize ownership, fork the conversation, or blindly press `r`. Close the other owner and retry the native resume before sending again. Sender runtimes retain responsibility for their usual failure/fallback chain.
 

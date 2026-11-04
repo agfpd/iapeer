@@ -8,6 +8,7 @@ import { hostSessionToken } from '../launch/ptyHost.ts'
 import type { LifecycleConfig } from './index.ts'
 
 export interface WorkOrigin {
+  automaticFailover?: true
   sessionToken: string
   deliveredAtMs: number
   caller: { personality: string; runtime: string }
@@ -26,7 +27,7 @@ export function noteHostingGeneration(cfg: LifecycleConfig, identity: string, to
 
 export function noteWorkOrigin(cfg: LifecycleConfig, note: Receipt): void {
   noteHostingGeneration(cfg, note.identity, note.sessionToken)
-  if (note.caller.runtime === 'core') return // a system notification cannot grant or erase explicit work
+  if (note.caller.runtime === 'core' && !note.failoverTaskId) return // maintenance cannot grant or erase work
   mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 })
   writeFileAtomic(path(cfg, note.identity), JSON.stringify({ ...note, ts: note.acceptedAtMs ?? note.ts }) + '\n')
 }
@@ -35,7 +36,7 @@ export function noteWorkOrigin(cfg: LifecycleConfig, note: Receipt): void {
 export function workOriginAtLimit(cfg: LifecycleConfig, identity: string, eventAtMs: number, env: NodeJS.ProcessEnv, file?: string): WorkOrigin | undefined {
   let r: Receipt
   try { r = JSON.parse(readFileSync(path(cfg, identity), 'utf8')) } catch { return }
-  if (!r.explicitRuntime || !r.sessionToken || !Number.isFinite(r.ts) || r.ts > eventAtMs || !r.caller || r.caller.runtime === 'core') return
+  if ((!r.explicitRuntime && !r.failoverTaskId) || !r.sessionToken || !Number.isFinite(r.ts) || r.ts > eventAtMs || !r.caller || r.caller.runtime === 'core' && !r.failoverTaskId) return
   if (lastHosting(cfg, identity) !== r.sessionToken) return
   // Another hosting's delivery must not authorize the current session. If the old hosting has
   // already reaped, the receipt's rendered message + completion cutoff still ties it to its work.
@@ -43,11 +44,11 @@ export function workOriginAtLimit(cfg: LifecycleConfig, identity: string, eventA
   if (current && current !== r.sessionToken) return
   const probe = { ...r, file }
   if (!deliveryLanded(probe, env) || deliveryCompleted(probe, env, eventAtMs)) return
-  return { sessionToken: r.sessionToken, deliveredAtMs: r.ts, caller: r.caller }
+  return { sessionToken: r.sessionToken, deliveredAtMs: r.ts, caller: r.caller, ...(r.failoverTaskId ? { automaticFailover: true as const } : {}) }
 }
 
 export function workOriginStillValid(cfg: LifecycleConfig, origin: WorkOrigin | undefined, identity: string, eventAtMs: number, env: NodeJS.ProcessEnv): boolean {
-  if (!origin?.sessionToken || !Number.isFinite(origin.deliveredAtMs) || origin.deliveredAtMs > eventAtMs || !origin.caller || origin.caller.runtime === 'core') return false
+  if (!origin?.sessionToken || !Number.isFinite(origin.deliveredAtMs) || origin.deliveredAtMs > eventAtMs || !origin.caller || origin.caller.runtime === 'core' && !origin.automaticFailover) return false
   if (lastHosting(cfg, identity) !== origin.sessionToken) return false
   const current = hostSessionToken(identity, env)
   return !current || current === origin.sessionToken

@@ -97,6 +97,14 @@ export function readInflight(stateDir: string, identity: string): InflightEntry[
   return readJsonl(inflightPath(stateDir, identity))
 }
 
+/** A durable failover claim takes custody before retiring the old hosting. */
+export function settleFailoverInflight(stateDir: string, note: { identity: string; sessionToken: string | null; rendered: string }): void {
+  const match = (e: InflightEntry) => e.sessionToken === note.sessionToken && e.rendered === note.rendered
+  for (const path of [inflightPath(stateDir, note.identity), orphansPath(stateDir, note.identity), interruptedPath(stateDir, note.identity)]) {
+    writeJsonl(path, readJsonl(path).filter(e => !match(e)))
+  }
+}
+
 export interface InflightSweepDeps {
   acceptance?: (id: string) => string | undefined
   /** Hosting token of a session that ENDED ITSELF (self-fresh) — its started entries are settled, not

@@ -1638,6 +1638,7 @@ export async function sendMessage(
   const { makeArmEphemeralOnDelivered, makeEphemeralRouteDeps, makeNoteInflight, makeNoteLiveTopic } = await import('../daemon/main.ts')
   const cfg = loadLifecycleConfig(env)
   const t0 = Date.now()
+  const { selectFailoverRuntime } = await import('../lifecycle/failover.ts')
   const result = await routeSend(
     caller,
     {
@@ -1652,6 +1653,8 @@ export async function sendMessage(
     // daemon-restart-window send re-opens the stale-marker false-fresh.
     {
       wake: cliWake,
+      env,
+      selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt),
       ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}),
       noteLiveTopic: makeNoteLiveTopic(cfg, env),
       // CLI-path parity: the idle-proxy floor (В7) and the inflight ledger (OC07) — the daemon tick

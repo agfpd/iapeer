@@ -58,6 +58,7 @@ import { appendLifecycleEvent, superviseLogVerbose } from './eventlog.ts'
 import { fenceHost } from '../supervisor/reload.ts'
 import { completeReloads, pendingReloads } from '../capability/reloadStore.ts'
 import { surfaceFingerprint, writeSurfaceBaseline } from '../capability/surfaces.ts'
+import { clearFailoverFresh, hasFailoverFresh, purgeFailoverIdentity, recordFailoverTask, selectFailoverRuntime, sessionQuarantined } from './failover.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -560,6 +561,7 @@ export function resetTopics(cfg: LifecycleConfig, identity: string): void {
  */
 export function purgeIdentityState(cfg: LifecycleConfig, identity: string): string[] {
   const removed: string[] = []
+  try { removed.push(...purgeFailoverIdentity(cfg, identity)) } catch { /* best-effort, like marker cleanup below */ }
   let entries: string[]
   try {
     entries = readdirSync(cfg.stateDir)
@@ -672,6 +674,11 @@ export function resolveWakeMode(
   continueWork?: boolean,
 ): WakeMode {
   const done = defer ?? ((f: () => void) => f())
+  if (hasFailoverFresh(cfg, identity)) {
+    done(() => clearFailoverFresh(cfg, identity))
+    done(() => clearIdleReaped(cfg, identity))
+    return { resume: false, cause: 'provider-failover-fresh' }
+  }
   // 1. folder-launch → always fresh. Consume a standing .new-eager too — the mark's
   // promise ("next bring-up is FRESH") is fulfilled by this launch; leaving it would
   // leak an eager relaunch into a LATER, unrelated death.
@@ -1232,7 +1239,11 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       identity,
       cwd,
       args.restart ? false : reloadResumeRef ? true : args.resume,
-      c => reloadResumeRef ? { ok: true, ref: reloadResumeRef } : adapter.resolveResume(c, { personality: args.personality, env }),
+      c => {
+        const r = reloadResumeRef ? { ok: true, ref: reloadResumeRef } : adapter.resolveResume(c, { personality: args.personality, env })
+        return r.ok && sessionQuarantined(cfg, identity, r.ref)
+          ? { ok: false, reason: 'native session quarantined after provider failover; use a fresh session' } : r
+      },
       args.topic,
       f => consumeOnUp.push(f),
       args.continueWork,
@@ -1258,6 +1269,10 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       reason: mode.failReason,
     })
     if (mode.failReason) return { status: 'FAILED', woke: false, runtime, reason: mode.failReason }
+    if (mode.resume && sessionQuarantined(cfg, identity, mode.resumeRef)) {
+      // Applies to attach, limit-resume, capability exact-resume and ordinary wakes.
+      return { status: 'FAILED', woke: false, runtime, reason: 'native session quarantined after provider failover; start a fresh session with new' }
+    }
     const resume = mode.resume
     const resumeRef = mode.resumeRef
     const fresh = !resume
@@ -1290,7 +1305,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       systemPromptFile,
       resume, // RESOLVED resume/fresh (C3a), not the raw caller flag
       resumeRef,
-      ...(reloadResumeRef ? { exactResume: true } : {}),
+      ...(resumeRef ? { exactResume: true } : {}),
       extraArgs: [],
       // Carry the peer's nature so the launch primitive can enforce an adapter's
       // intelligence gate (telegram requires natural). From the registry record.
@@ -1974,6 +1989,10 @@ export async function drainEphemeralQueue(
   runtime: Runtime,
   deps: DrainDeps = {},
 ): Promise<WakeResult | null> {
+  return withWakeLock(cfg, `${runtime}-${personality}.queue-drain`, () => drainEphemeralQueueInner(cfg, personality, runtime, deps))
+}
+
+async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: string, runtime: Runtime, deps: DrainDeps): Promise<WakeResult | null> {
   const env = deps.env ?? process.env
   const identity = buildProcessAddress(runtime, personality)
   const sock = buildSocketPath(runtime, personality, cfg.sockDir)
@@ -1988,6 +2007,16 @@ export async function drainEphemeralQueue(
     removeEphemeralTask(cfg, identity, item.seq) // stale STATUS, never an addressed work item
     return null
   }
+  let deliveryRuntime = runtime
+  if (item.failoverEligible) {
+    const peer = findPeer(readPeersIndex({ env }), personality)
+    if (!peer || isStopped(cfg, identity)) return null
+    const selected = selectFailoverRuntime(cfg, peer)
+    if (!selected.ok || !selected.value.runtime) return null
+    deliveryRuntime = selected.value.runtime
+    const actual = buildProcessAddress(deliveryRuntime, personality)
+    if (sessionAlive(buildSocketPath(deliveryRuntime, personality, cfg.sockDir), actual, env) || readLimitPark(cfg, actual)) return null
+  }
   // Durable drain trace: which item, how deep the queue.
   appendLifecycleEvent(
     cfg.eventLogDir,
@@ -1996,7 +2025,7 @@ export async function drainEphemeralQueue(
   )
   const wake = deps.wakeFn ?? wakeOrSpawn
   const acceptedAtMs = Date.now()
-  const result = await wake({ personality, runtime, topic: item.topic, task: item.task, ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }, { cfg, env })
+  const result = await wake({ personality, runtime: deliveryRuntime, topic: item.topic, task: item.task, ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }, { cfg, env })
   // Remove ONLY when THIS wake actually delivered the task. On the live-session fast
   // path (READY, taskDelivered:false) a CONCURRENT wake delivered ITS OWN task — ours
   // was NOT delivered. Deleting it here would silently drop a queued task (the loss the
@@ -2008,10 +2037,17 @@ export async function drainEphemeralQueue(
     try {
       const from = decodeEnvelope(item.task)
       const peer = findPeer(readPeersIndex({ env }), personality)
-      if (peer) noteWorkOrigin(cfg, { identity, personality, runtime, cwd: peer.cwd,
-        sessionToken: hostSessionToken(identity, env), ts: acceptedAtMs, sentAt: from.sentAt ?? new Date(acceptedAtMs).toISOString(),
-        caller: { personality: from.fromPersonality, runtime: from.fromRuntime }, message: from.message,
-        rendered: renderEnvelopeForAgent(item.task), ...(item.explicitRuntime ? { explicitRuntime: true } : {}) })
+      const actual = buildProcessAddress(deliveryRuntime, personality)
+      if (peer) {
+        const note = { identity: actual, personality, runtime: deliveryRuntime, cwd: peer.cwd,
+          sessionToken: hostSessionToken(actual, env), ts: acceptedAtMs, acceptedAtMs, sentAt: from.sentAt ?? new Date(acceptedAtMs).toISOString(),
+          caller: { personality: from.fromPersonality, runtime: from.fromRuntime },
+          message: item.failoverTaskId ? from.message.replace(new RegExp(`\\n\\[iapeer taskId=${item.failoverTaskId}\\]$`), '') : from.message,
+          rendered: renderEnvelopeForAgent(item.task), ...(item.explicitRuntime ? { explicitRuntime: true as const } : {}),
+          ...(item.failoverEligible ? { failoverEligible: true as const, failoverTaskId: item.failoverTaskId, failoverVisited: [...new Set([...(item.failoverVisited ?? []), deliveryRuntime])] } : {}) }
+        noteWorkOrigin(cfg, note)
+        recordFailoverTask(cfg, note)
+      }
     } catch { /* a provenance write failure never invents authorization or requeues a delivered job */ }
     removeEphemeralTask(cfg, identity, item.seq)
   }

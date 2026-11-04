@@ -48,6 +48,7 @@ A peer can declare several runtimes. In the profile that's two fields:
 
 - **`runtimes`** — the list of all runtimes the peer can be present on, e.g. `["claude", "codex"]`.
 - **`default_runtime`** — the primary runtime: where messages route by default and which runtime comes up first.
+- **`failover`** — optional local profile boolean, default `true`; `false` disables [automatic provider failover](23-failover.md). Stopped runtimes remain excluded regardless of this setting.
 
 Adding a runtime to a peer and making it the primary are different operations. The first (`add-runtime`) extends the options without changing routing; the second (`default-runtime`) switches the primary runtime. Switching `default_runtime` across all peers in bulk is exactly the moment of "transplanting" the team from one agent runtime to another. See [09 — Runtimes](09-runtimes.md).
 

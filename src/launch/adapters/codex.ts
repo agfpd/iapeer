@@ -44,9 +44,9 @@ import { codexInputReady } from '../codexReadiness.ts'
 import { join } from 'path'
 import { existsSync, readdirSync, realpathSync, statSync } from 'fs'
 import { preSeedCodexHooksTrust } from '../codexHooksTrust.ts'
-import { codexSessionCwd, lastTimestampedEntryMs } from './transcriptTail.ts'
+import { codexSessionCwd, lastTimestampedEntryMs, readFirstLine } from './transcriptTail.ts'
 import { detectNumberedModal } from './modalDetect.ts'
-import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, PreparedLaunch, RuntimeAdapter } from '../types.ts'
+import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, ObserveContext, PreparedLaunch, RuntimeAdapter } from '../types.ts'
 
 /**
  * The `/goal` subcommands we will type into a live codex session (see executeControl → 'goal').
@@ -407,9 +407,10 @@ export const codexAdapter: RuntimeAdapter = {
    * reason} so the caller surfaces a real failure instead of a context-less
    * session.
    */
-  resolveResume(cwd: string): { ok: boolean; ref?: string; reason?: string } {
+  resolveResume(cwd: string, ctx?: ObserveContext): { ok: boolean; ref?: string; reason?: string } {
     const target = canonicalPath(cwd)
-    const root = join(homedir(), '.codex', 'sessions')
+    const root = join(ctx?.env?.CODEX_HOME || join(ctx?.env?.HOME || homedir(), '.codex'), 'sessions')
+    let best: { ref: string; mt: number } | undefined
     function visit(dir: string): boolean {
       let entries
       try {
@@ -420,16 +421,23 @@ export const codexAdapter: RuntimeAdapter = {
       for (const entry of entries) {
         const path = join(dir, entry.name)
         if (entry.isDirectory()) {
-          if (visit(path)) return true
+          visit(path)
           continue
         }
         if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
-        if (canonicalPath(codexSessionCwd(path) ?? '') === target) return true
+        if (canonicalPath(codexSessionCwd(path) ?? '') !== target) continue
+        try {
+          const meta = JSON.parse(readFirstLine(path) ?? '{}')
+          const ref = meta.payload?.id
+          const mt = statSync(path).mtimeMs
+          if (typeof ref === 'string' && ref && (!best || mt > best.mt)) best = { ref, mt }
+        } catch { /* no exact native identity: cannot authorize a resume */ }
       }
       return false
     }
-    return visit(root)
-      ? { ok: true }
+    visit(root)
+    return best
+      ? { ok: true, ref: best.ref }
       : { ok: false, reason: 'no codex session to resume' }
   },
 

@@ -11,11 +11,16 @@ working threads retain exact routing.
 Provider refusal is positive native evidence, not silence, elapsed time, a dead
 socket or an unconfirmed paste. Limit, authentication and overload refusals are
 eligible. A known refusal excludes that endpoint until its stated reset or a
-bounded retry interval. This does not change the configured default.
+five-minute retry interval. This does not change the configured default. Detection
+uses the native mute-watch (20-second cadence); custody transfer runs before the
+normal supervise/inflight/limit-resume passes (60-second cadence by default).
 
 An accepted task may transfer only after the failed hosting has ended and the
 complete evidence from its input through the refusal proves no model/tool work
 started. Missing, truncated or ambiguous evidence is not permission to replay.
+The proof currently reads at most 16 MiB of a complete native file, binds a unique
+task marker to native input, and rejects unknown bootstrap hooks/queued input or
+intervening model output. Oversized files remain unverified, not implicitly safe.
 An interrupted task with possible effects instead produces an explicit review
 notice with durable evidence; its original instruction is not replayed.
 
@@ -39,6 +44,20 @@ than injecting an entire conversation as new executable instructions.
 Recovery makes the configured default eligible for subsequent messages; it does
 not replay, migrate or interrupt work already assigned to a fallback. Quarantined
 native sessions remain quarantined after provider recovery and daemon restart.
+
+Automatic replacement work carries its own durable provenance: it may continue
+on its assigned non-default runtime after a later limit reset, just like an
+explicitly addressed task. This does not grant autonomous core maintenance notices
+permission to start unrelated non-default work.
+
+State lives under `state/lifecycle/failover/`: endpoint provider evidence,
+quarantined native IDs, fresh-next barriers, task receipts and a small active
+index. Receipt paths remain stable for review. Lifecycle events are
+`provider-refusal` and `failover` with task ID, source, target and outcome; bodies
+are not written into the lifecycle log. `[iapeer taskId=…]` on agent input is a
+core custody marker, not a request for a reply or an application idempotency key.
+Settled receipts are retained for seven days; active/uncertain custody and native
+session quarantines are not expired by that cleanup.
 
 ## Acceptance
 

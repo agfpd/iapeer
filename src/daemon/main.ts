@@ -90,6 +90,8 @@ import { processAcceptance } from './acceptance.ts'
 import { readAcceptance, writeAcceptance } from '../launch/acceptanceStore.ts'
 import { inflightAcceptanceId, readInflight } from '../lifecycle/inflight.ts'
 import { hostRunDir, hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts'
+import { recordFailoverTask, recordProviderFailure, selectFailoverRuntime, sessionQuarantined } from '../lifecycle/failover.ts'
+import { processFailovers } from './failover.ts'
 
 /** Default TCP loopback port for the always-on router. Real http MCP clients
  *  (claude/codex `--transport http <url>`) bind to a fixed URL, so production needs
@@ -222,13 +224,13 @@ export function makeEphemeralRouteDeps(
 ): EphemeralRouteDeps {
   return {
     isEphemeral: cwd => isEphemeralPeer(cwd),
-    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime }) => {
+    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime, failoverEligible, failoverTaskId, failoverVisited }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
       const identity = buildProcessAddress(rt.value, peer.personality)
       let depth: number
       try {
-        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
+        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(failoverEligible ? { failoverEligible, failoverTaskId, failoverVisited } : {}), ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
       } catch (e) {
         return err(
           `ephemeral enqueue failed for "${peer.personality}": ${e instanceof Error ? e.message : String(e)}; message NOT queued`,
@@ -275,6 +277,7 @@ export function makeNoteInflight(cfg: LifecycleConfig): (note: InflightNote) => 
   return note => {
     const entry = { ...note, id: randomBytes(6).toString('hex'), ts: Date.now() }
     recordInflight(cfg.stateDir, entry)
+    recordFailoverTask(cfg, note)
     noteWorkOrigin(cfg, entry)
   }
 }
@@ -551,6 +554,9 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   })
   const stopMuteWatch = startMuteWatch(cfg, board, {
     env,
+    onFailure: d => {
+      if (recordProviderFailure(cfg, d)) appendLifecycleEvent(cfg.eventLogDir, { ev: 'provider-refusal', identity: `${d.runtime}-${d.personality}`, error_type: d.errorType }, { env })
+    },
     intervalMs: opts.muteWatchIntervalMs ?? DEFAULT_MUTEWATCH_INTERVAL_MS,
     // Same stance as the supervise tick's onError: a detector throw must be VISIBLE, not
     // swallowed into a silently-dead watch — the exact failure mode this feature exists to
@@ -565,6 +571,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     // tick holds it from idle-reap and the limit-resume pass nudges it after the reset.
     onLimit: d => {
       const identity = `${d.runtime}-${d.personality}`
+      if (sessionQuarantined(cfg, identity, d.sessionId)) return
       if (d.resetsAtMs === undefined) return
       const fresh = recordLimitPark(cfg, {
         workOrigin: workOriginAtLimit(cfg, identity, d.atMs, env, d.file),
@@ -668,6 +675,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     noteDelivered: identity => setLastDelivered(cfg, identity),
     // OC07 — confirmed delivery to an agent endpoint → inflight ledger (redelivered if its session dies first).
     noteInflight,
+    selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt),
     // Busy-human-composer queue: fast queued ack, async drain, fail all pending
     // on daemon close/update so a queued envelope is never silently lost.
     composerQueue,
@@ -690,6 +698,8 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       // wake superviseTick inside wakeOrSpawn). The outcomes array drives only the
       // eager relaunch here; the trace does not depend on consuming it.
       tick: async () => {
+        await processFailovers(cfg, env, { env, wake: makeWakeFn(cfg, env), noteInflight, noteLiveTopic, ephemeral,
+          noteDelivered: identity => setLastDelivered(cfg, identity) }, board)
         await processAcceptance({ runDir: cfg.supervisorRunDir ?? join(cfg.stateDir, '..', 'supervisor'), logDir: cfg.eventLogDir, env, board,
           routeDeps: { env, wake: makeWakeFn(cfg, env), noteInflight } })
         const outcomes = superviseTick(cfg, { env })

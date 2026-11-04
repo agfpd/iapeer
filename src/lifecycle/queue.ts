@@ -27,6 +27,9 @@ import type { LifecycleConfig } from './index.ts'
 
 /** One queued task for an ephemeral worker. */
 export interface EphemeralQueueItem {
+  failoverEligible?: true
+  failoverTaskId?: string
+  failoverVisited?: string[]
   explicitRuntime?: true
   suppressInitialPrompt?: true
   coreNotice?: true
@@ -102,7 +105,7 @@ export function enqueueEphemeralTask(
   const dir = ephemeralQueueDir(cfg, identity)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const tmp = join(dir, `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  writeFileSync(tmp, JSON.stringify({ task: item.task, ...(item.topic ? { topic: item.topic } : {}), ...(item.explicitRuntime ? { explicitRuntime: true } : {}), ...(item.coreNotice ? { coreNotice: true } : {}), ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }), {
+  writeFileSync(tmp, JSON.stringify({ task: item.task, ...(item.failoverEligible ? { failoverEligible: true, failoverTaskId: item.failoverTaskId, failoverVisited: item.failoverVisited } : {}), ...(item.topic ? { topic: item.topic } : {}), ...(item.explicitRuntime ? { explicitRuntime: true } : {}), ...(item.coreNotice ? { coreNotice: true } : {}), ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }), {
     mode: 0o600,
   })
   try {
@@ -148,6 +151,8 @@ export function peekEphemeralTask(cfg: LifecycleConfig, identity: string): Peeke
       const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
       if (typeof raw.task === 'string' && raw.task.length > 0) {
         return { seq, task: raw.task, topic: typeof raw.topic === 'string' ? raw.topic : undefined,
+          ...(raw.failoverEligible === true ? { failoverEligible: true as const, failoverTaskId: typeof raw.failoverTaskId === 'string' ? raw.failoverTaskId : undefined,
+            failoverVisited: Array.isArray(raw.failoverVisited) ? raw.failoverVisited.filter((x): x is string => typeof x === 'string') : undefined } : {}),
           ...(raw.explicitRuntime === true ? { explicitRuntime: true as const } : {}),
           ...(raw.coreNotice === true ? { coreNotice: true as const } : {}), ...(raw.suppressInitialPrompt === true ? { suppressInitialPrompt: true as const } : {}) }
       }

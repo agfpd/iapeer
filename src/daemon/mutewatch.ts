@@ -592,12 +592,13 @@ export function scanMuteEvents(deps: ScanDeps, sinceMs: number): MuteDetection[]
     if (mt < floor) continue
     const t = readSessionSlices(j.events, TAIL_BYTES)
     const d = t ? parseOpencodeJournal(t.tail, floor) : null
-    if (d) out.push({ ...d, ...(j.model ? { model: j.model } : {}), cwd: '', personality: j.personality, runtime: 'opencode' })
+    if (d) out.push({ ...d, ...(j.model ? { model: j.model } : {}), cwd: '', personality: j.personality, runtime: 'opencode', file: j.events })
   }
   return out
 }
 
 export interface MuteWatchDeps extends ScanDeps {
+  onFailure?: (d: MuteDetection) => void
   board: NoticeBoard
   now?: () => number
   /** Reported, never thrown — a detector must never take the daemon down. */
@@ -616,6 +617,7 @@ export function muteWatchTick(deps: MuteWatchDeps, sinceMs: number): { raised: n
   let raised = 0
   try {
     for (const d of scanMuteEvents(deps, sinceMs)) {
+      deps.onFailure?.(d)
       const { deduped } = deps.board.raise({
         personality: d.personality,
         runtime: d.runtime,
@@ -668,6 +670,7 @@ export function peerByCwdPrefix(byCwd: Map<string, string>, cwd: string): string
 }
 
 export interface StartMuteWatchOptions {
+  onFailure?: (d: MuteDetection) => void
   env?: NodeJS.ProcessEnv
   intervalMs?: number
   /** Override the runtime session roots (tests). Default: resolveMuteWatchPaths(env). */
@@ -716,6 +719,7 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
         now,
         onError: opts.onError,
         onLimit: opts.onLimit,
+        onFailure: opts.onFailure,
         peerByCwd: (cwd: string) => peerByCwdPrefix(byCwd, cwd),
         opencodeJournals: () =>
           rows
@@ -739,6 +743,7 @@ export function startMuteWatch(cfg: LifecycleConfig, board: NoticeBoard, opts: S
         if (opts.onLimit) {
           for (const d of scanMuteEvents(deps, t - CATCH_UP_HORIZON_MS)) {
             if (d.resetsAtMs === undefined || d.resetsAtMs <= t) continue
+            opts.onFailure?.(d)
             try { opts.onLimit(d) } catch (e) { opts.onError?.(e) }
           }
         }

@@ -26,6 +26,7 @@ import { systemCaller } from '../identity/index.ts'
 import { routeSend, type RouteDeps } from '../transport/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import { workOriginAtLimit, workOriginStillValid } from '../lifecycle/workOrigin.ts'
+import { sessionQuarantined } from '../lifecycle/failover.ts'
 
 
 export function limitResumeMessage(p: LimitPark): string {
@@ -63,6 +64,11 @@ export async function processLimitResumes(
     }
   }
   for (const p of listLimitParks(cfg)) {
+    if (sessionQuarantined(cfg, p.identity, p.sessionId)) {
+      clearLimitPark(cfg, p.identity)
+      log({ identity: p.identity, outcome: 'skipped-failover' })
+      continue
+    }
     if (now < p.resetsAtMs + LIMIT_RESUME_GRACE_MS) continue
     if (p.lastAttemptMs && now - p.lastAttemptMs < LIMIT_RETRY_BACKOFF_MS) continue
     const peer = findPeer(readPeersIndex({ env }), p.personality)

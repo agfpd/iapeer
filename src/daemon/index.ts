@@ -204,6 +204,7 @@ function errResult(text: string): ToolResult {
 /** Injected seams for callTool — all OPTIONAL, all wired by the composition point
  *  (daemon/main.ts); library/test callers omit them and stay hermetic. */
 export interface CallToolDeps {
+  selectAgentRuntime?: RouteDeps['selectAgentRuntime']
   /** Б7 — injected env for the request-path registry read + routeSend (daemon:286 isolation). Default
    *  process.env; the production daemon threads its startDaemon env here. */
   env?: NodeJS.ProcessEnv
@@ -258,6 +259,7 @@ export async function callTool(
       noteLiveTopic: deps.noteLiveTopic,
       noteDelivered: deps.noteDelivered,
       noteInflight: deps.noteInflight,
+      selectAgentRuntime: deps.selectAgentRuntime,
       composerQueue: deps.composerQueue,
       isLaunchdManaged: deps.isLaunchdManaged,
     })
@@ -402,6 +404,7 @@ export type FleetRequestHandler = (
 ) => Promise<void>
 
 export interface StartDaemonOptions extends StorageOptions {
+  selectAgentRuntime?: RouteDeps['selectAgentRuntime']
   /**
    * Unix-socket path (H8 base: 0600, same-uid local callers — CLI / pane /
    * notifier / telegram). Bound when given; when NEITHER socketPath NOR port is
@@ -518,6 +521,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     noteLiveTopic: opts.noteLiveTopic,
     noteDelivered: opts.noteDelivered,
     noteInflight: opts.noteInflight,
+    selectAgentRuntime: opts.selectAgentRuntime,
     composerQueue: opts.composerQueue,
     isLaunchdManaged: opts.isLaunchdManaged,
   }

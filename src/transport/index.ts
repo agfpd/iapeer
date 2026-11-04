@@ -16,6 +16,7 @@
 import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { randomUUID } from 'node:crypto'
 import {
   MAX_ATTACHMENTS,
   MAX_MESSAGE_LEN,
@@ -853,8 +854,8 @@ const PROCESSED_TAIL_BYTES = 16 * 1024 * 1024
  * assistant before its user and intermediate attachments. UUID ancestry is authoritative.
  * UUID-less historical records retain the legacy ordered scan; a broken UUID chain never does.
  */
-function claudeDeliveryState(tail: string, needles: string[]): { processed: boolean; completed: boolean } | null {
-  interface Record { type?: string; uuid?: string; parentUuid?: string | null; message?: { stop_reason?: string; content?: unknown }; attachment?: { type?: string; prompt?: unknown } }
+function claudeDeliveryState(tail: string, needles: string[], successOnly = false): { processed: boolean; completed: boolean } | null {
+  interface Record { type?: string; uuid?: string; parentUuid?: string | null; isApiErrorMessage?: boolean; message?: { model?: string; stop_reason?: string; content?: unknown }; attachment?: { type?: string; prompt?: unknown } }
   const rows: Record[] = []
   const byID = new Map<string, Record>()
   const carried = new Set<string>()
@@ -895,9 +896,9 @@ function claudeDeliveryState(tail: string, needles: string[]): { processed: bool
     if (!descendsFromInput(r)) continue
     if (r.type === 'assistant') {
       processed = true
-      if (['end_turn', 'stop_sequence', 'max_tokens'].includes(r.message?.stop_reason ?? '')) completed = true
+      if (['end_turn', 'stop_sequence', 'max_tokens'].includes(r.message?.stop_reason ?? '') && (!successOnly || r.isApiErrorMessage !== true && !!r.message?.model && r.message.model !== '<synthetic>')) completed = true
     }
-    if (r.type === 'user' && isInterruptMarkerLine(r)) completed = true
+    if (!successOnly && r.type === 'user' && isInterruptMarkerLine(r)) completed = true
   }
   return { processed, completed }
 }
@@ -999,7 +1000,7 @@ function isInterruptMarkerLine(o: { message?: unknown }): boolean {
   return texts.some(t => /^\[Request interrupted by user/.test(t.trim()))
 }
 
-export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env, beforeMs?: number): boolean {
+export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv = process.env, beforeMs?: number, successOnly = false): boolean {
   const needles = confirmNeedles(probe.rendered)
   if (!needles.length || needles.every(n => !n)) return false
   if (getAdapter(probe.runtime).deliveryConfirm === 'structural') {
@@ -1015,7 +1016,7 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
     const userIDs = new Set<string>()
     for (const line of readFileTailFrom(path, Math.max(0, size - PROCESSED_TAIL_BYTES)).split('\n')) {
       if (!line.trim()) continue
-      let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { role?: string; parentID?: string; finish?: string; time?: { completed?: number } } } }
+      let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { error?: unknown; role?: string; parentID?: string; finish?: string; time?: { completed?: number } } } }
       try {
         e = JSON.parse(line)
       } catch {
@@ -1027,7 +1028,7 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
         if (needles.every(n => text.includes(n))) userIDs.add(part.messageID)
       }
       const info = e.properties?.info
-      if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID) && info.time?.completed && info.finish !== 'tool-calls') return true
+      if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID) && info.time?.completed && info.finish !== 'tool-calls' && (!successOnly || !info.error && !!info.finish)) return true
     }
     return false
   }
@@ -1050,13 +1051,13 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       } catch { return false }
     }).join('\n')
     if (probe.runtime === 'claude') {
-      const semantic = claudeDeliveryState(tail, needles)
+      const semantic = claudeDeliveryState(tail, needles, successOnly)
       if (semantic) { if (semantic.completed) return true; continue }
     }
     let carried = false
     for (const line of tail.split(/\r?\n/)) {
       if (!line.trim()) continue
-      let o: { type?: string; message?: { stop_reason?: string }; payload?: { type?: string } }
+      let o: { type?: string; isApiErrorMessage?: boolean; message?: { model?: string; stop_reason?: string }; payload?: { type?: string; error?: unknown; last_agent_message?: unknown } }
       try {
         o = JSON.parse(line)
       } catch {
@@ -1066,14 +1067,14 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
         if (o.type !== 'queue-operation' && jsonStringValuesContainAll(o, needles)) carried = true
         continue
       }
-      if (o.type === 'assistant' && ['end_turn', 'stop_sequence', 'max_tokens'].includes(o.message?.stop_reason ?? '')) return true
-      if (o.type === 'event_msg' && o.payload?.type === 'task_complete') return true
+      if (o.type === 'assistant' && ['end_turn', 'stop_sequence', 'max_tokens'].includes(o.message?.stop_reason ?? '') && (!successOnly || o.isApiErrorMessage !== true && !!o.message?.model && o.message.model !== '<synthetic>')) return true
+      if (o.type === 'event_msg' && o.payload?.type === 'task_complete' && (!successOnly || !o.payload.error && typeof o.payload.last_agent_message === 'string' && !!o.payload.last_agent_message)) return true
       // An operator INTERRUPT ends the turn too (claude: a `[Request interrupted by user…]` user line,
       // codex: `turn_aborted`). Not counting it, a turn the owner had stopped was later reported to its
       // sender as «INTERRUPTED by the session's death» once the session died for an unrelated reason
       // (live parity run 18.10). OpenCode's abort already closes the assistant message, so it was right.
-      if (o.type === 'event_msg' && o.payload?.type === 'turn_aborted') return true
-      if (o.type === 'user' && isInterruptMarkerLine(o)) return true
+      if (!successOnly && o.type === 'event_msg' && o.payload?.type === 'turn_aborted') return true
+      if (!successOnly && o.type === 'user' && isInterruptMarkerLine(o)) return true
     }
   }
   return false
@@ -1113,6 +1114,9 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
 
 /** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
 export interface InflightNote {
+  failoverEligible?: true
+  failoverVisited?: string[]
+  failoverTaskId?: string
   pendingDeliveryId?: string
   acceptedAtMs?: number
   /** Caller explicitly selected the receiving runtime (not the registry's then-default). */
@@ -1470,6 +1474,9 @@ export interface EphemeralRouteDeps {
    *  ack. MUST NOT block on the wake (the sender's content-level answer is the
    *  worker's own reply, not this transport ack). */
   deliver: (args: {
+    failoverEligible?: true
+    failoverTaskId?: string
+    failoverVisited?: string[]
     explicitRuntime?: true
     suppressInitialPrompt?: boolean
     coreNotice?: boolean
@@ -1517,6 +1524,12 @@ export interface ComposerQueueRouteDeps {
 }
 
 export interface RouteDeps {
+  /** cfg-bound provider selector. Does not treat timeouts as provider failures. */
+  selectAgentRuntime?: (peer: PeerRecord, runtime?: string) => Result<{ runtime?: string; eligible: boolean }>
+  /** Internal transfer preserves automatic routing provenance without exposing a tool flag. */
+  failoverRetry?: boolean
+  failoverVisited?: string[]
+  failoverTaskId?: string
   /** Internal core status notice: agent destinations follow their CURRENT default; router origins stay exact. */
   coreNotice?: boolean
   /** A wake triggered by THIS send carries the "continue THIS work" intent (resume an idle-reaped
@@ -1585,7 +1598,7 @@ function noteTopic(deps: RouteDeps, identity: string, topic: string | undefined)
   }
 }
 
-type InflightInfo = { pendingDeliveryId?: string; coreNotice?: boolean; acceptedAtMs?: number; sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean; explicitRuntime?: true }
+type InflightInfo = { failoverEligible?: true; failoverVisited?: string[]; failoverTaskId?: string; pendingDeliveryId?: string; coreNotice?: boolean; acceptedAtMs?: number; sentAt: string; caller: ResolvedCaller; message: string; topic?: string; attachments?: string[]; envelope: string; unconfirmed?: boolean; explicitRuntime?: true }
 
 /** Best-effort inflight record (OC07) — only for agent (tui) endpoints. */
 function noteInflight(
@@ -1599,6 +1612,9 @@ function noteInflight(
   try {
     if (getAdapter(target.runtime).kind !== 'tui') return
     deps.noteInflight({
+      ...(info.failoverEligible ? { failoverEligible: true as const } : {}),
+      ...(info.failoverTaskId ? { failoverTaskId: info.failoverTaskId } : {}),
+      ...(info.failoverEligible ? { failoverVisited: [...new Set([...(info.failoverVisited ?? []), target.runtime])] } : {}),
       acceptedAtMs: info.acceptedAtMs,
       pendingDeliveryId: info.pendingDeliveryId,
       sentAt: info.sentAt,
@@ -2003,6 +2019,14 @@ async function routeSendInner(
     return err(`peer "${personality}" is not in the iapeer peers index; message NOT delivered`)
   }
   if (deps.coreNotice && peer.intelligence === 'artificial' && getAdapter(runtime ?? peer.runtime).kind === 'tui') runtime = peer.runtime
+  const explicitRuntime = runtime && caller.runtime !== 'core' && !deps.failoverRetry
+  let failoverEligible = !!deps.failoverRetry
+  if (deps.selectAgentRuntime && !deps.coreNotice && !deps.wakeContinueWork && !deps.isLaunchdManaged?.(personality)) {
+    const selected = deps.selectAgentRuntime(peer, runtime)
+    if (!selected.ok) return selected
+    runtime = selected.value.runtime
+    failoverEligible ||= selected.value.eligible
+  }
 
   // Origin-guard (docs/18) — an agent's PRESUMED REPLY to a human (the human's latest
   // inbound to this agent is unanswered) must target the channel the human wrote from.
@@ -2056,6 +2080,7 @@ async function routeSendInner(
   // side) — the two correspond literally, which is what makes async-desync
   // visible (the recipient can tell how old the message it is reading is).
   const sentAt = formatSentAt(new Date())
+  const failoverTaskId = failoverEligible ? deps.failoverTaskId ?? randomUUID() : undefined
   // Built once — it is both the live-delivery payload and, on a miss, the wake
   // first-message (the woken session receives it as its boot task). This is the
   // WIRE form; agent-bound hops re-render it compactly at delivery.
@@ -2066,11 +2091,14 @@ async function routeSendInner(
     sentAt,
     topic,
     attachments: spooled.value.paths,
-    message,
+    message: failoverTaskId ? `${message}\n[iapeer taskId=${failoverTaskId}]` : message,
   })
   // OC07 — what the inflight ledger needs to redeliver this message if the receiving session dies first.
   const inflightInfo = { coreNotice: deps.coreNotice, acceptedAtMs: Date.now(), sentAt, caller, message, topic, attachments: spooled.value.paths, envelope,
-    ...(runtime && caller.runtime !== 'core' ? { explicitRuntime: true as const } : {}) }
+    ...(failoverEligible ? { failoverEligible: true as const } : {}),
+    ...(failoverTaskId ? { failoverTaskId } : {}),
+    ...(deps.failoverVisited ? { failoverVisited: deps.failoverVisited } : {}),
+    ...(explicitRuntime ? { explicitRuntime: true as const } : {}) }
 
   // M3 wake_policy:"ephemeral" — an ephemeral target is NEVER injected into a live
   // session and never woken synchronously here: the delivery is ALWAYS enqueued
@@ -2081,7 +2109,8 @@ async function routeSendInner(
   if (deps.ephemeral?.isEphemeral(peer.cwd)) {
     if (caller.personality === peer.personality) return err('cannot send to self')
     return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt,
-      ...(runtime && caller.runtime !== 'core' ? { explicitRuntime: true as const } : {}),
+      ...(failoverEligible ? { failoverEligible: true as const, failoverTaskId, failoverVisited: deps.failoverVisited } : {}),
+      ...(explicitRuntime ? { explicitRuntime: true as const } : {}),
       ...(caller.runtime === 'core' ? { suppressInitialPrompt: true } : {}), ...(deps.coreNotice ? { coreNotice: true } : {}) })
   }
 

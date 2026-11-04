@@ -84,6 +84,8 @@ export interface PeerProfile {
   /** Per-peer human-approval mode (lifecycle-owned). Absent = `yolo` (default). Only
    *  `gated` is persisted; see ApprovalMode. */
   approval_mode?: ApprovalMode
+  /** Provider failover is enabled by default; false pins this peer to its selected runtime. */
+  failover?: boolean
 }
 
 // Write shape: intelligence/description optional so a caller can write a profile
@@ -300,6 +302,7 @@ export function readPeerProfile(cwd: string = process.cwd()): PeerProfile | null
     // Approval mode — only `gated` is persisted/honored; absent / `yolo` / unknown →
     // omitted (treated as the default `yolo`, never throws on an unknown future value).
     ...(obj.approval_mode === 'gated' ? { approval_mode: 'gated' as const } : {}),
+    ...(typeof obj.failover === 'boolean' ? { failover: obj.failover } : {}),
   }
 }
 
@@ -448,6 +451,7 @@ function writePeerProfileMerged(path: string, profile: PeerProfileWrite): void {
   // value verbatim via `...existing` — a caller that does not own the toggle never flips it.
   if (profile.approval_mode === 'gated') merged.approval_mode = 'gated'
   else if (profile.approval_mode === 'yolo') delete merged.approval_mode
+  if (typeof profile.failover === 'boolean') merged.failover = profile.failover
   writeFileAtomic(path, `${JSON.stringify(merged, null, 2)}\n`)
 }
 
