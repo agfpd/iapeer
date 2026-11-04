@@ -27,7 +27,7 @@ const { initPeer } = await import('../src/init/index.ts')
 const { upsertPeer } = await import('../src/registry/index.ts')
 const { writePeerProfileAtomic } = await import('../src/identity/index.ts')
 const { peerLaunchEnvPath } = await import('../src/storage/index.ts')
-const { loadLifecycleConfig, setStopped } = await import('../src/lifecycle/index.ts')
+const { loadLifecycleConfig } = await import('../src/lifecycle/index.ts')
 const { selectFailoverRuntime } = await import('../src/lifecycle/failover.ts')
 const { readPeersIndex, findPeer } = await import('../src/registry/index.ts')
 const results: unknown[] = []
@@ -50,6 +50,7 @@ const log = join(root, 'effects.log'), first = `FIRST_${randomUUID()}`, second =
 const commandTask = (marker: string) => `This is a disposable infrastructure acceptance test. Execute exactly one shell command: printf '%s\\n' '${marker}' >> '${log}'. Do not check for an existing marker or deduplicate yourself: the router is being tested. Do not send messages to anyone. Then reply DONE.`
 let daemon: ReturnType<typeof Bun.spawn> | undefined, success = false
 try {
+  check('binary version', await cli('version'))
   mkdirSync(cwd, { recursive: true }); mkdirSync(join(home, '.claude'), { recursive: true }); mkdirSync(join(home, '.codex'), { recursive: true })
   writeFileSync(join(home, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark', bypassPermissionsModeAccepted: true }))
   // Read-only copy: the real fleet's credential file/configuration is never modified.
@@ -104,9 +105,13 @@ try {
   check('primary recovery executes neither old task again', read(log))
   }
   // Private isolated policy contrast. Production walt policy is checked read-only separately.
-  setStopped(cfg, 'codex-failover-proof'); setStopped(cfg, 'claude-failover-proof')
+  await cli('stop', 'failover-proof', 'codex')
+  await cli('stop', 'failover-proof', 'claude')
   if (selectFailoverRuntime(cfg, p).ok) throw new Error('stopped endpoints selected')
-  check('all stopped => no failover candidate', true)
+  const blocked = Bun.spawn([bin, 'send', 'failover-proof', '--from', 'notifier-sender', '--message', 'ALL_STOPPED_MUST_NOT_DELIVER'], { env, stdout: 'pipe', stderr: 'pipe' })
+  const [code, stdout, stderr] = await Promise.all([blocked.exited, new Response(blocked.stdout).text(), new Response(blocked.stderr).text()])
+  if (code === 0 || !(stdout + stderr).includes('no available agent runtime')) throw new Error('installed CLI did not refuse stopped endpoints')
+  check('installed CLI refuses all stopped endpoints', { code, stdout, stderr })
   success = true
 } finally {
   if (daemon) { daemon.kill('SIGTERM'); await daemon.exited }
