@@ -73,13 +73,15 @@ Behavior depends on the runtime class:
 
 You can address a specific runtime: `iapeer stop assistant codex`.
 
+**A running turn is protected.** If the core has delivered a message to the session and the turn it started has not finished, `stop` does not kill it: it answers `refused-busy` with who sent the message and how long ago, and exits with code 75 (so `stop && start` stops before the `start`). Two ways forward: `--wait <sec>` holds the stop until the turn ends and then stops; `--force` kills the turn now (its result is lost, and the sender is told the work was interrupted). The same guard applies to `new`. It does not apply to idle-reap, `self-fresh`, a limit reset or a crash.
+
 ## Unconditional restart: new
 
 ```bash
 iapeer new assistant
 ```
 
-`new` is the emergency lever for a hung or dead session. Unlike the soft path (where a live agent reads the command itself and restarts), `new` acts mechanically, around the agent: it cleanly tears down the current session and brings up a fresh one. The command reports success only when the fresh session has actually come up and is ready. It's the rescue for when an agent is hung so badly it reads nothing.
+`new` is the emergency lever for a hung or dead session. A turn still running on a delivered message is protected as with `stop` (`refused-busy`, exit 75; `--wait <sec>` or `--force`). Unlike the soft path (where a live agent reads the command itself and restarts), `new` acts mechanically, around the agent: it cleanly tears down the current session and brings up a fresh one. The command reports success only when the fresh session has actually come up and is ready. It's the rescue for when an agent is hung so badly it reads nothing.
 
 ## Lazy soft restart: refresh
 

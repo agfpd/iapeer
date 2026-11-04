@@ -64,7 +64,9 @@ import {
   type WakeResult,
 } from '../lifecycle/index.ts'
 import { getAdapter } from '../launch/index.ts'
-import { hostRunDir } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
+import { hostRunDir, hostSessionAlive, hostSessionToken } from '../launch/ptyHost.ts' // pty-only: attach via the supervisor client
+import { unfinishedInflight, type InflightEntry } from '../lifecycle/inflight.ts'
+import { deliveryCompleted } from '../transport/index.ts'
 import { runSupervisorClient } from '../supervisor/client.ts' // @xterm-free attach client (both reattach port-deps baked in)
 import {
   bootstrapFailed,
@@ -217,8 +219,49 @@ export function formatListTable(rows: PeerListing[]): string {
 export interface StopStartOutcome {
   personality: string
   runtime: Runtime
-  action: 'stopped' | 'started' | 'bootout' | 'bootstrap' | 'refused-foreign-launchd' | 'no-plist'
+  action: 'stopped' | 'started' | 'bootout' | 'bootstrap' | 'refused-foreign-launchd' | 'no-plist' | 'refused-busy'
   reason?: string
+}
+
+/** Options of the session-killing verbs (stop/new). */
+export interface KillGuardOptions extends CliEnvOptions {
+  /** Kill even when the live session is running a turn the core delivered (explicit operator choice). */
+  force?: boolean
+  /** Test seam: the turn-in-progress probe. */
+  busy?: (identity: string) => InflightEntry[]
+}
+
+/**
+ * TURN GUARD (restart-kills-inflight, 04.11.2026): the deliveries the core accepted into the identity's
+ * LIVE session whose turn has not finished. A manual stop/new would silently kill that turn (the walt
+ * incident: stop+start one second after a confirmed delivery — the market review was lost, and a turn
+ * killed mid side-effect cannot be safely repeated). Empty → nothing to protect.
+ */
+export function busyTurn(identity: string, env: NodeJS.ProcessEnv): InflightEntry[] {
+  const cfg = loadLifecycleConfig(env)
+  const token = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
+  return unfinishedInflight(cfg.stateDir, identity, { sessionToken: token, completed: e => deliveryCompleted(e, env) })
+}
+
+/** The caller-facing refusal: who is being worked on, since when, and the two ways forward. */
+export function busyReason(entries: InflightEntry[], verb: 'stop' | 'new', now = Date.now()): string {
+  const first = entries.reduce((a, b) => (b.ts < a.ts ? b : a))
+  const ago = Math.max(0, Math.round((now - first.ts) / 1000))
+  const from = [...new Set(entries.map(e => e.caller.personality))].join(', ')
+  return (
+    `turn in progress — ${entries.length} delivered message(s) from ${from} not finished (oldest ${ago}s ago${first.topic ? `, topic=${first.topic}` : ''}); ` +
+    `${verb} would kill it. Retry after the turn ends, wait for it with --wait <sec>, or kill now with --force`
+  )
+}
+
+/** Poll until the identity's delivered turn finishes (true) or the budget runs out (false). */
+export async function waitTurnFinished(identity: string, timeoutMs: number, env: NodeJS.ProcessEnv, pollMs = 2000, busy = (id: string) => busyTurn(id, env)): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (busy(identity).length === 0) return true
+    if (Date.now() >= deadline) return false
+    await new Promise(r => setTimeout(r, Math.min(pollMs, Math.max(1, deadline - Date.now()))))
+  }
 }
 
 function uid(): string {
@@ -258,11 +301,12 @@ function targetRuntimes(peer: PeerRecord, runtime: string | undefined): Runtime[
 }
 
 /**
- * stop <peer> [runtime]: warm runtime → durable C1 stop flag + kill the session (the
+ * stop <peer> [runtime]: (turn guard: a warm session running a delivered, unfinished turn is
+ * `refused-busy` unless opts.force) warm runtime → durable C1 stop flag + kill the session (the
  * daemon will not wake it until `start`); always-on (infra, foundation-owned) → launchctl
  * bootout + kill. REFUSES a foreign-launchd peer (live PP fleet) — fleet guard.
  */
-export function stopPeer(personality: string, runtime: string | undefined, opts: CliEnvOptions = {}): StopStartOutcome[] {
+export function stopPeer(personality: string, runtime: string | undefined, opts: KillGuardOptions = {}): StopStartOutcome[] {
   const env = opts.env ?? process.env
   const cfg = loadLifecycleConfig(env)
   const peer = findPeer(readPeersIndex({ env }), personality)
@@ -308,6 +352,14 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       out.push({ personality, runtime: rt, action: 'bootout', reason })
       appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'bootout', reason }, { env })
     } else {
+      // TURN GUARD: never silently kill a turn the core delivered — refuse with the reason; --force kills.
+      const busy = opts.force ? [] : (opts.busy ?? (id => busyTurn(id, env)))(identity)
+      if (busy.length > 0) {
+        const reason = busyReason(busy, 'stop')
+        out.push({ personality, runtime: rt, action: 'refused-busy', reason })
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'stop-refused', identity, personality, runtime: rt, cause: 'turn-in-progress', pending: busy.length, caller: env.PEER_IDENTITY }, { env })
+        continue
+      }
       // A deliberate stop is a CLEAN PARK, not a death (stop→start must survive ≥
       // idle-reap): park-mark BEFORE the kill so the post-`start`
       // wake RESUMES, and drop the supervise session-state with the session so
@@ -323,7 +375,7 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       // (tray class) showed a stale status indefinitely (no event ⇒ no snapshot
       // re-read; only the initiator knew). One line per state-changing outcome; the
       // refused-foreign-launchd branch changes nothing and stays silent.
-      appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'stopped' }, { env })
+      appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'stopped', force: opts.force ? 1 : undefined }, { env })
     }
   }
   return out
@@ -628,12 +680,13 @@ export async function defaultRuntime(
 export interface NewPeerOutcome {
   personality: string
   runtime: string
-  action: 'fresh' | 'refused-foreign-launchd' | 'refused-infra' | 'refused-undeclared-runtime' | 'failed'
+  action: 'fresh' | 'refused-foreign-launchd' | 'refused-infra' | 'refused-undeclared-runtime' | 'refused-busy' | 'failed'
   reason?: string
 }
 
 /**
- * new <peer> [runtime] — the UNCONDITIONAL fresh-restart control command
+ * new <peer> [runtime] — the fresh-restart control command (turn-guarded: a delivered turn still
+ * running is refused-busy unless opts.force — restart-kills-inflight 04.11)
  * (docs/Control-команды §new).
  *
  * The emergency lever for a HUNG or dead agent session: /alias_new covers only
@@ -659,7 +712,7 @@ export interface NewPeerOutcome {
 export async function newPeer(
   personality: string,
   runtime: string | undefined,
-  opts: CliEnvOptions & { wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: false; restart: true }) => Promise<WakeResult> } = {},
+  opts: KillGuardOptions & { wakeFn?: (args: { personality: string; runtime: Runtime; task: string; resume: false; restart: true }) => Promise<WakeResult> } = {},
 ): Promise<NewPeerOutcome> {
   const env = opts.env ?? process.env
   const cfg = loadLifecycleConfig(env)
@@ -695,6 +748,12 @@ export async function newPeer(
     }
   }
   const identity = buildProcessAddress(rt, personality)
+  // TURN GUARD: a fresh restart kills the live session — same refusal as stop; --force overrides.
+  const busy = opts.force ? [] : (opts.busy ?? (id => busyTurn(id, env)))(identity)
+  if (busy.length > 0) {
+    appendLifecycleEvent(cfg.eventLogDir, { ev: 'new-refused', identity, personality, runtime: rt, cause: 'turn-in-progress', pending: busy.length, caller: env.PEER_IDENTITY }, { env })
+    return { personality, runtime: rt, action: 'refused-busy', reason: busyReason(busy, 'new') }
+  }
   // Fresh slate: an explicit operator /new outranks a C1 park (it demands a live
   // fresh session NOW) and any stale death/fresh markers (the wake below is fresh
   // by construction — markers must not leak into a LATER wake's decision).
@@ -1764,6 +1823,13 @@ const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   'yes',
 ])
 
+/** `--wait <sec>` of the session-killing verbs: undefined = absent, 'invalid' = bad value. */
+export function parseWaitFlag(v: string | true | undefined): number | undefined | 'invalid' {
+  if (v === undefined) return undefined
+  const n = typeof v === 'string' ? Number(v) : NaN
+  return Number.isFinite(n) && n > 0 ? n : 'invalid'
+}
+
 export function parseArgs(argv: string[]): { positionals: string[]; flags: Record<string, string | true> } {
   const positionals: string[] = []
   const flags: Record<string, string | true> = {}
@@ -1827,8 +1893,8 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
     desc: 'profile-standard conformance + index↔local drift (--fix self-heals the index + migrates legacy runtime→default_runtime in local profiles)',
   },
   {
-    sig: 'stop <peer> [runtime] | --all',
-    desc: 'warm peer: kill the live session + set a durable stop-flag — the daemon will NOT wake it until `start`; always-on (notifier/telegram): launchctl bootout. --all = every registered peer',
+    sig: 'stop <peer> [runtime] | --all [--wait <sec>] [--force]',
+    desc: 'warm peer: kill the live session + set a durable stop-flag — the daemon will NOT wake it until `start`; always-on (notifier/telegram): launchctl bootout. --all = every registered peer. A turn the core delivered and the session has not finished is PROTECTED: refused-busy (exit 75); --wait defers the stop until that turn ends; --force kills it now',
   },
   {
     sig: 'start <peer> [runtime] | --all',
@@ -1854,8 +1920,8 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'connect <runtime> <peer>', desc: 'attach another always-on presence channel (web, voicetalk, …) to an EXISTING peer: per-runtime plist → the package self-config hook → load. Same as `add-runtime <runtime> --peer <peer>`' },
   { sig: 'enable <plugin> [peer] [--no-setup]', desc: 'install + enable an agfpd capability for a peer' },
   {
-    sig: 'new <peer> [runtime]',
-    desc: 'UNCONDITIONAL fresh restart: canary-clean kill + fresh wake (emergency lever for a hung/dead session — bypasses the peer; exit 0 = fresh session up+ready)',
+    sig: 'new <peer> [runtime] [--wait <sec>] [--force]',
+    desc: 'fresh restart: canary-clean kill + fresh wake (emergency lever for a hung/dead session — bypasses the peer; exit 0 = fresh session up+ready). A delivered turn still running → refused-busy (exit 75); --wait defers, --force kills it now',
   },
   {
     sig: 'add-runtime <runtime> (--peer <p> | --all)',
@@ -2572,8 +2638,30 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
             : null
         if (!peers) return argErr(errOut, 'stop needs a peer or --all — usage: iapeer stop <peer> [runtime] | --all')
         if (flags.all === true) auditTermination(hostRunDir(env), peers, { reason: 'stop-all', caller: env.PEER_IDENTITY, sandbox: env.IAPEER_TEST_SANDBOX === '1' })
-        const outcomes = peers.flatMap(p => stopPeer(p, flags.all === true ? undefined : positionals[1], { env }))
+        const force = flags.force === true
+        const wait = parseWaitFlag(flags.wait)
+        if (wait === 'invalid') return argErr(errOut, 'stop --wait needs seconds — usage: iapeer stop <peer> [runtime] [--wait <sec>] [--force]')
+        const rtArg = flags.all === true ? undefined : positionals[1]
+        // DEFER (--wait): hold the stop until the delivered turn finishes, then stop. The wait is per
+        // targeted runtime; a turn still running at the deadline is refused below as usual.
+        if (wait !== undefined && !force) {
+          for (const p of peers) {
+            const peer = findPeer(readPeersIndex({ env }), p)
+            if (!peer) continue
+            for (const rt of rtArg ? [rtArg] : peer.runtimes) {
+              if (isInfraRuntime(rt as Runtime)) continue
+              const identity = buildProcessAddress(rt as Runtime, p)
+              if (busyTurn(identity, env).length === 0) continue
+              out(`${p} (${rt}): waiting up to ${wait}s for the running turn to finish…\n`)
+              await waitTurnFinished(identity, wait * 1000, env)
+            }
+          }
+        }
+        const outcomes = peers.flatMap(p => stopPeer(p, rtArg, { env, force }))
         for (const o of outcomes) out(`${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
+        // Turn guard refusal → exit 75 (EX_TEMPFAIL): retryable, distinct from a real failure, and it
+        // breaks a `stop && start` chain before the start.
+        if (outcomes.some(o => o.action === 'refused-busy')) return 75
         // В48 — a REAL bootout error (reason set; benign already-unloaded carries none) is exit 1:
         // automation must see that an always-on peer may still be running.
         return outcomes.some(o => o.action === 'refused-foreign-launchd' || (o.action === 'bootout' && o.reason !== undefined)) ? 1 : 0
@@ -2639,14 +2727,28 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // §new): the emergency lever for a hung/dead session, bypasses the peer.
         // Source: operator CLI, or telegram-runtime's clean-/new detect (their bot
         // shells `iapeer new <peer> <runtime>` — exit 0 ⟺ fresh session up+ready).
-        if (!positionals[0]) return argErr(errOut, 'new needs a peer name — usage: iapeer new <peer> [runtime]')
-        const o = await newPeer(positionals[0], positionals[1], { env })
+        if (!positionals[0]) return argErr(errOut, 'new needs a peer name — usage: iapeer new <peer> [runtime] [--wait <sec>] [--force]')
+        const force = flags.force === true
+        const wait = parseWaitFlag(flags.wait)
+        if (wait === 'invalid') return argErr(errOut, 'new --wait needs seconds — usage: iapeer new <peer> [runtime] [--wait <sec>] [--force]')
+        if (wait !== undefined && !force) {
+          const peer = findPeer(readPeersIndex({ env }), positionals[0])
+          const rt = (positionals[1] as Runtime | undefined) ?? (peer ? resolvePeerRuntime(peer, loadLifecycleConfig(env)) : undefined)
+          if (rt && isRuntime(rt) && !isInfraRuntime(rt)) {
+            const identity = buildProcessAddress(rt, positionals[0])
+            if (busyTurn(identity, env).length > 0) {
+              out(`${positionals[0]} (${rt}): waiting up to ${wait}s for the running turn to finish…\n`)
+              await waitTurnFinished(identity, wait * 1000, env)
+            }
+          }
+        }
+        const o = await newPeer(positionals[0], positionals[1], { env, force })
         if (o.action === 'fresh') {
           out(`new: ${o.runtime}-${o.personality} fresh session up\n`)
           return 0
         }
         errOut(`new: ${o.personality} (${o.runtime}): ${o.action}${o.reason ? ` — ${o.reason}` : ''}\n`)
-        return 1
+        return o.action === 'refused-busy' ? 75 : 1
       }
       case 'start': {
         // --all re-enables every REGISTERED peer (mirror of `stop --all` — without

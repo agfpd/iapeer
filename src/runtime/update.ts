@@ -46,7 +46,7 @@ const defaultNpmVersion: NpmVersionFn = (pkg, env) => {
 
 export interface RestartedPeer {
   personality: string
-  state: 'restarted' | 'refused-foreign-launchd' | 'skipped-stopped' | 'failed'
+  state: 'restarted' | 'refused-foreign-launchd' | 'skipped-stopped' | 'skipped-busy' | 'failed'
   detail?: string
 }
 
@@ -97,6 +97,10 @@ async function defaultRestartPeer(personality: string, runtime: Runtime, env: No
     if (stops.some(o => o.action === 'refused-foreign-launchd')) {
       return { personality, state: 'refused-foreign-launchd', detail: 'persistent-peer-managed (H4) — restart it yourself' }
     }
+    // Turn guard: a runtime update never kills a delivered turn mid-flight. Nothing was stopped, so no
+    // start; the session runs the new code from its next wake (or an operator `stop --wait` + start).
+    const busy = stops.find(o => o.action === 'refused-busy')
+    if (busy) return { personality, state: 'skipped-busy', detail: busy.reason }
     const starts = startPeer(personality, runtime, { env })
     const bad = starts.find(o => o.action === 'bootstrap' && o.reason)
     return bad ? { personality, state: 'failed', detail: bad.reason } : { personality, state: 'restarted' }

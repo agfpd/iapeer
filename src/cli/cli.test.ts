@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { addRuntime, compactPeer, defaultRuntime, formatListTable, goalPeer, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer } from './index.ts'
+import { addRuntime, compactPeer, defaultRuntime, formatListTable, goalPeer, listPeers, newPeer, parseArgs, refreshPeer, removePeerCli, renamePeerCli, runCli, sendMessage, startPeer, stopPeer, waitTurnFinished } from './index.ts'
 import { formatSendResult } from './index.ts'
 
 test('CLI never labels unknown native acceptance as delivered', () => {
@@ -142,6 +142,30 @@ describe('stop / start (C1 durable flag, warm runtime)', () => {
     expect(isStopped(cfg, 'claude-gamma')).toBe(true)
     expect(startPeer('gamma', undefined, { env: e })[0].action).toBe('started')
     expect(isStopped(cfg, 'claude-gamma')).toBe(false)
+  })
+  test('turn guard: stop refuses a delivered unfinished turn (refused-busy, nothing killed); --force stops', async () => {
+    await register('busyone')
+    const e = env()
+    const cfg = loadLifecycleConfig(e)
+    const pending = [{ id: 'x', ts: Date.now() - 5000, sentAt: '12:12:48', identity: 'claude-busyone', personality: 'busyone', runtime: 'claude', cwd: '/tmp/b', sessionToken: 'host:1', caller: { personality: 'boris', runtime: 'claude' }, message: 'm', topic: 't1', rendered: 'r' }]
+    const refused = stopPeer('busyone', undefined, { env: e, busy: () => pending })
+    expect(refused[0].action).toBe('refused-busy')
+    expect(refused[0].reason).toMatch(/turn in progress — 1 delivered message\(s\) from boris .*topic=t1.*--wait <sec>.*--force/)
+    expect(isStopped(cfg, 'claude-busyone')).toBe(false)
+    expect(readFileSync(lifecycleLogPath(cfg.eventLogDir), 'utf8')).toMatch(/ev=stop-refused identity=claude-busyone .*cause=turn-in-progress pending=1/)
+    const forced = stopPeer('busyone', undefined, { env: e, force: true, busy: () => pending })
+    expect(forced[0].action).toBe('stopped')
+    expect(isStopped(cfg, 'claude-busyone')).toBe(true)
+    expect(readFileSync(lifecycleLogPath(cfg.eventLogDir), 'utf8')).toMatch(/ev=stopped identity=claude-busyone .*force=1/)
+  })
+  test('turn guard: an idle session (no unfinished delivery) stops as before', async () => {
+    await register('idleone')
+    expect(stopPeer('idleone', undefined, { env: env(), busy: () => [] })[0].action).toBe('stopped')
+  })
+  test('waitTurnFinished defers until the turn ends, or gives up at the deadline', async () => {
+    let n = 2
+    expect(await waitTurnFinished('claude-x', 5000, env(), 1, () => (n-- > 0 ? [{} as never] : []))).toBe(true)
+    expect(await waitTurnFinished('claude-x', 20, env(), 5, () => [{} as never])).toBe(false)
   })
   test('stop an unregistered peer → throws', () => {
     expect(() => stopPeer('nobody', undefined, { env: env() })).toThrow(/not registered/)
@@ -805,6 +829,23 @@ describe('new (unconditional fresh restart)', () => {
     expect(calls).toEqual([{ personality: 'alpha', runtime: 'claude', task: '', resume: false, restart: true }])
     expect(isStopped(cfg, 'claude-alpha')).toBe(false) // un-parked: /new outranks the C1 stop
     expect(hasIdleReaped(cfg, 'claude-alpha')).toBe(false) // stale marker cleared
+  })
+
+  test('turn guard: new refuses a delivered unfinished turn without waking; --force restarts', async () => {
+    await register('busynew')
+    let woke = 0
+    const wakeFn = async (args: { runtime: string; personality: string }) => {
+      woke++
+      return { status: 'READY' as const, woke: true, runtime: args.runtime, process_address: `${args.runtime}-${args.personality}`, taskDelivered: true }
+    }
+    const pending = [{ id: 'y', ts: Date.now(), sentAt: 's', identity: 'claude-busynew', personality: 'busynew', runtime: 'claude', cwd: '/tmp/b', sessionToken: 'host:1', caller: { personality: 'doc', runtime: 'opencode' }, message: 'm', rendered: 'r' }]
+    const o = await newPeer('busynew', undefined, { env: env(), wakeFn: wakeFn as never, busy: () => pending })
+    expect(o.action).toBe('refused-busy')
+    expect(o.reason).toMatch(/from doc/)
+    expect(woke).toBe(0)
+    const f = await newPeer('busynew', undefined, { env: env(), wakeFn: wakeFn as never, force: true, busy: () => pending })
+    expect(f.action).toBe('fresh')
+    expect(woke).toBe(1)
   })
 
   test('wake FAILED → action failed with the reason (exit-1 contract for the bot)', async () => {

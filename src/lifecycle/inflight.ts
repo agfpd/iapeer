@@ -258,3 +258,39 @@ export function readSelfEnded(stateDir: string, identity: string): string | null
 export function clearSelfEnded(stateDir: string, identity: string): void {
   rmSync(selfEndedPath(stateDir, identity), { force: true })
 }
+
+export interface UnfinishedTurnDeps {
+  /** Hosting token of the identity's LIVE session (null = no live session → nothing to protect). */
+  sessionToken: string | null
+  /** Did the turn this entry started finish? A throwing probe counts as NOT finished (fail toward protecting). */
+  completed: (entry: InflightEntry) => boolean
+}
+
+/**
+ * The deliveries the core accepted into the CURRENT live session whose turn has not finished — the
+ * work a manual stop/new would destroy (restart-kills-inflight, 04.11: an operator stop+start one
+ * second after a confirmed delivery killed the running turn). Read-only: the sweep stays the only
+ * ledger writer. Same per-session ordering shortcut as the sweep: a later finished turn of the same
+ * session covers earlier entries. An entry still in acceptance custody (pending paste) counts as
+ * unfinished — the delivery itself is in progress.
+ */
+export function unfinishedInflight(stateDir: string, identity: string, deps: UnfinishedTurnDeps): InflightEntry[] {
+  if (!deps.sessionToken) return []
+  const mine = readInflight(stateDir, identity).filter(e => e.sessionToken === deps.sessionToken)
+  const done = (e: InflightEntry): boolean => {
+    try {
+      return deps.completed(e)
+    } catch {
+      return false
+    }
+  }
+  let finishedUpTo = -Infinity
+  const finished = new Set<string>()
+  for (const e of mine) {
+    if (done(e)) {
+      finished.add(e.id)
+      finishedUpTo = Math.max(finishedUpTo, e.ts)
+    }
+  }
+  return mine.filter(e => !finished.has(e.id) && e.ts >= finishedUpTo)
+}

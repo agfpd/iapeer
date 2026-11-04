@@ -683,7 +683,8 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
         }
         const runtime = typeof body.runtime === 'string' ? body.runtime : undefined
         const topic = typeof body.topic === 'string' ? body.topic : undefined
-        return await runCommand(res, command, { personality, runtime, topic }, cfg, env, await getOps())
+        const force = body.force === true
+        return await runCommand(res, command, { personality, runtime, topic, force }, cfg, env, await getOps())
       }
       if (path === '/fleet/v1/send') {
         if (method !== 'POST') return sendJson(res, 405, { error: 'method not allowed — POST /fleet/v1/send' })
@@ -856,12 +857,12 @@ function safeParse(text: string): unknown {
 async function runCommand(
   res: ServerResponse,
   command: string,
-  args: { personality: string; runtime?: string; topic?: string },
+  args: { personality: string; runtime?: string; topic?: string; force?: boolean },
   cfg: LifecycleConfig,
   env: NodeJS.ProcessEnv,
   ops: FleetOps,
 ): Promise<void> {
-  const { personality, runtime, topic } = args
+  const { personality, runtime, topic, force } = args
   switch (command) {
     case 'wake': {
       // Same H4 / crash-loop / wake-lock semantics as a message wake — wakeOrSpawn
@@ -870,7 +871,9 @@ async function runCommand(
       return sendJson(res, r.status === 'FAILED' ? 502 : 200, { command, ...r })
     }
     case 'stop': {
-      const outcomes = ops.stopPeer(personality, runtime, { env })
+      // Turn guard: a delivered turn still running → 409 Conflict with the reason; body {force:true} kills now.
+      const outcomes = ops.stopPeer(personality, runtime, { env, force })
+      if (outcomes.some(o => o.action === 'refused-busy')) return sendJson(res, 409, { command, outcomes })
       const failed = outcomes.some(o => o.action === 'refused-foreign-launchd' || (o.action === 'bootout' && o.reason !== undefined))
       return sendJson(res, failed ? 502 : 200, { command, outcomes })
     }
@@ -880,8 +883,8 @@ async function runCommand(
       return sendJson(res, failed ? 502 : 200, { command, outcomes })
     }
     case 'new': {
-      const o = await ops.newPeer(personality, runtime, { env })
-      return sendJson(res, o.action === 'fresh' ? 200 : 502, { command, ...o })
+      const o = await ops.newPeer(personality, runtime, { env, force })
+      return sendJson(res, o.action === 'fresh' ? 200 : o.action === 'refused-busy' ? 409 : 502, { command, ...o })
     }
     case 'refresh': {
       const outcomes = ops.refreshPeer(personality, runtime, { env })

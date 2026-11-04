@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { inflightAcceptanceId, listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
+import { unfinishedInflight, inflightAcceptanceId, listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
 import { readAcceptance } from '../launch/acceptanceStore.ts'
 import { deliveryCompleted, deliveryLanded, deliveryProcessed } from '../transport/index.ts'
 import { processInflight, redeliveryMessage } from '../daemon/main.ts'
@@ -434,5 +434,26 @@ describe('core system identity — the notice sender that exists on every instal
     const r = await routeSend(systemCaller(), { personality: 'alice', message: 'notice' }, { env: { HOME: root, IAPEER_ROOT: join(root, 'iapeer'), IAPEER_SOCK_DIR: join(root, 'socks') } })
     expect(r.ok).toBe(false) // alice has no live session and no wake dep → the explicit offline miss
     if (!r.ok) expect(r.error.message).not.toMatch(/self|unknown caller|not in the iapeer peers index/)
+  })
+})
+
+describe('unfinishedInflight (turn guard for stop/new)', () => {
+  test('no live session → nothing to protect', () => {
+    recordInflight(state, entry())
+    expect(unfinishedInflight(state, 'claude-bob', { sessionToken: null, completed: () => false })).toEqual([])
+  })
+  test('only the CURRENT session\'s unfinished entries count; a later finished turn covers earlier ones', () => {
+    const old = entry({ id: 'old', sessionToken: 'host:0' })
+    const a = entry({ id: 'a', ts: 1000 })
+    const b = entry({ id: 'b', ts: 2000 })
+    const c = entry({ id: 'c', ts: 3000 })
+    for (const e of [old, a, b, c]) recordInflight(state, e)
+    expect(unfinishedInflight(state, 'claude-bob', { sessionToken: 'host:1', completed: () => false }).map(e => e.id)).toEqual(['a', 'b', 'c'])
+    expect(unfinishedInflight(state, 'claude-bob', { sessionToken: 'host:1', completed: e => e.id === 'b' }).map(e => e.id)).toEqual(['c'])
+    expect(unfinishedInflight(state, 'claude-bob', { sessionToken: 'host:1', completed: e => e.id === 'c' })).toEqual([])
+  })
+  test('a throwing completion probe fails toward protecting the turn', () => {
+    recordInflight(state, entry({ id: 'z' }))
+    expect(unfinishedInflight(state, 'claude-bob', { sessionToken: 'host:1', completed: () => { throw new Error('io') } }).map(e => e.id)).toEqual(['z'])
   })
 })
