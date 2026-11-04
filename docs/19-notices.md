@@ -391,6 +391,15 @@ Forensic evidence for all of the above: `docs/internals/forensics/model-limit-20
 
 ## 8. Known hole: codex generic API errors — measured, not assumed
 
+**Current native extension (0.164, verified 04.11.2026).** A real OpenAI 401 now
+persists `task_complete.error.codex_error_info` as an externally tagged object:
+`{"http_connection_failed":{"http_status_code":401}}`. The detector accepts
+both string unit variants and these one-key data variants, preserving the native
+discriminator and status (`http_connection_failed:401`). Session identity accepts
+both `session_meta.payload.session_id` and `id`. This closes the observed current
+auth-error path; it does not retroactively invalidate the older measurement below
+or turn an absent error into proof of refusal.
+
 **A codex peer left mute by a cause that emits NO rate_limits snapshot is not detected.**
 The usage-limit class — the actual incident class — IS covered, by the §2 death fingerprint
 (the refused call's own snapshot; `rate_limit_reached_type` proved inert on the real

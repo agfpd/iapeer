@@ -220,6 +220,19 @@ function asWindow(w: unknown): CodexWindow | null {
  * `cwd` comes from session_meta, which is the file's FIRST line — pass the file HEAD in
  * `head` when the tail alone may have cut it away.
  */
+/** Native externally-tagged error enum: unit variants are strings, data variants
+ * are one-key objects (real 0.164 API auth refusal: http_connection_failed:401). */
+export function codexNativeErrorType(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const entries = Object.entries(value)
+  if (entries.length !== 1) return
+  const [kind, data] = entries[0]!
+  if (!/^[a-z][a-z0-9_]{0,80}$/.test(kind)) return
+  const status = data && typeof data === 'object' && 'http_status_code' in data ? data.http_status_code : undefined
+  return `${kind}${typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? `:${status}` : ''}`
+}
+
 export function parseCodexRollout(text: string, sinceMs: number, head = ''): RawDetection | null {
   let cwd = ''
   let sessionId: string | undefined
@@ -228,10 +241,11 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
       const s = line.trim()
       if (!s.startsWith('{') || !s.includes('session_meta')) continue
       try {
-        const d = JSON.parse(s) as { type?: string; payload?: { cwd?: unknown; session_id?: unknown } }
+        const d = JSON.parse(s) as { type?: string; payload?: { cwd?: unknown; session_id?: unknown; id?: unknown } }
         if (d.type !== 'session_meta' || !d.payload) continue
         if (typeof d.payload.cwd === 'string') cwd = d.payload.cwd
         if (typeof d.payload.session_id === 'string') sessionId = d.payload.session_id
+        else if (typeof d.payload.id === 'string') sessionId = d.payload.id
       } catch {
         /* ignore */
       }
@@ -299,7 +313,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
       // Path (c), codex ≥0.160 (real bytes 18.10.2026, linus): the dead turn's task_complete carries
       // the runtime's OWN typed error — `error.codex_error_info` ("usage_limit_exceeded") plus its
       // message. Structural, so it stands on its own; path (b) stays for older codex.
-      const typed = p.error && typeof p.error.codex_error_info === 'string' && p.error.codex_error_info ? p.error.codex_error_info : undefined
+      const typed = codexNativeErrorType(p.error?.codex_error_info)
       const died = typed !== undefined || (refusalPending && p.last_agent_message === null)
       refusalPending = false
       if (!died) continue
@@ -324,7 +338,7 @@ export function parseCodexRollout(text: string, sinceMs: number, head = ''): Raw
       found = {
         errorType,
         model: (typeof p.turn_id === 'string' ? modelByTurn.get(p.turn_id) : undefined) ?? lastModel,
-        content: `Codex turn died on a refused API call (${errorType})${plan}${parts.length ? ` — ${parts.join('; ')}` : ''}`,
+        content: `Codex turn died on a refused API call (${errorType})${plan}${parts.length ? ` — ${parts.join('; ')}` : ''}${typed && typeof p.error?.message === 'string' ? `: ${p.error.message}` : ''}`,
         resetsAtMs: resets.length ? Math.max(...resets) : undefined,
         sessionId,
         atMs,

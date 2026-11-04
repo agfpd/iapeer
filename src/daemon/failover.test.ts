@@ -10,11 +10,12 @@ import { listFailoverTasks, providerFailure, quarantineSession, recordFailoverTa
 import { findPeer, readPeersIndex, upsertPeer, type PeerRecord } from '../registry/index.ts'
 import { readPeerProfile, writePeerProfileAtomic } from '../identity/index.ts'
 import { processFailovers, type FailoverSeam } from './failover.ts'
-import { failureContainsTask, refusedBeforeWork, refusedBeforeWorkInText } from './failoverProof.ts'
+import { failureContainsTask, failureForTask, refusedBeforeWork, refusedBeforeWorkInText } from './failoverProof.ts'
 import { readInflight, recordInflight } from '../lifecycle/inflight.ts'
 import { processLimitResumes } from './limitresume.ts'
 import { listLimitParks, recordLimitPark } from '../lifecycle/limitpark.ts'
 import { ok } from '../core/errors.ts'
+import { parseCodexRollout } from './mutewatch.ts'
 
 let root: string, cfg: LifecycleConfig, env: NodeJS.ProcessEnv, peer: PeerRecord, at: number
 const jsonl = (rows: unknown[]) => rows.map(r => JSON.stringify(r)).join('\n') + '\n'
@@ -81,6 +82,22 @@ describe('provider selection and durable configuration', () => {
 })
 
 describe('positive no-work proof', () => {
+  test('real 0.164 API auth shape: tagged HTTP error, native UserMessage and inert developer input', () => {
+    const rows: unknown[] = [
+      { type: 'session_meta', payload: { id: 'native-1', cwd: root } },
+      { type: 'event_msg', payload: { type: 'task_started' } },
+      { type: 'response_item', payload: { type: 'additional_tools', role: 'developer', tools: [] } },
+      { type: 'response_item', payload: { type: 'message', role: 'developer', content: [] } },
+      { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: rendered }] } } },
+      { type: 'event_msg', timestamp: new Date(at).toISOString(), payload: { type: 'task_complete', last_agent_message: null, completed_at: at / 1000,
+        error: { message: 'unexpected status 401 Unauthorized: Incorrect API key', codex_error_info: { http_connection_failed: { http_status_code: 401 } } } } },
+    ]
+    const text = jsonl(rows), d = parseCodexRollout(text, 0)!
+    expect(d.errorType).toBe('http_connection_failed:401'); expect(d.sessionId).toBe('native-1')
+    expect(refusedBeforeWorkInText(text, task, d)).toBe(true)
+    rows.splice(5, 0, { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', text: 'working' } } })
+    expect(refusedBeforeWorkInText(jsonl(rows), task, d)).toBe(false)
+  })
   test('Codex native refusal before any model response; no refusal/missing input/mismatched session fail closed', () => {
     expect(refusedBeforeWorkInText(jsonl(codexRows()), task, failure)).toBe(true)
     expect(refusedBeforeWorkInText(jsonl(codexRows().slice(0, -1)), task, failure)).toBe(false)
@@ -92,8 +109,10 @@ describe('positive no-work proof', () => {
     const rows: unknown[] = codexRows(); rows.splice(3, 0, { type: 'response_item', payload: { type: kind, role: kind === 'message' ? 'assistant' : undefined } })
     expect(refusedBeforeWorkInText(jsonl(rows), task, failure)).toBe(false)
   })
-  test('competing input, torn lines and malformed records do not prove absence', () => {
+  test('unstarted batch is safe only without any model output; torn or malformed records fail closed', () => {
     const rows: unknown[] = codexRows(); rows.splice(3, 0, { type: 'event_msg', payload: { type: 'user_message', message: 'other' } })
+    expect(refusedBeforeWorkInText(jsonl(rows), task, failure)).toBe(true)
+    rows.push({ type: 'response_item', payload: { type: 'function_call' } })
     expect(refusedBeforeWorkInText(jsonl(rows), task, failure)).toBe(false)
     expect(refusedBeforeWorkInText(jsonl(codexRows()).trim(), task, failure)).toBe(false)
     expect(refusedBeforeWorkInText('bad\n' + jsonl(codexRows()), task, failure)).toBe(false)
@@ -130,13 +149,41 @@ describe('positive no-work proof', () => {
     const rows: unknown[] = claudeRows()
     rows.splice(1, 0, { type: 'attachment', attachment: { type: 'auto_mode' } })
     expect(refusedBeforeWorkInText(jsonl(rows), { ...task, runtime: 'claude' }, failure)).toBe(true)
-    rows.splice(1, 0, { type: 'attachment', attachment: { type: 'queued_command' } })
+    rows.splice(1, 0, { type: 'attachment', attachment: { type: 'hook_success' } })
     expect(refusedBeforeWorkInText(jsonl(rows), { ...task, runtime: 'claude' }, failure)).toBe(false)
   })
   test('Claude queued_command and input inside a running turn are not replayed', () => {
     const t = { ...task, runtime: 'claude' }
     expect(refusedBeforeWorkInText(jsonl([{ type: 'attachment', attachment: { type: 'queued_command', prompt: rendered } }, claudeRows()[1]]), t, failure)).toBe(false)
     expect(refusedBeforeWorkInText(jsonl([{ type: 'assistant', message: { stop_reason: 'tool_use' } }, ...claudeRows()]), t, failure)).toBe(false)
+  })
+  test('Claude queued input before any model work retains its own refusal provenance', () => {
+    const second = { ...task, runtime: 'claude', rendered: rendered + 'SECOND' }
+    const rows = [
+      claudeRows()[0],
+      { type: 'attachment', uuid: 'u2', parentUuid: 'u1', sessionId: 'native-1', attachment: { type: 'queued_command', prompt: second.rendered } },
+      { ...claudeRows()[1], parentUuid: 'u2', cwd: root },
+    ]
+    const f = { ...failure, runtime: 'claude' as const }
+    writeFileSync(f.file!, jsonl(rows))
+    expect(failureContainsTask(second, f)).toBe(true)
+    expect(refusedBeforeWorkInText(jsonl(rows), second, f)).toBe(true)
+    rows.splice(1, 0, { type: 'assistant', message: { model: 'real', stop_reason: 'tool_use' } } as any)
+    expect(refusedBeforeWorkInText(jsonl(rows), second, f)).toBe(false)
+  })
+  test('Claude burst recovers an earlier refusal hidden by the newest sweep result', () => {
+    const t = { ...task, runtime: 'claude' }, second = { ...t, rendered: rendered + 'SECOND', ts: at + 100 }
+    const firstRows = claudeRows().map(r => ({ ...r, cwd: root }))
+    const rows = [...firstRows,
+      { ...firstRows[0], uuid: 'u2', parentUuid: 'a1', message: { content: second.rendered } },
+      { ...firstRows[1], uuid: 'a2', parentUuid: 'u2', timestamp: new Date(at + 200).toISOString() },
+    ]
+    writeFileSync(failure.file!, jsonl(rows))
+    const newest = { ...failure, runtime: 'claude' as const, atMs: at + 200 }
+    const own = failureForTask(t, newest)!
+    expect(own.atMs).toBe(at)
+    expect(refusedBeforeWorkInText(jsonl(rows), t, own)).toBe(true)
+    expect(refusedBeforeWorkInText(jsonl(rows), second, newest)).toBe(true)
   })
   test('OpenCode native session.error is unstarted only with zero output/tool parts', () => {
     const rows: unknown[] = [
@@ -225,6 +272,26 @@ describe('custody transfer', () => {
     setup(); const s = seam(); s.kill = () => { live = false; setStopped(cfg, 'codex-p') }
     await processFailovers(cfg, env, {}, undefined, s)
     expect(sent).toHaveLength(0)
+  })
+  test('two provider refusals between sweeps retain both tasks, each transferred exactly once in receipt order', async () => {
+    setup(); await upsertPeer({ personality: 'alice', runtime: 'claude', cwd: root, intelligence: 'artificial' }, { env })
+    const second = { ...task, acceptedAtMs: at + 100, ts: at + 100, rendered: rendered + 'SECOND', message: 'second task', failoverTaskId: 'second-id' }
+    const rows = codexRows()
+    const later = [
+      { type: 'event_msg', payload: { type: 'task_started' } },
+      { type: 'event_msg', payload: { type: 'user_message', message: second.rendered } },
+      { type: 'event_msg', timestamp: new Date(at + 200).toISOString(), payload: { type: 'task_complete', last_agent_message: null, completed_at: (at + 200) / 1000, error: { codex_error_info: 'unauthorized', message: '401' } } },
+    ]
+    writeFileSync(failure.file!, jsonl([...rows, ...later]))
+    const latest = { ...failure, atMs: at + 200 }
+    recordProviderFailure(cfg, latest); recordFailoverTask(cfg, second)
+    expect(failureForTask(task, latest)?.atMs).toBe(at)
+    expect(failureForTask(second, latest)?.atMs).toBe(at + 200)
+    await processFailovers(cfg, env, {}, undefined, seam())
+    expect(sent.map(s => s.input.message)).toEqual([task.message, second.message])
+    expect(killed).toBe(1)
+    await processFailovers(cfg, env, {}, undefined, seam())
+    expect(sent).toHaveLength(2)
   })
 })
 

@@ -23,6 +23,13 @@ task marker to native input, and rejects unknown bootstrap hooks/queued input or
 intervening model output. Oversized files remain unverified, not implicitly safe;
 a bounded tail can still attribute their latest input and authorize a state-review
 handoff, never replay of the original instruction.
+
+Several messages may fail between detector sweeps. Endpoint health uses the newest
+error, but custody recovers each task's **own** native refusal by its unique input
+marker. A batch with no model work is transferred in receipt order, once per task;
+a newer refusal never erases an older task. Native queued Claude input and Codex
+`item_completed/UserMessage` input are included. Codex developer/system setup records
+are input metadata, not model output; assistant/tool/reasoning items remain work.
 An interrupted task with possible effects instead produces an explicit review
 notice with durable evidence; its original instruction is not replayed.
 

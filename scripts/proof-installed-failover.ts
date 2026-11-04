@@ -9,6 +9,8 @@ const arg = (name: string) => { const i = process.argv.indexOf(name); return i <
 const host = homedir(), bin = resolve(arg('--bin') ?? join(host, '.local/bin/iapeer'))
 const binSHA256 = createHash('sha256').update(readFileSync(bin)).digest('hex')
 const artifacts = resolve(arg('--artifacts') ?? 'docs/internals/proofs/failover-real-auth')
+const primary = arg('--primary') ?? 'claude'
+if (!['claude', 'codex'].includes(primary)) throw new Error('--primary must be claude or codex')
 const root = realpathSync(mkdtempSync('/tmp/iapeer-failover-live-')), home = join(root, 'home'), iap = join(root, 'iapeer'), cwd = join(root, 'failover-proof')
 const read = (p: string) => { try { return readFileSync(p, 'utf8') } catch { return '' } }
 const files = (dir: string): string[] => existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]) : []
@@ -49,7 +51,9 @@ const cli = async (...args: string[]) => {
 const check = (label: string, value: unknown) => { if (value === false) throw new Error(`failed: ${label}`); results.push({ check: label, value, at: Date.now() }); console.log(`PASS ${label}`) }
 const failoverTasks = () => files(join(iap, 'state/lifecycle/failover/tasks')).filter(f => f.endsWith('.json')).map(f => JSON.parse(read(f)))
 const claudeText = () => files(join(home, '.claude/projects')).filter(f => f.endsWith('.jsonl')).map(read).join('\n')
-const log = join(root, 'effects.log'), first = `FIRST_${randomUUID()}`, second = `SECOND_${randomUUID()}`
+const primaryText = () => primary === 'claude' ? claudeText() : files(join(home, '.codex/sessions')).filter(f => f.endsWith('.jsonl')).map(read).join('\n')
+const log = join(root, 'effects.log'), first = `FIRST_${randomUUID()}`, burst = `BURST_${randomUUID()}`, second = `SECOND_${randomUUID()}`
+const healthyClaudeWrapper = () => `#!/bin/sh\nTOKEN=$(/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w '${join(host, 'Library/Keychains/login.keychain-db')}' | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])') || exit 1\nexec env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" '${join(host, '.local/bin/claude')}' "$@"\n`
 const commandTask = (marker: string) => `This is a disposable infrastructure acceptance test. Execute exactly one shell command: printf '%s\\n' '${marker}' >> '${log}'. Do not check for an existing marker or deduplicate yourself: the router is being tested. Do not send messages to anyone. Then reply DONE.`
 let daemon: ReturnType<typeof Bun.spawn> | undefined, success = false
 try {
@@ -61,12 +65,16 @@ try {
   const model = /^model\s*=\s*(.+)$/m.exec(read(join(host, '.codex/config.toml')))?.[1]
   if (!model) throw new Error('host Codex model is not configured')
   writeFileSync(join(home, '.codex/config.toml'), `check_for_update_on_startup = false\nmodel = ${model}\nmodel_reasoning_effort = "low"\n`)
-  writeFileSync(env.IAPEER_CLAUDE_BIN!, `#!/bin/sh\nexec env ANTHROPIC_AUTH_TOKEN=iapeer-intentionally-invalid-auth-proof '${join(host, '.local/bin/claude')}' "$@"\n`)
+  if (primary === 'codex') {
+    writeFileSync(join(home, '.codex/auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-iapeer-intentionally-invalid-auth-proof' }))
+    writeFileSync(join(home, '.codex/config.toml'), read(join(home, '.codex/config.toml')) + 'forced_login_method = "api"\n')
+  }
+  writeFileSync(env.IAPEER_CLAUDE_BIN!, primary === 'claude' ? `#!/bin/sh\nexec env ANTHROPIC_AUTH_TOKEN=iapeer-intentionally-invalid-auth-proof '${join(host, '.local/bin/claude')}' "$@"\n` : healthyClaudeWrapper())
   chmodSync(env.IAPEER_CLAUDE_BIN!, 0o700)
   await initPeer({ cwd, runtime: 'claude', personality: 'failover-proof', intelligence: 'artificial', env })
   await initPeer({ cwd, runtime: 'codex', personality: 'failover-proof', intelligence: 'artificial', env })
-  writePeerProfileAtomic(cwd, { personality: 'failover-proof', runtime: 'claude', runtimes: ['claude', 'codex'], intelligence: 'artificial' })
-  await upsertPeer({ personality: 'failover-proof', runtime: 'claude', runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd }, { env })
+  writePeerProfileAtomic(cwd, { personality: 'failover-proof', runtime: primary, runtimes: ['claude', 'codex'], intelligence: 'artificial' })
+  await upsertPeer({ personality: 'failover-proof', runtime: primary, runtimes: ['claude', 'codex'], intelligence: 'artificial', cwd }, { env })
   writeFileSync(peerLaunchEnvPath(cwd, 'codex'), "PEER_START_ARGS='--no-daemon -c model_reasoning_effort=low'\n")
   const sender = join(root, 'sender')
   writePeerProfileAtomic(sender, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
@@ -77,14 +85,15 @@ try {
   daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.stdout')), stderr: Bun.file(join(root, 'daemon.stderr')) })
   await until('daemon ready', () => read(join(root, 'daemon.stderr')).includes('daemon READY'))
   await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', commandTask(first), '--topic', 'real-auth-failover')
-  await until('real 401 observed', () => claudeText().includes('"apiErrorStatus":401'))
-  check('native Anthropic 401 (no synthetic provider)', /Invalid bearer token/.test(claudeText()))
-  await until('first effect transferred to Codex', () => read(log).includes(first))
-  await until('durable transfer receipt', () => failoverTasks().some(t => t.state === 'transferred'))
-  check('initial refused task transferred exactly once', read(log).trim().split('\n').filter(l => l === first).length === 1)
+  await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', commandTask(burst), '--topic', 'real-auth-burst')
+  await until('real 401 observed', () => primaryText().includes(primary === 'claude' ? '"apiErrorStatus":401' : '"http_status_code":401'))
+  check(`native ${primary} 401 (no synthetic provider)`, /Invalid bearer token|Incorrect API key/.test(primaryText()))
+  await until('both refused effects transferred', () => read(log).includes(first) && read(log).includes(burst))
+  await until('both durable transfer receipts', () => failoverTasks().filter(t => t.runtime === primary && t.state === 'transferred').length === 2)
+  check('two initially refused tasks transferred exactly once', [first, burst].every(m => read(log).trim().split('\n').filter(l => l === m).length === 1))
   const secondResult = await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', commandTask(second), '--topic', 'known-broken-bypass')
   await until('second effect', () => read(log).includes(second))
-  if (claudeText().includes(second)) throw new Error('known-broken primary received second task')
+  if (primaryText().includes(second)) throw new Error('known-broken primary received second task')
   check('known-broken primary log excludes new task', secondResult)
   // The original failed native ID stays quarantined after daemon restart.
   daemon.kill('SIGTERM'); await daemon.exited
@@ -94,20 +103,24 @@ try {
   if (!process.argv.includes('--quick')) {
   // Credential repair is a native authentication change, never a mocked success.
   // Read the host keychain only in the launched native process; no token is printed or archived.
-  writeFileSync(env.IAPEER_CLAUDE_BIN!, `#!/bin/sh\nTOKEN=$(/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w '${join(host, 'Library/Keychains/login.keychain-db')}' | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])') || exit 1\nexec env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" '${join(host, '.local/bin/claude')}' "$@"\n`)
-  await cli('new', 'failover-proof', 'claude')
-  const oldID = failoverTasks().find(t => t.state === 'transferred')?.failure?.sessionId
-  if (!oldID || !read(join(iap, 'state/lifecycle/failover/claude-failover-proof.quarantine.json')).includes(oldID)) throw new Error('missing quarantine')
+  if (primary === 'claude') writeFileSync(env.IAPEER_CLAUDE_BIN!, healthyClaudeWrapper())
+  else {
+    cpSync(join(host, '.codex/auth.json'), join(home, '.codex/auth.json'))
+    writeFileSync(join(home, '.codex/config.toml'), read(join(home, '.codex/config.toml')).replace('forced_login_method = "api"\n', ''))
+  }
+  await cli('new', 'failover-proof', primary)
+  const oldID = failoverTasks().find(t => t.runtime === primary && t.state === 'transferred')?.failure?.sessionId
+  if (!oldID || !read(join(iap, `state/lifecycle/failover/${primary}-failover-proof.quarantine.json`)).includes(oldID)) throw new Error('missing quarantine')
   check('failed native session quarantined durably after restart', oldID)
-  const reset = JSON.parse(read(join(cfg.stateDir, 'failover/claude-failover-proof.provider.json'))).retryAtMs
+  const reset = JSON.parse(read(join(cfg.stateDir, `failover/${primary}-failover-proof.provider.json`))).retryAtMs
   await until('bounded primary retry interval', () => Date.now() > reset, 310_000)
   await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', 'This is the repaired-runtime acceptance probe. Do not call tools or repeat any earlier instruction. Reply RECOVERED_PRIMARY_OK.', '--topic', 'provider-recovered')
   await until('repaired primary real response', () => {
-    const txt = claudeText()
-    return txt.split('\n').some(l => { try { const r = JSON.parse(l); return r.type === 'assistant' && r.message?.model !== '<synthetic>' && JSON.stringify(r.message?.content).includes('RECOVERED_PRIMARY_OK') } catch { return false } })
+    const txt = primaryText()
+    return txt.split('\n').some(l => { try { const r = JSON.parse(l); return (r.type === 'assistant' && r.message?.model !== '<synthetic>' || r.type === 'response_item' && r.payload?.role === 'assistant') && JSON.stringify(r.message?.content ?? r.payload?.content).includes('RECOVERED_PRIMARY_OK') } catch { return false } })
   })
   await Bun.sleep(65_000) // cross another supervisor/limit-resume opportunity
-  if (read(log).trim().split('\n').filter(l => l === first).length !== 1 || read(log).trim().split('\n').filter(l => l === second).length !== 1) throw new Error('duplicate effect after primary recovery')
+  if (![first, burst, second].every(m => read(log).trim().split('\n').filter(l => l === m).length === 1)) throw new Error('duplicate effect after primary recovery')
   check('primary recovery executes neither old task again', read(log))
   }
   // Private isolated policy contrast. Production walt policy is checked read-only separately.
@@ -130,7 +143,7 @@ try {
     await until('hosting teardown before deleting its state', () => !sessionAlive(runDir, identity), 10_000)
   }
   mkdirSync(artifacts, { recursive: true })
-  writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, root, bin, binSHA256, results }, null, 2))
+  writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, primary, root, bin, binSHA256, results }, null, 2))
   for (const [source, dest] of [[join(iap, 'logs/iapeer'), 'logs'], [join(iap, 'logs/lifecycle'), 'pane-logs'], [join(iap, 'state/lifecycle/failover'), 'failover'], [join(home, '.claude/projects'), 'claude-transcripts'], [join(home, '.codex/sessions'), 'codex-transcripts']] as const) if (existsSync(source)) cpSync(source, join(artifacts, dest), { recursive: true })
   if (existsSync(log)) cpSync(log, join(artifacts, 'effects.log'))
   console.log(JSON.stringify({ success, artifacts, root }))

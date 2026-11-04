@@ -123,6 +123,7 @@ export function listFailoverTasks(cfg: Config, includeSettled = false): Failover
   if (!existsSync(dir)) return []
   return readdirSync(dir).filter(n => includeSettled ? n.endsWith('.json') : /^[a-f0-9]{64}$/.test(n))
     .flatMap(n => { const task = read<FailoverTask>(join(taskDir(cfg), includeSettled ? n : `${n}.json`)); return task ? [task] : [] })
+    .sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id))
 }
 
 /** Identity removal must not leave health/quarantine behind for a namesake peer. */

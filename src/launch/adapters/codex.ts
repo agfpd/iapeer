@@ -428,7 +428,7 @@ export const codexAdapter: RuntimeAdapter = {
         if (canonicalPath(codexSessionCwd(path) ?? '') !== target) continue
         try {
           const meta = JSON.parse(readFirstLine(path) ?? '{}')
-          const ref = meta.payload?.id
+          const ref = meta.payload?.session_id ?? meta.payload?.id
           const mt = statSync(path).mtimeMs
           if (typeof ref === 'string' && ref && (!best || mt > best.mt)) best = { ref, mt }
         } catch { /* no exact native identity: cannot authorize a resume */ }

@@ -9,7 +9,7 @@ import { resolveCallerIdentity, systemCaller } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import { deliveryCompleted, deliveryProcessed, routeSend, type RouteDeps } from '../transport/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
-import { failureContainsTask, refusedBeforeWork } from './failoverProof.ts'
+import { failureContainsTask, failureForTask, refusedBeforeWork } from './failoverProof.ts'
 import type { NoticeBoard } from './notices.ts'
 
 const running = new Set<string>()
@@ -38,7 +38,8 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
       if (['transferred', 'review', 'finished'].includes(task.state)) continue
       const peer = findPeer(readPeersIndex({ env }), task.personality)
       if (!peer || isLaunchdManaged(task.personality, env) || !failoverEnabled(peer.cwd)) continue
-      const failure = task.failure ?? providerFailure(cfg, task.identity)
+      const newest = providerFailure(cfg, task.identity)
+      const failure = task.failure ?? (newest ? failureForTask(task, newest) : undefined)
       if (task.state === 'watching') {
         // Positive failure evidence wins over native task_complete: a refused Codex
         // call also writes task_complete, and a Claude refusal is an assistant row.
