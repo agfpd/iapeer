@@ -371,6 +371,7 @@ export async function goalWatchTick(deps: GoalWatchDeps, sinceMs: number): Promi
         personality: d.personality,
         runtime: d.runtime,
         kind: 'peer-goal-stalled',
+        audience: 'owner',
         // Codex's own status is the taxonomy value — `blocked` and `usage_limited` are
         // different facts for the owner and must not collapse into one dedup identity.
         errorType: d.status,

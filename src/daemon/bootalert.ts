@@ -73,6 +73,7 @@ export function makeBootModalAlert(
         personality: info.personality,
         runtime: info.runtime,
         kind: 'boot-modal',
+        audience: 'operator', // core ready-gate gap — fixed by the operator, alerted via alerts.json
         errorType: 'unknown-boot-modal',
         summary: `${info.personality} (${info.runtime}): unrecognized boot dialog — ${title}`.slice(0, 240),
         content: info.content,

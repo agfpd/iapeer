@@ -62,7 +62,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
       const notice = readResolutionNotice(opts.runDir, r.id)
       if (notice?.status === 'sent') continue
       if (notice?.status === 'sending') {
-        opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance', eventAtMs: r.resolution.at,
+        opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance', audience: 'operator', eventAtMs: r.resolution.at,
           errorType: `resolution-notification-uncertain:${r.id}`, content: acceptanceEvent(r) })
         continue
       }
@@ -113,7 +113,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
     if (r.status === 'pending') continue
     const unresolved = r.status === 'unresolved'
     if (unresolved || r.status === 'failed') {
-      opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
+      opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance', audience: 'operator',
         eventAtMs: r.updatedAt,
         errorType: `${r.status}:${r.id}`, summary: `${r.status} delivery ${r.id} to ${r.identity}`, content: acceptanceEvent(r) })
     }
@@ -125,7 +125,7 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
       // Claim BEFORE sending. A restart in this boundary is visible unresolved notification custody,
       // never a blind repeated fallback task. The original receiver is never replayed.
       if (r[slot] === 'sending') {
-        opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance',
+        opts.board?.raise({ personality, runtime, kind: 'delivery-acceptance', audience: 'operator',
           eventAtMs: r.updatedAt,
           errorType: `notification-uncertain:${r.id}:${slot}`, content: acceptanceEvent(r) })
         return

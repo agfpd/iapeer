@@ -250,7 +250,7 @@ describe('goalWatchTick', () => {
       const board = new NoticeBoard({ now: () => T0 + 5000 })
       const r = await goalWatchTick({ codexHome: home, peerByCwd, board, now: () => T0 + 5000 }, T0)
       expect(r.raised).toBe(1)
-      const [n] = board.list(T0 + 5000)
+      const [n] = board.list('owner', T0 + 5000)
       expect(n).toMatchObject({
         personality: 'zapret2-oneclick',
         runtime: 'codex',
@@ -278,8 +278,8 @@ describe('goalWatchTick', () => {
       const second = await goalWatchTick(deps, first.sinceMs)
       expect(first.raised).toBe(1)
       expect(second.raised).toBe(0)
-      expect(board.list(T0 + 5000)).toHaveLength(1)
-      expect(board.list(T0 + 5000)[0]?.count).toBe(1)
+      expect(board.list('owner', T0 + 5000)).toHaveLength(1)
+      expect(board.list('owner', T0 + 5000)[0]?.count).toBe(1)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

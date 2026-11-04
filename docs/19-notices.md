@@ -213,6 +213,31 @@ resets, the plan) — data, never our interpretation of the cause.
 
 ## 4. Fleet API
 
+### Audience: the board serves the owner, operator events stay out
+
+Every face renders whatever kind it receives (obligation 4), so **who a notice is for is decided
+at the source, in the daemon** — never by a face-side kind filter. Each notice carries
+`audience`:
+
+- `owner` — a fact only the owner can act on: `peer-mute` (a peer gone mute on an API error or
+  limit) and `peer-goal-stalled`. These, and only these, reach the owner surfaces.
+- `operator` — core custody events: `delivery-acceptance` (unresolved / failed / uncertain
+  notification custody), `failover-review` (`failover-dispatch-uncertain`), `boot-modal` (an
+  unrecognized boot dialog). They already reach the operator over IAP (the caller, the fallback
+  peer, the `alerts.json` target); the board keeps them only as the backstop for when that IAP
+  notification itself is uncertain.
+
+A raise without `audience` is `operator`: a new kind must be **declared** owner-facing to reach
+the owner, so a forgotten tag costs a missing card in the operator view, not noise in the
+owner's channel. (Before 0.4.164 the board had no audience, and an unresolved
+`delivery-acceptance` arrived in the owner's Telegram as a limit-style card with a raw JSON
+envelope.)
+
+The owner surfaces — `GET /fleet/v1/notices`, `GET /fleet/v1/notices/<id>`, the snapshot field,
+and the SSE `notice-raised` event — carry `owner` notices only. Operator notices are read with
+`?audience=operator` (or `all`) on both GET routes, and are logged as `ev=operator-notice-raised`,
+a name no face subscribes to. An operator id is 404 on a default `GET /notices/<id>`.
+
 ### `GET /fleet/v1/notices`
 
 ```json
@@ -232,6 +257,7 @@ resets, the plan) — data, never our interpretation of the cause.
 | field | type | notes |
 |---|---|---|
 | `id` | string | `n1`, `n2`, … Unique while live; **not** stable across a daemon restart. |
+| `audience` | string | `owner` on every default read; `operator` only under `?audience=operator\|all` (see Audience) |
 | `personality` | string | the affected peer |
 | `runtime` | string | `claude` \| `codex` |
 | `kind` | string | `peer-mute` \| `peer-goal-stalled` (codex only). **Treat unknown kinds as renderable** — new kinds ride this surface. |

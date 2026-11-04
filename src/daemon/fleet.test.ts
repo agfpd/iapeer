@@ -573,6 +573,7 @@ describe('notice board surface (docs/19)', () => {
     personality: 'boris',
     runtime: 'claude',
     kind: 'peer-mute',
+    audience: 'owner' as const,
     errorType: 'rate_limit',
     model: 'Fable 5',
     content: "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
@@ -626,6 +627,23 @@ describe('notice board surface (docs/19)', () => {
     const body = (await r.json()) as { notices: Array<Record<string, unknown>> }
     const n = body.notices.find(x => x.personality === 'boris')!
     expect('resetsAtMs' in n).toBe(false)
+  })
+
+  // Operator custody events (delivery acceptance, failover review, boot dialog) never reach an
+  // owner face: not in the default list, not in the snapshot, 404 by id — only on opt-in.
+  test('an operator notice is invisible on owner reads and served only under ?audience', async () => {
+    const { notice } = board.raise({ personality: 'doc', runtime: 'claude', kind: 'delivery-acceptance',
+      audience: 'operator', errorType: 'unresolved:abc', content: '{"originalEnvelope":"…"}' })
+    expect(notice.audience).toBe('operator')
+    const owner = (await (await fetch(`${base()}/fleet/v1/notices`)).json()) as { notices: Array<Record<string, unknown>> }
+    expect(owner.notices.some(n => n.id === notice.id)).toBe(false)
+    expect(owner.notices.every(n => n.audience === 'owner')).toBe(true)
+    const snap = (await (await fetch(`${base()}/fleet/v1/snapshot`)).json()) as { notices?: Array<Record<string, unknown>> }
+    expect(snap.notices?.some(n => n.id === notice.id) ?? false).toBe(false)
+    expect((await fetch(`${base()}/fleet/v1/notices/${notice.id}`)).status).toBe(404)
+    const op = (await (await fetch(`${base()}/fleet/v1/notices?audience=operator`)).json()) as { notices: Array<Record<string, unknown>> }
+    expect(op.notices.map(n => n.id)).toEqual([notice.id])
+    expect((await fetch(`${base()}/fleet/v1/notices/${notice.id}?audience=all`)).status).toBe(200)
   })
 
   test('a stated reset rides the wire as epoch-ms (codex)', async () => {

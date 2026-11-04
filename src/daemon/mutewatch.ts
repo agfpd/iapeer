@@ -636,6 +636,7 @@ export function muteWatchTick(deps: MuteWatchDeps, sinceMs: number): { raised: n
         personality: d.personality,
         runtime: d.runtime,
         kind: 'peer-mute',
+        audience: 'owner', // the peer cannot say it is mute; only the owner can act
         errorType: d.errorType,
         model: d.model,
         resetsAtMs: d.resetsAtMs,

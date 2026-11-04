@@ -68,7 +68,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
       if (task.state === 'dispatching') {
         task.state = 'review'; task.error = 'daemon restarted during transfer dispatch; acceptance needs reconciliation'
         saveFailoverTask(cfg, task); log(task, 'dispatch-uncertain')
-        board?.raise({ personality: task.personality, runtime: task.targetRuntime ?? task.runtime, kind: 'peer-mute', errorType: 'failover-dispatch-uncertain', eventAtMs: task.ts, content: task.error })
+        board?.raise({ personality: task.personality, runtime: task.targetRuntime ?? task.runtime, kind: 'failover-review', audience: 'operator', errorType: 'failover-dispatch-uncertain', eventAtMs: task.ts, content: task.error })
         continue
       }
       if (!task.failure?.sessionId) continue

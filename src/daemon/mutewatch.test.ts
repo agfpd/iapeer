@@ -568,7 +568,7 @@ describe('startup catch-up — a limit that hit before this daemon started still
         onLimit: d => { if (d.resetsAtMs !== undefined) parks.push(d.resetsAtMs) },
       })
       await Bun.sleep(150); stop()
-      return { parks, notices: board.list(nowMs).length }
+      return { parks, notices: board.list('owner', nowMs).length }
     }
     // The daemon (re)started 10 min after linus's refused first call, reset still 2.6 h ahead.
     const r = await run(LINUS_DEATH_AT_MS + 10 * 60_000)

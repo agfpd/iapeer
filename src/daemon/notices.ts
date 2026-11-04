@@ -30,11 +30,28 @@ import { appendNoticeEvent } from './noticeslog.ts'
  *  answer. Free-form-tolerant — new kinds ride the same surface without a client change. */
 export type NoticeKind = 'peer-mute' | string
 
+/** WHO a notice is for. The board's owner surfaces (GET /fleet/v1/notices, the snapshot
+ *  field, SSE `notice-raised`) are rendered by the OWNER's faces (telegram, web, tray), and
+ *  docs/19 obliges a face to render any kind it receives. So the audience is decided HERE,
+ *  at the source, not by a face-side kind filter:
+ *  - `owner` — a fact only the owner can act on: a peer gone mute on an API error / limit
+ *    (`peer-mute`), a stalled pinned objective (`peer-goal-stalled`).
+ *  - `operator` — core custody events (delivery acceptance, failover review, unknown boot
+ *    dialog). They already reach the operator by IAP; the board keeps them only as the
+ *    backstop when that IAP notification itself is uncertain. Served under
+ *    `?audience=operator|all` and logged as `operator-notice-raised` — never in a face.
+ *  Absent ⇒ `operator`: a new kind must be DECLARED owner-facing to reach the owner, so a
+ *  forgotten tag costs a missing card in the operator view, not noise in the owner channel. */
+export type NoticeAudience = 'owner' | 'operator'
+export type NoticeAudienceFilter = NoticeAudience | 'all'
+
 export interface NoticeInput {
   personality: string
   runtime: string
   /** Taxonomy tag (peer-mute | …). */
   kind: NoticeKind
+  /** Who the notice is for (see NoticeAudience). Absent ⇒ operator. */
+  audience?: NoticeAudience
   /** The runtime's OWN error taxonomy value — `rate_limit`, `overloaded`, … Never
    *  invented by us: it is the structural field the runtime wrote (docs/19 §2). */
   errorType: string
@@ -60,6 +77,7 @@ export interface NoticeInput {
 
 export interface Notice extends NoticeInput {
   id: string
+  audience: NoticeAudience
   summary: string
   dedupKey: string
   /** When the notice was raised (board clock — the TTL anchor, hence not the event's own
@@ -147,9 +165,11 @@ export class NoticeBoard {
     }
     const id = `n${++this.counter}`
     const summary = (input.summary?.trim() || firstLine(input.content) || input.errorType).slice(0, 240)
+    const audience: NoticeAudience = input.audience === 'owner' ? 'owner' : 'operator'
     const notice: Notice = {
       ...input,
       id,
+      audience,
       summary,
       dedupKey,
       createdMs: nowMs,
@@ -162,8 +182,11 @@ export class NoticeBoard {
     appendNoticeEvent(
       this.logDir,
       {
-        ev: 'notice-raised',
+        // Only owner notices emit `notice-raised` — the one event a face acts on. An operator
+        // notice is still a durable trace, under a name no face subscribes to.
+        ev: audience === 'owner' ? 'notice-raised' : 'operator-notice-raised',
         id,
+        audience,
         personality: input.personality,
         runtime: input.runtime,
         kind: input.kind,
@@ -184,16 +207,19 @@ export class NoticeBoard {
     return { notice, deduped: false }
   }
 
-  /** All live notices, oldest first (GET /fleet/v1/notices + the snapshot field). */
-  list(nowMs: number = this.now()): Notice[] {
+  /** Live notices for `audience`, oldest first (GET /fleet/v1/notices + the snapshot field).
+   *  Default `owner`: the owner surfaces never see operator custody events. */
+  list(audience: NoticeAudienceFilter = 'owner', nowMs: number = this.now()): Notice[] {
     this.prune(nowMs)
-    return [...this.live.values()].sort((a, b) => a.createdMs - b.createdMs)
+    return [...this.live.values()].filter(n => audience === 'all' || n.audience === audience)
+      .sort((a, b) => a.createdMs - b.createdMs)
   }
 
-  /** One live notice by id (GET /fleet/v1/notices/<id> — full verbatim content). */
-  get(id: string, nowMs: number = this.now()): Notice | undefined {
+  /** One live notice by id within `audience` (GET /fleet/v1/notices/<id>). An operator
+   *  notice is 404 to an owner face even when it guesses the id. */
+  get(id: string, audience: NoticeAudienceFilter = 'owner', nowMs: number = this.now()): Notice | undefined {
     this.prune(nowMs)
-    return [...this.live.values()].find(n => n.id === id)
+    return [...this.live.values()].find(n => n.id === id && (audience === 'all' || n.audience === audience))
   }
 
   /** Live count (badge/metrics). */

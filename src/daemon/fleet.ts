@@ -67,7 +67,15 @@ import { deliveryLogPath } from './deliverylog.ts'
 import { approvalsLogPath } from './approvalslog.ts'
 import { ApprovalBroker } from './approvals.ts'
 import { noticesLogPath } from './noticeslog.ts'
-import { NoticeBoard } from './notices.ts'
+import { NoticeBoard, type NoticeAudienceFilter } from './notices.ts'
+
+/** `?audience=owner|operator|all` on the notice reads. Default (and anything unknown) =
+ *  owner: the faces that render this surface for the owner never opt in to operator
+ *  custody events by accident. */
+function noticeAudience(url: URL): NoticeAudienceFilter {
+  const a = url.searchParams.get('audience')
+  return a === 'operator' || a === 'all' ? a : 'owner'
+}
 import { turnsLogPath } from './turnslog.ts'
 import { ActivityBoard, type TurnActivity } from './turnwatch.ts'
 import { callTool, type CallToolDeps } from './index.ts'
@@ -178,6 +186,8 @@ export interface FleetApproval {
  *  which belongs to a different limit. */
 export interface FleetNotice {
   id: string
+  /** `owner` on every default read; `operator` only under `?audience=operator|all`. */
+  audience: 'owner' | 'operator'
   personality: string
   runtime: string
   kind: string
@@ -806,13 +816,13 @@ export function buildFleetHandler(opts: FleetHandlerOptions = {}): FleetHandler 
           api: FLEET_API_VERSION,
           version: IAPEER_VERSION,
           ts: new Date().toISOString(),
-          notices: board.list(),
+          notices: board.list(noticeAudience(url)),
         })
       }
       const noticeMatch = /^\/fleet\/v1\/notices\/([^/]+)$/.exec(path)
       if (noticeMatch) {
         if (method !== 'GET') return sendJson(res, 405, { error: 'method not allowed — GET /fleet/v1/notices/<id>' })
-        const item = board.get(noticeMatch[1]!)
+        const item = board.get(noticeMatch[1]!, noticeAudience(url))
         if (!item) return sendJson(res, 404, { error: `no live notice "${noticeMatch[1]}" (expired or unknown)` })
         return sendJson(res, 200, { api: FLEET_API_VERSION, version: IAPEER_VERSION, ts: new Date().toISOString(), notice: item })
       }

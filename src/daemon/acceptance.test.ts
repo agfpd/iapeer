@@ -152,8 +152,8 @@ test('re-reading one unresolved delivery does not inflate the owner occurrence c
     const board = new NoticeBoard({ env: {}, now: () => 130_000 })
     await processAcceptance({ ...x.opts, board, now: 130_000, processAlive: () => true })
     await processAcceptance({ ...x.opts, board, now: 140_000, processAlive: () => true })
-    expect(board.list()).toHaveLength(1)
-    expect(board.list()[0]!.count).toBe(1)
+    expect(board.list('operator')).toHaveLength(1)
+    expect(board.list('operator')[0]!.count).toBe(1)
   } finally { rmSync(x.root, { recursive: true, force: true }) }
 })
 

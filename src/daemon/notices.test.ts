@@ -9,6 +9,7 @@ const base = {
   personality: 'iapeer',
   runtime: 'claude',
   kind: 'peer-mute',
+  audience: 'owner' as const,
   errorType: 'rate_limit',
   model: 'Fable 5',
   content: "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.",
@@ -163,5 +164,23 @@ describe('NoticeBoard', () => {
     const board = new NoticeBoard({ logDir: undefined, env: {} as NodeJS.ProcessEnv })
     board.raise(base)
     expect(existsSync(noticesLogPath(dir))).toBe(false)
+  })
+
+  test('audience: absent ⇒ operator; only owner notices emit notice-raised', () => {
+    const dir = tmp()
+    const board = new NoticeBoard({ logDir: dir })
+    const { notice: op } = board.raise({ ...base, audience: undefined, kind: 'delivery-acceptance', errorType: 'unresolved:x' })
+    const { notice: own } = board.raise(base)
+    expect(op.audience).toBe('operator')
+    expect(own.audience).toBe('owner')
+    expect(board.list().map(n => n.id)).toEqual([own.id])
+    expect(board.list('operator').map(n => n.id)).toEqual([op.id])
+    expect(board.list('all')).toHaveLength(2)
+    expect(board.get(op.id)).toBeUndefined()
+    expect(board.get(op.id, 'operator')?.id).toBe(op.id)
+    const log = readFileSync(noticesLogPath(dir), 'utf8')
+    expect(log).toMatch(new RegExp(`ev=operator-notice-raised id=${op.id}\\b`))
+    expect(log).toMatch(new RegExp(`ev=notice-raised id=${own.id}\\b`))
+    expect(log.match(/ev=notice-raised/g)).toHaveLength(1)
   })
 })
