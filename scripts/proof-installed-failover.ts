@@ -30,6 +30,9 @@ const { peerLaunchEnvPath } = await import('../src/storage/index.ts')
 const { loadLifecycleConfig } = await import('../src/lifecycle/index.ts')
 const { selectFailoverRuntime } = await import('../src/lifecycle/failover.ts')
 const { readPeersIndex, findPeer } = await import('../src/registry/index.ts')
+const { startSupervisorDaemon, killSession } = await import('../src/supervisor/index.ts')
+const { sessionAlive } = await import('../src/supervisor/client.ts')
+const runDir = join(iap, 'state/supervisor')
 const results: unknown[] = []
 const until = async (what: string, f: () => boolean, ms = 180_000) => {
   const end = Date.now() + ms
@@ -68,6 +71,9 @@ try {
   const sender = join(root, 'sender')
   writePeerProfileAtomic(sender, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
   await upsertPeer({ personality: 'sender', runtime: 'notifier', intelligence: 'absent', cwd: sender }, { env })
+  const sink = await startSupervisorDaemon({ session: 'notifier-sender', runtime: 'notifier', runDir, daemonArgv: [bin, 'supervisor'],
+    serve: { argv: ['/bin/cat'], env: {}, cwd: root, paneLogPath: join(root, 'sender.log') } })
+  if (sink.state !== 'started') throw new Error(`sender sink: ${JSON.stringify(sink)}`)
   daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.stdout')), stderr: Bun.file(join(root, 'daemon.stderr')) })
   await until('daemon ready', () => read(join(root, 'daemon.stderr')).includes('daemon READY'))
   await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', commandTask(first), '--topic', 'real-auth-failover')
@@ -88,7 +94,7 @@ try {
   if (!process.argv.includes('--quick')) {
   // Credential repair is a native authentication change, never a mocked success.
   // Read the host keychain only in the launched native process; no token is printed or archived.
-  writeFileSync(env.IAPEER_CLAUDE_BIN!, `#!/bin/sh\nTOKEN=$(/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])') || exit 1\nexec env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" '${join(host, '.local/bin/claude')}' "$@"\n`)
+  writeFileSync(env.IAPEER_CLAUDE_BIN!, `#!/bin/sh\nTOKEN=$(/usr/bin/security find-generic-password -s 'Claude Code-credentials' -w '${join(host, 'Library/Keychains/login.keychain-db')}' | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])') || exit 1\nexec env CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" '${join(host, '.local/bin/claude')}' "$@"\n`)
   await cli('new', 'failover-proof', 'claude')
   const oldID = failoverTasks().find(t => t.state === 'transferred')?.failure?.sessionId
   if (!oldID || !read(join(iap, 'state/lifecycle/failover/claude-failover-proof.quarantine.json')).includes(oldID)) throw new Error('missing quarantine')
@@ -118,6 +124,10 @@ try {
   // Installed CLI teardown owns only these isolated hosting sockets/processes.
   for (const rt of ['claude', 'codex']) {
     const p = Bun.spawn([bin, 'stop', 'failover-proof', rt], { env, stdout: 'ignore', stderr: 'ignore' }); await p.exited
+  }
+  for (const identity of ['claude-failover-proof', 'codex-failover-proof', 'notifier-sender']) {
+    killSession(runDir, identity, { reason: 'failover-proof-cleanup', sandbox: true })
+    await until('hosting teardown before deleting its state', () => !sessionAlive(runDir, identity), 10_000)
   }
   mkdirSync(artifacts, { recursive: true })
   writeFileSync(join(artifacts, 'result.json'), JSON.stringify({ success, root, bin, binSHA256, results }, null, 2))
