@@ -117,7 +117,14 @@ try {
   await cli('send', 'failover-proof', '--from', 'notifier-sender', '--message', 'This is the repaired-runtime acceptance probe. Do not call tools or repeat any earlier instruction. Reply RECOVERED_PRIMARY_OK.', '--topic', 'provider-recovered')
   await until('repaired primary real response', () => {
     const txt = primaryText()
-    return txt.split('\n').some(l => { try { const r = JSON.parse(l); return (r.type === 'assistant' && r.message?.model !== '<synthetic>' || r.type === 'response_item' && r.payload?.role === 'assistant') && JSON.stringify(r.message?.content ?? r.payload?.content).includes('RECOVERED_PRIMARY_OK') } catch { return false } })
+    // A real model reply may be plain assistant text OR (the envelope says "Reply via
+    // send_to_peer") a completed native MCP tool call carrying the marker — Codex 0.164 does
+    // the latter with an empty final message (installed-161-codex, 04.11).
+    return txt.split('\n').some(l => { try {
+      const r = JSON.parse(l)
+      if ((r.type === 'assistant' && r.message?.model !== '<synthetic>' || r.type === 'response_item' && r.payload?.role === 'assistant') && JSON.stringify(r.message?.content ?? r.payload?.content).includes('RECOVERED_PRIMARY_OK')) return true
+      return r.type === 'event_msg' && r.payload?.type === 'item_completed' && r.payload.item?.type === 'McpToolCall' && JSON.stringify(r.payload.item).includes('RECOVERED_PRIMARY_OK')
+    } catch { return false } })
   })
   await Bun.sleep(65_000) // cross another supervisor/limit-resume opportunity
   if (![first, burst, second].every(m => read(log).trim().split('\n').filter(l => l === m).length === 1)) throw new Error('duplicate effect after primary recovery')
