@@ -10,6 +10,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual re-run of a commit whose push webhook was lost (v0.4.161: GitHub 500 on push,
+  # the refs landed but no workflow fired).
+  workflow_dispatch:
 
 jobs:
   test:
