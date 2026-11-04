@@ -54,7 +54,7 @@ import { buildProcessAddress } from '../core/socket.ts'
 import { err, ok } from '../core/errors.ts'
 import { resolveCallerIdentity, systemCaller } from '../identity/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
-import { readPeersIndex } from '../registry/index.ts'
+import { findPeer, readPeersIndex } from '../registry/index.ts'
 import {
   createComposerDeliveryQueue,
   deliveryCompleted,
@@ -85,7 +85,7 @@ import { ActivityBoard, startTurnWatch } from './turnwatch.ts'
 import { startCapabilityReloads } from '../capability/reload.ts'
 import { defaultDaemonSocketPath, startDaemon, type DaemonHandle } from './index.ts'
 import { randomBytes } from 'crypto'
-import { clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
+import { HELD_NOTICE_MAX_AGE_MS, heldBackoff, holdNotice, readHeldNotices, writeHeldNotices, type HeldNotice, clearSelfEnded, listInflightIdentities, listInterruptedIdentities, listOrphanIdentities, readSelfEnded, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from '../lifecycle/inflight.ts'
 import { processAcceptance } from './acceptance.ts'
 import { readAcceptance, writeAcceptance } from '../launch/acceptanceStore.ts'
 import { inflightAcceptanceId, readInflight } from '../lifecycle/inflight.ts'
@@ -327,12 +327,43 @@ export async function processInflight(
   /** A notice FROM the core's system identity to the entry's original sender. Registry-independent
    *  (systemCaller is synthesized), so it is deliverable on every install — the earlier sender was the
    *  peer named `iapeer`, and a host without it skipped the notice silently (linus 18.10). */
-  const notifySender = async (e: InflightEntry, message: string): Promise<string> => {
+  const sendNotice = async (to: { personality: string; runtime: string }, message: string, topic: string): Promise<{ ok: boolean; reason: string }> => {
     try {
-      const n = await send(systemCaller(), { personality: e.caller.personality, runtime: e.caller.runtime, message, topic: e.topic ?? 'delivery-failed' }, { ...routeDeps, coreNotice: true })
-      return String(n.ok)
-    } catch {
-      return 'false'
+      const n = await send(systemCaller(), { personality: to.personality, runtime: to.runtime, message, topic }, { ...routeDeps, coreNotice: true })
+      return n.ok ? { ok: true, reason: '' } : { ok: false, reason: n.error.message }
+    } catch (x) {
+      return { ok: false, reason: x instanceof Error ? x.message : String(x) }
+    }
+  }
+  // A notice that cannot land now is HELD (never silently lost) and retried below with backoff.
+  // `notified=held` in delivery.log tells the reader the sender WILL be told.
+  const notifySender = async (e: InflightEntry, message: string): Promise<string> => {
+    const topic = e.topic ?? 'delivery-failed'
+    const r = await sendNotice(e.caller, message, topic)
+    if (r.ok) return 'true'
+    const held = holdNotice(cfg.stateDir, { personality: e.caller.personality, runtime: e.caller.runtime, message, topic, reason: r.reason.slice(0, 300) })
+    appendLifecycleEvent(cfg.eventLogDir, { ev: 'notice-held', id: held.id, to: `${e.caller.runtime}-${e.caller.personality}`, reason: held.reason }, { env })
+    return 'held'
+  }
+  {
+    const now = Date.now()
+    const held = readHeldNotices(cfg.stateDir)
+    if (held.length) {
+      const index = readPeersIndex({ env })
+      const keep: HeldNotice[] = []
+      for (const n of held) {
+        if (!findPeer(index, n.personality) || now - n.heldAt > HELD_NOTICE_MAX_AGE_MS) {
+          appendLifecycleEvent(cfg.eventLogDir, { ev: 'notice-dropped', id: n.id, to: `${n.runtime}-${n.personality}`, cause: findPeer(index, n.personality) ? 'expired' : 'unregistered', attempts: n.attempts }, { env })
+          continue
+        }
+        if (n.nextAt > now) { keep.push(n); continue }
+        const r = await sendNotice(n, n.message, n.topic)
+        if (r.ok) appendLifecycleEvent(cfg.eventLogDir, { ev: 'notice-released', id: n.id, to: `${n.runtime}-${n.personality}`, attempts: n.attempts + 1, heldMs: now - n.heldAt }, { env })
+        else keep.push({ ...heldBackoff(n, now), reason: r.reason.slice(0, 300) })
+      }
+      // Notices held DURING this flush by a concurrent writer are appended after the read — keep them.
+      const fresh = readHeldNotices(cfg.stateDir).filter(x => !held.some(h => h.id === x.id))
+      writeHeldNotices(cfg.stateDir, [...keep, ...fresh])
     }
   }
   // Includes old daemon orphans: an upgrade must not revive their blind-replay policy.

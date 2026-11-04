@@ -21,7 +21,7 @@ async function until(pred: () => boolean, ms = 5000) {
   return pred()
 }
 
-test('real self-fresh reclaims owned stdio tree; fresh MCP answers; sibling and detached-descendant sentinels survive', async () => {
+test('real self-fresh reclaims owned stdio tree; fresh MCP answers; sibling and double-forked daemon survive, setsid tool-shaped child is reclaimed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'iapeer-stdio-'))
   const env = { ...process.env, IAPEER_ROOT: join(dir, 'root'), IAPEER_LAUNCHAGENTS_DIR: join(dir, 'agents'), PEER_IDENTITY: 'codex-stdio-probe' }
   const runDir = defaultRunDir(env)
@@ -53,6 +53,8 @@ test('real self-fresh reclaims owned stdio tree; fresh MCP answers; sibling and 
     const old = JSON.parse(readFileSync(join(oldDir, 'ready.json'), 'utf8'))
     const server = events(oldDir).find(e => e.event === 'server').pid as number
     const detached = events(oldDir).find(e => e.event === 'detached-sentinel').pid as number
+    expect(await until(() => events(oldDir).some(e => e.event === 'orphan-daemon'))).toBe(true)
+    const orphan = events(oldDir).find(e => e.event === 'orphan-daemon').pid as number
     expect(old.result.content[0].text).toBe(`pong:${server}`)
     expect((await deliverToHost(runDir, session, 'fresh')).ok).toBe(true)
     expect(await until(() => hasNewEager(cfg, session) && !sessionAlive(runDir, session))).toBe(true)
@@ -60,7 +62,10 @@ test('real self-fresh reclaims owned stdio tree; fresh MCP answers; sibling and 
     const gone = await until(() => [old.peer, old.wrapper, server].every(p => !alive(p)), 2000)
     console.log(JSON.stringify({ phase: 'old-after-self-fresh', peer: old.peer, wrapper: old.wrapper, server, gone, sentinelAlive: alive(sentinel.pid), events: events(oldDir).map(e => e.event) }))
     expect(gone).toBe(true)
-    expect(alive(detached)).toBe(true)
+    // Ownership = ancestry (04.11.2026): a live setsid child is the session's (tool shells look exactly
+    // like this) and is reclaimed; a daemon that double-forked away from the tree survives.
+    expect(await until(() => !alive(detached), 2000)).toBe(true)
+    expect(alive(orphan)).toBe(true)
     let freshDir = ''
     const wake = await processOrphanEagerMarks(cfg, { env, wakeFn: async args => {
       expect(args.resume).toBe(false)

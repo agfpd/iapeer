@@ -502,7 +502,14 @@ and can continue on its assigned non-default endpoint. See [23](23-failover.md).
 **Core-event routing.** Autonomous continuation and maintenance are distinct from explicitly
 addressed work. Core status notices (inflight interrupted/undelivered, composer failure, skipped
 limit continuation) target the current default agent endpoint, not a sender's historical agent
-runtime. Human/router return channels remain exact. An explicitly configured boot-alert runtime
+runtime. **Reach rule (0.4.163):** a default endpoint STOPPED by the operator is no reason to lose the
+notice — it goes to a runtime of the peer that is live right now (the original sender's runtime first);
+no new session is started for it. With the default stopped and nothing live, the route refuses before
+any wake (`core notice unreachable`). An inflight interrupted/undelivered notice that cannot land is
+HELD (`state/lifecycle/held-notices.jsonl`, `ev=notice-held`, delivery.log `notified=held`) and retried
+with backoff (1 min doubling to 30 min) until `ev=notice-released`; it is dropped only when its
+recipient is unregistered or after 7 days (`ev=notice-dropped`). Acceptance notices keep their own
+retry-until-sent custody. Human/router return channels remain exact. An explicitly configured boot-alert runtime
 remains an operator-selected destination. Explicit task redelivery and ephemeral FIFO drains
 retain their addressed endpoints; `/new`, `self-fresh`, attach and other operator commands retain
 their existing semantics. Capability maintenance on a non-default endpoint waits for its next

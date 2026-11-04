@@ -13,7 +13,7 @@
 // runtime's adapter.deliveryMarkers. The poll/re-press logic is untouched; only the
 // marker SOURCE moved, so the timing behaviour is identical.
 
-import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'node:crypto'
@@ -25,6 +25,7 @@ import {
   isSupportedLocalRuntime,
   isValidName,
   resolveSockDir,
+  STATE_DIR,
   type TmuxRuntime,
 } from '../core/constants.ts'
 import { err, ok, type Result } from '../core/errors.ts'
@@ -114,6 +115,39 @@ function sessionAlive(_sock: string, address: string, env: NodeJS.ProcessEnv = p
 
 /** Is the (runtime,personality) endpoint's PROCESS up right now (ready or not)? The operator-verb
  *  guard (stop/remove/rename must still reach a hung process) — NOT a delivery predicate. */
+/** The durable operator stop flag (lifecycle `<stateDir>/<identity>.stopped`), read env-rooted so the
+ *  transport needs no lifecycle import. Same file lifecycle.isStopped reads. */
+export function identityStopped(identity: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return existsSync(join(resolveGlobalRoot(env), STATE_DIR, 'lifecycle', `${identity}.stopped`))
+}
+
+export interface CoreNoticeRouteProbe {
+  isStopped: (identity: string) => boolean
+  isLive: (identity: string) => boolean
+}
+
+/**
+ * Where a core status notice to an AGENT peer goes (docs/19 «Core-event routing», OC07 reach rule).
+ * The current default endpoint, as long as the operator has not stopped it — a core event never opens a
+ * working thread on a secondary runtime. A STOPPED default is no reason to lose the notice: it goes to a
+ * runtime of the peer that is LIVE right now (the requested one — the original sender's runtime —
+ * first), which starts no new session. Nothing live and the default stopped → null: the caller must
+ * keep the notice (no wake attempt against an operator stop).
+ */
+export function coreNoticeRuntime(peer: PeerRecord, requested: string | undefined, probe: CoreNoticeRouteProbe): string | null {
+  if (!probe.isStopped(buildProcessAddress(peer.runtime, peer.personality))) return peer.runtime
+  const live = peer.runtimes.filter(rt => rt !== peer.runtime && getAdapter(rt).kind === 'tui' && probe.isLive(buildProcessAddress(rt, peer.personality)))
+  if (requested && live.includes(requested)) return requested
+  return live[0] ?? null
+}
+
+/** Marker prefix of the «no reachable runtime» refusal — callers that can hold a notice key on it. */
+export const CORE_NOTICE_UNREACHABLE = 'core notice unreachable'
+
+function coreNoticeProbe(deps: { isStopped?: (identity: string) => boolean }, env: NodeJS.ProcessEnv): CoreNoticeRouteProbe {
+  return { isStopped: deps.isStopped ?? (id => identityStopped(id, env)), isLive: id => hostSessionAlive(id, env) }
+}
+
 export function isPeerLive(runtime: string, personality: string, _sockDir = resolveSockDir(), env: NodeJS.ProcessEnv = process.env): boolean {
   return hostSessionAlive(buildProcessAddress(runtime, personality), env)
 }
@@ -1530,8 +1564,11 @@ export interface RouteDeps {
   failoverRetry?: boolean
   failoverVisited?: string[]
   failoverTaskId?: string
-  /** Internal core status notice: agent destinations follow their CURRENT default; router origins stay exact. */
+  /** Internal core status notice: agent destinations follow their CURRENT default (a stopped default →
+   *  a live runtime of the peer, see coreNoticeRuntime); router origins stay exact. */
   coreNotice?: boolean
+  /** Test seam: the operator stop flag. Default: the env-rooted lifecycle flag file. */
+  isStopped?: (identity: string) => boolean
   /** A wake triggered by THIS send carries the "continue THIS work" intent (resume an idle-reaped
    *  session regardless of topic). Set only by the core's limit-resume pass — never from a request. */
   wakeContinueWork?: boolean
@@ -1791,9 +1828,10 @@ export function createComposerDeliveryQueue(opts: ComposerDeliveryQueueOptions):
         await notifyFailed(job, `queued delivery to ${job.target.personality} (${job.target.runtime}) failed: target session vanished or was replaced before delivery`)
         continue
       }
-      if (job.inflight?.coreNotice && findPeer(readPeersIndex({ env }), job.target.personality)?.runtime !== job.target.runtime) {
+      const noticePeer = job.inflight?.coreNotice ? findPeer(readPeersIndex({ env }), job.target.personality) : undefined
+      if (job.inflight?.coreNotice && (!noticePeer || coreNoticeRuntime(noticePeer, job.target.runtime, coreNoticeProbe({}, env)) !== job.target.runtime)) {
         q.shift()
-        await notifyFailed(job, 'queued core status became stale: the peer default runtime changed before delivery')
+        await notifyFailed(job, 'queued core status became stale: the peer default runtime changed (or its stopped default was started again) before delivery')
         continue
       }
 
@@ -2018,7 +2056,11 @@ async function routeSendInner(
   if (!peer) {
     return err(`peer "${personality}" is not in the iapeer peers index; message NOT delivered`)
   }
-  if (deps.coreNotice && peer.intelligence === 'artificial' && getAdapter(runtime ?? peer.runtime).kind === 'tui') runtime = peer.runtime
+  if (deps.coreNotice && peer.intelligence === 'artificial' && getAdapter(runtime ?? peer.runtime).kind === 'tui') {
+    const chosen = coreNoticeRuntime(peer, runtime, coreNoticeProbe(deps, env))
+    if (!chosen) return err(`${CORE_NOTICE_UNREACHABLE}: "${personality}" default runtime ${peer.runtime} is stopped by the operator and no other runtime is live`)
+    runtime = chosen
+  }
   const explicitRuntime = runtime && caller.runtime !== 'core' && !deps.failoverRetry
   let failoverEligible = !!deps.failoverRetry
   if (deps.selectAgentRuntime && !deps.coreNotice && !deps.wakeContinueWork && !deps.isLaunchdManaged?.(personality)) {

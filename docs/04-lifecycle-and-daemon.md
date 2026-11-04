@@ -120,12 +120,16 @@ an abandoned never-ready hosting under the wake lock. Process-control verbs can 
 Migration of existing agent sessions checks their current host emulator (or native control ping),
 not old pane-log bytes and not merely a live PID.
 
-Before killing the runtime, the supervisor snapshots its descendants and kills those still attached
-to its controlling PTY, including stdio MCP launchers in separate process groups. Each PID's start
-token and terminal are re-checked before signalling; unrelated processes and detached daemon branches
-are excluded. This also applies to `self-fresh`: finish work and persist the handoff before calling it.
-Processes already orphaned before the snapshot, a concurrent fork/exit race, an unreadable process
-table, and shared-backend threads outside the PTY are not covered by this cleanup. A shared runtime
-daemon needs its own per-thread shutdown protocol; ancestry alone does not authorize killing it.
+Before killing the runtime, the supervisor snapshots its descendants and kills **every live descendant**,
+whatever its terminal or process group: stdio MCP launchers, and the runtime's tool processes, whose
+shells are setsid children without a terminal (Claude Code's Bash tool, Codex exec). Ownership is
+ancestry. Until 0.4.163 only descendants on the session's PTY were reclaimed, so a stop/new left a
+running tool tree alive as orphans that could finish side effects after the restart. Each PID's start
+token is re-checked before signalling (a reused PID is never signalled); the snapshot is repeated while
+the runtime root still lives, so a child forked during the pass is caught. A daemon that double-forked
+away (reparented to launchd) is not a descendant and survives. This also applies to `self-fresh`:
+finish work and persist the handoff before calling it. Processes already orphaned before the snapshot
+and an unreadable process table are not covered. A `stop`/`new` that targets the caller's own session
+(`PEER_IDENTITY`) is refused without `--force`: the CLI runs inside that session and would be killed mid-way.
 
 Behavior by runtime class — [08 — Peer management](08-peer-management.md); ephemeral workers — [10 — Messaging](10-messaging.md).

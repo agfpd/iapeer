@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { unfinishedInflight, inflightAcceptanceId, listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
+import { readHeldNotices, writeHeldNotices, unfinishedInflight, inflightAcceptanceId, listInterruptedIdentities, listOrphanIdentities, readInflight, recordInflight, sweepInflight, takeInterrupted, takeOrphans, type InflightEntry } from './inflight.ts'
 import { readAcceptance } from '../launch/acceptanceStore.ts'
 import { deliveryCompleted, deliveryLanded, deliveryProcessed } from '../transport/index.ts'
 import { processInflight, redeliveryMessage } from '../daemon/main.ts'
@@ -332,6 +332,46 @@ describe('processInflight — redeliver, or the sender learns', () => {
     await processInflight(config, env, {}, { processed: () => false, send: send as never })
     expect(readInflight(state, e.identity)).toHaveLength(1)
     expect(takeOrphans(state, e.identity)).toEqual([])
+  })
+  test('an interrupted notice that cannot land is HELD, retried with backoff, released once it lands (OC07 reach)', async () => {
+    const e = entry({ runtime: 'codex', identity: 'codex-bob', sessionToken: 'host:dead' })
+    writeFileSync(join(state, 'codex-bob.interrupted.jsonl'), JSON.stringify(e) + '\n')
+    const env = { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }
+    const sent: any[] = []
+    let up = false
+    const send = (async (...a: any[]) => { sent.push(a); return up ? ok({}) : err('core notice unreachable: "alice" default runtime claude is stopped') }) as never
+    await processInflight(cfg(), env, {}, { processed: () => false, send })
+    expect(sent).toHaveLength(1)
+    let held = readHeldNotices(state)
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({ personality: 'alice', runtime: 'claude', attempts: 0 })
+    expect(readFileSync(join(root, 'logs', 'delivery.log'), 'utf8')).toMatch(/ev=inflight-interrupted .*notified=held/)
+    // not due yet → no retry
+    await processInflight(cfg(), env, {}, { processed: () => false, send })
+    expect(sent).toHaveLength(1)
+    // due, still unreachable → backoff grows
+    writeHeldNotices(state, [{ ...held[0]!, nextAt: 0 }])
+    await processInflight(cfg(), env, {}, { processed: () => false, send })
+    expect(sent).toHaveLength(2)
+    held = readHeldNotices(state)
+    expect(held[0]!.attempts).toBe(1)
+    expect(held[0]!.nextAt).toBeGreaterThan(Date.now())
+    // due, reachable → released, store empty
+    writeHeldNotices(state, [{ ...held[0]!, nextAt: 0 }])
+    up = true
+    await processInflight(cfg(), env, {}, { processed: () => false, send })
+    expect(sent).toHaveLength(3)
+    expect(sent[2][1]).toMatchObject({ personality: 'alice', runtime: 'claude' })
+    expect(readHeldNotices(state)).toEqual([])
+    const life = readFileSync(join(root, 'logs', 'lifecycle.log'), 'utf8')
+    expect(life).toMatch(/ev=notice-held .*to=claude-alice/)
+    expect(life).toMatch(/ev=notice-released .*to=claude-alice attempts=2/)
+  })
+  test('a held notice for a recipient no longer registered is dropped with a durable event', async () => {
+    writeHeldNotices(state, [{ id: 'h1', personality: 'ghost', runtime: 'claude', message: 'm', topic: 't', heldAt: Date.now(), attempts: 0, nextAt: 0, reason: 'x' }])
+    await processInflight(cfg(), { HOME: root, IAPEER_ROOT: join(root, 'iapeer') }, {}, { processed: () => false, send: (async () => ok({})) as never })
+    expect(readHeldNotices(state)).toEqual([])
+    expect(readFileSync(join(root, 'logs', 'lifecycle.log'), 'utf8')).toMatch(/ev=notice-dropped id=h1 .*cause=unregistered/)
   })
   test('upgrade does not replay an unknown already orphaned by the old daemon', async () => {
     const e = entry({ unconfirmed: true, ts: 1 })

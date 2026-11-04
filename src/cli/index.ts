@@ -237,6 +237,14 @@ export interface KillGuardOptions extends CliEnvOptions {
  * incident: stop+start one second after a confirmed delivery — the market review was lost, and a turn
  * killed mid side-effect cannot be safely repeated). Empty → nothing to protect.
  */
+/** The caller's OWN session: a stop/new of it kills the CLI process itself (it is a descendant of that
+ *  session's runtime, and teardown reclaims every descendant) — a `new` would die before relaunching. */
+export function selfTarget(identity: string, env: NodeJS.ProcessEnv): string | undefined {
+  return env.PEER_IDENTITY?.trim() === identity
+    ? `this is the caller's own session (${identity}): the command runs inside it and would be killed mid-way — use \`iapeer self-fresh\`, or --force`
+    : undefined
+}
+
 export function busyTurn(identity: string, env: NodeJS.ProcessEnv): InflightEntry[] {
   const cfg = loadLifecycleConfig(env)
   const token = hostSessionAlive(identity, env) ? hostSessionToken(identity, env) : null
@@ -353,6 +361,12 @@ export function stopPeer(personality: string, runtime: string | undefined, opts:
       appendLifecycleEvent(cfg.eventLogDir, { ev: 'stopped', identity, personality, runtime: rt, action: 'bootout', reason }, { env })
     } else {
       // TURN GUARD: never silently kill a turn the core delivered — refuse with the reason; --force kills.
+      const own = opts.force ? undefined : selfTarget(identity, env)
+      if (own) {
+        out.push({ personality, runtime: rt, action: 'refused-busy', reason: own })
+        appendLifecycleEvent(cfg.eventLogDir, { ev: 'stop-refused', identity, personality, runtime: rt, cause: 'own-session', caller: env.PEER_IDENTITY }, { env })
+        continue
+      }
       const busy = opts.force ? [] : (opts.busy ?? (id => busyTurn(id, env)))(identity)
       if (busy.length > 0) {
         const reason = busyReason(busy, 'stop')
@@ -749,6 +763,11 @@ export async function newPeer(
   }
   const identity = buildProcessAddress(rt, personality)
   // TURN GUARD: a fresh restart kills the live session — same refusal as stop; --force overrides.
+  const own = opts.force ? undefined : selfTarget(identity, env)
+  if (own) {
+    appendLifecycleEvent(cfg.eventLogDir, { ev: 'new-refused', identity, personality, runtime: rt, cause: 'own-session', caller: env.PEER_IDENTITY }, { env })
+    return { personality, runtime: rt, action: 'refused-busy', reason: own }
+  }
   const busy = opts.force ? [] : (opts.busy ?? (id => busyTurn(id, env)))(identity)
   if (busy.length > 0) {
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'new-refused', identity, personality, runtime: rt, cause: 'turn-in-progress', pending: busy.length, caller: env.PEER_IDENTITY }, { env })

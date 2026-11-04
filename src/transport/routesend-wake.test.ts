@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
+import { CORE_NOTICE_UNREACHABLE, coreNoticeRuntime, hasTelegramPresence, routeSend, type WakeFn } from './index.ts'
 import { ok } from '../core/errors.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
 import { systemCaller } from '../identity/index.ts'
@@ -102,6 +102,26 @@ test('core status follows current agent default and suppresses launch-seed; expl
   })
   expect(req?.runtime).toBe('claude')
   expect(req?.suppressInitialPrompt).toBeUndefined()
+})
+
+test('core notice reach rule: stopped default → a LIVE runtime (sender runtime first); nothing live → unreachable', () => {
+  const peer = { personality: 'p', runtime: 'codex', runtimes: ['codex', 'claude', 'opencode'] } as unknown as PeerRecord
+  const probe = (stopped: string[], live: string[]) => ({ isStopped: (id: string) => stopped.includes(id), isLive: (id: string) => live.includes(id) })
+  expect(coreNoticeRuntime(peer, 'claude', probe([], ['claude-p']))).toBe('codex') // default not stopped → default (no secondary thread)
+  expect(coreNoticeRuntime(peer, 'claude', probe(['codex-p'], ['claude-p', 'opencode-p']))).toBe('claude')
+  expect(coreNoticeRuntime(peer, 'claude', probe(['codex-p'], ['opencode-p']))).toBe('opencode')
+  expect(coreNoticeRuntime(peer, 'claude', probe(['codex-p'], []))).toBeNull()
+  expect(coreNoticeRuntime(peer, undefined, probe(['codex-p'], ['codex-p']))).toBeNull() // a stopped default never counts as live
+})
+
+test('core notice to a peer whose default is stopped and nothing is live → refused before any wake', async () => {
+  let woke = false
+  const r = await routeSend(systemCaller(), { personality: MULTI_TARGET, runtime: 'claude', message: 'core status' }, {
+    coreNotice: true, isStopped: id => id === `codex-${MULTI_TARGET}`, wake: async () => { woke = true; return { status: 'FAILED', woke: false, reason: 'test-only' } },
+  })
+  expect(r.ok).toBe(false)
+  if (!r.ok) expect(r.error.message).toContain(CORE_NOTICE_UNREACHABLE)
+  expect(woke).toBe(false)
 })
 
 test('core status preserves router return channels rather than substituting an agent runtime', async () => {

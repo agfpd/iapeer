@@ -158,6 +158,15 @@ describe('stop / start (C1 durable flag, warm runtime)', () => {
     expect(isStopped(cfg, 'claude-busyone')).toBe(true)
     expect(readFileSync(lifecycleLogPath(cfg.eventLogDir), 'utf8')).toMatch(/ev=stopped identity=claude-busyone .*force=1/)
   })
+  test('own session: stop/new of the caller itself is refused (the CLI would die inside it); --force overrides', async () => {
+    await register('selfie')
+    const e = { ...env(), PEER_IDENTITY: 'claude-selfie' }
+    const o = stopPeer('selfie', undefined, { env: e, busy: () => [] })
+    expect(o[0].action).toBe('refused-busy')
+    expect(o[0].reason).toMatch(/own session .*self-fresh/)
+    expect((await newPeer('selfie', undefined, { env: e, busy: () => [], wakeFn: (async () => { throw new Error('must not wake') }) as never })).action).toBe('refused-busy')
+    expect(stopPeer('selfie', undefined, { env: e, force: true, busy: () => [] })[0].action).toBe('stopped')
+  })
   test('turn guard: an idle session (no unfinished delivery) stops as before', async () => {
     await register('idleone')
     expect(stopPeer('idleone', undefined, { env: env(), busy: () => [] })[0].action).toBe('stopped')

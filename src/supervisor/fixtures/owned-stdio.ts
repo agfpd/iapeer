@@ -34,9 +34,15 @@ if (mode === 'server') {
   process.on('SIGHUP', () => record('wrapper-hup-ignored'))
   server.on('exit', () => process.exit(0))
 } else if (mode === 'peer') {
+  // A setsid (no-tty) CHILD — the shape of a runtime's tool shell (claude Bash / codex exec): owned.
   const sentinel = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' })
   sentinel.unref()
   record('detached-sentinel', { pid: sentinel.pid })
+  // A double-forked daemon: its parent shell exits at once, it is reparented to launchd — NOT owned.
+  const fork = spawn('/bin/sh', ['-c', 'sleep 60 >/dev/null 2>&1 & echo $!'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  let out = ''
+  fork.stdout.on('data', d => { out += String(d) })
+  fork.on('exit', () => record('orphan-daemon', { pid: Number(out.trim()) }))
   const wrapper = spawn(process.execPath, [self, 'wrapper', dir], { stdio: ['pipe', 'pipe', 'inherit'] })
   const input = createInterface({ input: wrapper.stdout })
   const send = (id: number, method: string, params: unknown = {}) => wrapper.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')

@@ -294,3 +294,49 @@ export function unfinishedInflight(stateDir: string, identity: string, deps: Unf
   }
   return mine.filter(e => !finished.has(e.id) && e.ts >= finishedUpTo)
 }
+
+/**
+ * HELD core notices (OC07 reach rule, 04.11.2026): a delivery-fate notice whose recipient had no
+ * reachable runtime at the time (its default stopped by the operator, nothing else live) or whose send
+ * failed. It is never dropped silently: kept here and retried with backoff until it lands. Dropped
+ * only when its recipient is no longer registered or it outlived HELD_NOTICE_MAX_AGE_MS — each with a
+ * durable lifecycle event.
+ */
+export interface HeldNotice {
+  id: string
+  personality: string
+  /** The original sender's runtime — the preferred live endpoint. */
+  runtime: string
+  message: string
+  topic: string
+  heldAt: number
+  attempts: number
+  nextAt: number
+  reason: string
+}
+
+export const HELD_NOTICE_MAX_AGE_MS = 7 * 24 * 3_600_000
+const HELD_BACKOFF_BASE_MS = 60_000
+const HELD_BACKOFF_MAX_MS = 30 * 60_000
+
+const heldPath = (stateDir: string) => join(stateDir, 'held-notices.jsonl')
+
+export function readHeldNotices(stateDir: string): HeldNotice[] {
+  return readJsonl(heldPath(stateDir)) as unknown as HeldNotice[]
+}
+
+export function writeHeldNotices(stateDir: string, notices: HeldNotice[]): void {
+  writeJsonl(heldPath(stateDir), notices as unknown as InflightEntry[])
+}
+
+export function holdNotice(stateDir: string, n: Omit<HeldNotice, 'id' | 'heldAt' | 'attempts' | 'nextAt'>, now = Date.now()): HeldNotice {
+  const held: HeldNotice = { ...n, id: createHash('sha256').update(`${now}:${n.personality}:${n.message}`).digest('hex').slice(0, 12), heldAt: now, attempts: 0, nextAt: now + HELD_BACKOFF_BASE_MS }
+  appendFileSync(heldPath(stateDir), JSON.stringify(held) + '\n', { mode: 0o600 })
+  return held
+}
+
+/** Next retry instant after a failed attempt: 1 min doubling to a 30 min ceiling. */
+export function heldBackoff(n: HeldNotice, now = Date.now()): HeldNotice {
+  const attempts = n.attempts + 1
+  return { ...n, attempts, nextAt: now + Math.min(HELD_BACKOFF_MAX_MS, HELD_BACKOFF_BASE_MS * 2 ** Math.min(attempts, 10)) }
+}
