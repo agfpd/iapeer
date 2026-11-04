@@ -1,13 +1,18 @@
 import { readFileSync, statSync } from 'node:fs'
 import type { FailoverTask, ProviderFailure } from '../lifecycle/failover.ts'
 import { confirmNeedles } from '../transport/index.ts'
+import { readSessionSlices } from './sessionfiles.ts'
 
 export function failureContainsTask(task: FailoverTask, failure: ProviderFailure): boolean {
   if (!failure.file || failure.runtime !== task.runtime || failure.personality !== task.personality) return false
   try {
-    if (statSync(failure.file).size > 16 * 1024 * 1024) return false
+    const oversized = statSync(failure.file).size > 16 * 1024 * 1024
     const needles = confirmNeedles(task.rendered)
-    const text = readFileSync(failure.file, 'utf8')
+    const slice = oversized ? readSessionSlices(failure.file, 16 * 1024 * 1024)?.tail ?? '' : readFileSync(failure.file, 'utf8')
+    // A tail can prove that this refusal belongs to this input, but cannot prove
+    // absence of work. That distinction permits review of a long session without
+    // ever treating a truncated read as permission to replay its original task.
+    const text = oversized ? slice.slice(slice.indexOf('\n') + 1) : slice
     if (!text.endsWith('\n')) return false
     const rows = text.trim().split('\n').map(l => JSON.parse(l))
     if (task.runtime === 'opencode') {

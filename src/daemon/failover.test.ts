@@ -10,7 +10,7 @@ import { listFailoverTasks, providerFailure, quarantineSession, recordFailoverTa
 import { findPeer, readPeersIndex, upsertPeer, type PeerRecord } from '../registry/index.ts'
 import { readPeerProfile, writePeerProfileAtomic } from '../identity/index.ts'
 import { processFailovers, type FailoverSeam } from './failover.ts'
-import { failureContainsTask, refusedBeforeWorkInText } from './failoverProof.ts'
+import { failureContainsTask, refusedBeforeWork, refusedBeforeWorkInText } from './failoverProof.ts'
 import { readInflight, recordInflight } from '../lifecycle/inflight.ts'
 import { processLimitResumes } from './limitresume.ts'
 import { listLimitParks, recordLimitPark } from '../lifecycle/limitpark.ts'
@@ -109,6 +109,11 @@ describe('positive no-work proof', () => {
     const probe = { ...task, file: failure.file }
     expect(deliveryCompleted(probe, env)).toBe(true)
     expect(deliveryCompleted(probe, env, undefined, true)).toBe(false)
+  })
+  test('a long native session permits bounded input attribution, not a no-effects inference', () => {
+    writeFileSync(failure.file!, jsonl([{ type: 'metadata', padding: 'x'.repeat(17 * 1024 * 1024) }, ...codexRows()]))
+    expect(failureContainsTask(task, failure)).toBe(true)
+    expect(refusedBeforeWork(task, failure)).toBe(false)
   })
   const claudeRows = () => [
     { type: 'user', uuid: 'u1', sessionId: 'native-1', message: { content: [{ type: 'text', text: rendered }] } },

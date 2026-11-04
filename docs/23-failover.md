@@ -20,7 +20,9 @@ complete evidence from its input through the refusal proves no model/tool work
 started. Missing, truncated or ambiguous evidence is not permission to replay.
 The proof currently reads at most 16 MiB of a complete native file, binds a unique
 task marker to native input, and rejects unknown bootstrap hooks/queued input or
-intervening model output. Oversized files remain unverified, not implicitly safe.
+intervening model output. Oversized files remain unverified, not implicitly safe;
+a bounded tail can still attribute their latest input and authorize a state-review
+handoff, never replay of the original instruction.
 An interrupted task with possible effects instead produces an explicit review
 notice with durable evidence; its original instruction is not replayed.
 
