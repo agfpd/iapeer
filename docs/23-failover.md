@@ -31,7 +31,9 @@ a newer refusal never erases an older task. Native queued Claude input and Codex
 `item_completed/UserMessage` input are included. Codex developer/system setup records
 are input metadata, not model output; assistant/tool/reasoning items remain work.
 An interrupted task with possible effects instead produces an explicit review
-notice with durable evidence; its original instruction is not replayed.
+notice with durable evidence; its original instruction is not replayed. The notice
+names the refusal class (for example `usage_limit_exceeded`) so the receiving peer
+reads a limit as a provider-side stop rather than a fault in its own work.
 
 Before transferring, persist ownership and quarantine the failed native session.
 The old session cannot be resumed by limit-resume, attach, capability reload or

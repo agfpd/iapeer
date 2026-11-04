@@ -245,6 +245,8 @@ describe('custody transfer', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0].caller.runtime).toBe('core')
     expect(sent[0].input.message).toContain('not authorization to replay')
+    // The peer must read a limit as a provider-side stop, not as its own fault (natural limit 04.11).
+    expect(sent[0].input.message).toContain(`(${failure.errorType}:`)
     expect(sent[0].input.message).not.toContain(task.message)
   })
   test('unknown dispatch never retries; lost hosting confirmation never transfers', async () => {

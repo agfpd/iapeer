@@ -97,7 +97,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
       try {
         const caller = safe ? resolveCallerIdentity(task.caller, readPeersIndex({ env })) : systemCaller()
         const message = safe ? task.message :
-          `[iapeer] Work on ${task.identity} was interrupted by a provider refusal. That native session is quarantined and stopped. Review its durable evidence at ${join(cfg.stateDir, 'failover', 'tasks', task.id + '.json')} and transcript ${task.failure.file}. Reconcile actual tool results before deciding what remains; this is a state-review request, not authorization to replay the original instruction. Do not repeat an operation whose outcome is unknown.`
+          `[iapeer] Work on ${task.identity} stopped when its model provider refused further calls (${task.failure.errorType ?? 'refusal'}: a usage/rate limit, authentication or overload, not a fault in your work). That native session is quarantined and stopped. Review its durable evidence at ${join(cfg.stateDir, 'failover', 'tasks', task.id + '.json')} and transcript ${task.failure.file}. Reconcile actual tool results before deciding what remains; this is a state-review request, not authorization to replay the original instruction. Do not repeat an operation whose outcome is unknown.`
         const result = await send(caller, { personality: task.personality, runtime: task.targetRuntime, message, topic: task.topic,
           ...(safe && task.attachments?.length ? { attachments: task.attachments } : {}) },
         { ...deps, env, failoverRetry: true, failoverVisited: task.failoverVisited ?? [task.runtime],
