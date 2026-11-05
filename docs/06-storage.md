@@ -125,6 +125,15 @@ inside `patchPeerProfile`. Safety holds only once **all** writers cooperate:
 older full-file writers can still overwrite new data and require a coordinated
 update/restart window. No package may silently fall back to an unlocked write.
 
+The patch protocol is version 1 (`PEER_PROFILE_PATCH_PROTOCOL`). Under the lock,
+each writer verifies `<cwd>/.iapeer/.peer-profile.protocol` (creates `1\n` if
+absent); an incompatible version fails closed before the callback. Standalone
+consumers may bundle this leaf with `bun build --target bun`, keeping core only
+as a pinned build/dev dependency. Generated bundle provenance records core ref
+and SHA-256; CI regenerates and compares it. Production dependency on the whole
+core is unnecessary. A protocol upgrade requires a coordinated writer migration,
+not removing the guard while old writers still run.
+
 The ownership boundary is simple: everyone owns the contents of their own folder and stays out of others'.
 
 | Owner | What belongs to it |

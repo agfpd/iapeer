@@ -4,6 +4,9 @@ import { IapError } from '../core/errors.ts'
 import { writeFileAtomicRaw } from '../storage/atomicWrite.ts'
 
 const PROFILE_LOCK_WAIT_MS = 2000
+/** Persistent protocol guard lets generated standalone consumer bundles fail closed
+ * when a future incompatible writer joins the same cwd. */
+export const PEER_PROFILE_PATCH_PROTOCOL = 1
 
 /** Bounded cooperative lock; no age-based stealing of a possibly paused owner. */
 function withProfileLockSync<T>(cwd: string, fn: () => T): T {
@@ -38,6 +41,15 @@ function withProfileLockSync<T>(cwd: string, fn: () => T): T {
 export function patchPeerProfile(cwd: string, mutate: (raw: Record<string, unknown>) => void): void {
   mkdirSync(join(cwd, '.iapeer'), { recursive: true, mode: 0o700 })
   withProfileLockSync(cwd, () => {
+    const protocolPath = join(cwd, '.iapeer', '.peer-profile.protocol')
+    let protocol: string | undefined
+    try { protocol = readFileSync(protocolPath, 'utf8').trim() } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+    }
+    if (protocol !== undefined && protocol !== String(PEER_PROFILE_PATCH_PROTOCOL)) {
+      throw new IapError(`peer-profile protocol mismatch: expected ${PEER_PROFILE_PATCH_PROTOCOL}, found ${protocol}`)
+    }
+    if (protocol === undefined) writeFileAtomicRaw(protocolPath, `${PEER_PROFILE_PATCH_PROTOCOL}\n`, 0o600)
     const path = join(cwd, '.iapeer', 'peer-profile.json')
     let raw: Record<string, unknown> = {}
     try {

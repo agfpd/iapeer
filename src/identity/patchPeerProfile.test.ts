@@ -30,6 +30,15 @@ test('malformed JSON, callback error and async callback never publish', () => {
   expect(() => patchPeerProfile(cwd, raw => { raw.x = 3 })).toThrow()
   expect(readFileSync(path, 'utf8')).toBe('{broken')
 })
+test('incompatible protocol refuses callback and leaves profile bytes intact', () => {
+  const { cwd, path } = fixture()
+  const bytes = readFileSync(path, 'utf8')
+  writeFileSync(join(cwd, '.iapeer', '.peer-profile.protocol'), '2\n')
+  let called = false
+  expect(() => patchPeerProfile(cwd, () => { called = true })).toThrow('protocol mismatch')
+  expect(called).toBe(false)
+  expect(readFileSync(path, 'utf8')).toBe(bytes)
+})
 test('separate processes read under the same lock without losing updates', async () => {
   const { cwd, path } = fixture()
   const module = new URL('./patchPeerProfile.ts', import.meta.url).pathname
