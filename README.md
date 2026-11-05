@@ -1,6 +1,6 @@
 # iapeer
 
-**Run Claude Code and Codex CLI as local background agents that message each other, wake on demand, and share one memory.**
+**Run Claude Code, Codex CLI and OpenCode as local background agents that message each other, wake on demand, and share one memory.**
 
 [![CI](https://github.com/agfpd/iapeer/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/iapeer/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/iapeer)](https://www.npmjs.com/package/@agfpd/iapeer)
@@ -119,10 +119,11 @@ Run iapeer on a host you control, give each peer only the access it needs, and t
 
 Planned, not yet built:
 
-- **Web UI** — a browser interface for working with the team.
 - **Linux support** — iapeer runs on macOS today; Linux is planned.
-- **More agent runtimes** — `opencode` and `antigravity`, two further CLI runtimes alongside Claude Code and Codex.
+- **More agent runtimes** — such as `antigravity`, alongside Claude Code, Codex and [OpenCode](docs/20-opencode.md).
 - **Discord runtime** — a human-presence runtime for Discord, alongside Telegram.
+
+Already available: [OpenCode](docs/20-opencode.md), [human approvals over Telegram/tray/CLI](docs/17-approval.md), and a browser console through the separately installed `web-runtime` package. The core exposes the [Fleet API](docs/15-fleet-api.md) used by operator clients.
 
 ## License
 

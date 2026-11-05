@@ -35,7 +35,7 @@ The full list of `iapeer <command>`. General rules: `--help` / `-h` anywhere in 
 | `init [folder] [--runtime r] [--description d] [--bin path] [--no-bootstrap]` | Make the current (or a given) folder a peer: profile, MCP, doctrine. The peer name is the folder name; not set by a separate flag. |
 | `create <name> [--runtime r] [--path folder] [--bin path] [--description d] [--intelligence i] [--no-bootstrap]` | Create a peer from anywhere (by default `~/.iapeer/peers/<name>`) and provision it. |
 | `list [--json]` | The peer registry with per-runtime state. In an interactive terminal — a control panel; otherwise or with `--json` — a table. |
-| `verify [--json] [--fix]` | Check profiles against the standard and registry↔profile divergences. `--fix` self-heals the registry and migrates the old runtime-field format. |
+| `verify [--json] [--fix]` | Check profiles, registry↔profile drift, cross-runtime MCP parity and persistent core MCP wiring (Claude/Codex). `--json` includes `runtimeWiring` issues; missing/disabled wiring exits nonzero even without parity drift. OpenCode injects core MCP at launch. `--fix` self-heals the registry, migrates the old runtime-field format and refreshes OpenCode MCP projection; it does not repair runtime configuration or probe network connectivity. |
 
 ## Peers: lifecycle
 

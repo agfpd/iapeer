@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Verify catches declared but unwired core MCP endpoints.** Claude/Codex checks now report
+  missing, disabled or malformed persistent core server configuration independently of domain MCP
+  parity, including in `--json` (`runtimeWiring`). OpenCode's launch-time injection is not a false
+  alarm. Empty runtime scope folders and non-directory entries no longer auto-declare endpoints.
+- **Documentation no longer lists OpenCode, the browser console or Telegram approvals as unbuilt.**
+
 - **Operator delivery resolutions release caller custody.** A closed case sends one final
   caller-only acceptance event with `operatorResolved: true` and the audited `resolution`.
   Its durable notification checkpoint is separate from native acceptance notices. Consumers

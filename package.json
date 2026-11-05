@@ -35,6 +35,7 @@
     "bin",
     "docs",
     "scripts/proof-install-signature.ts",
+    "scripts/proof-runtime-discovery.ts",
     "scripts/proof-fleet-isolation.ts",
     "scripts/proof-inflight-turns.ts",
     "CHANGELOG.md",

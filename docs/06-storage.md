@@ -96,6 +96,7 @@ A peer's system prompt points here — `~/.iapeer/docs/`, one folder per package
 ```
 
 - **`peer-profile.json`** — the peer's card and the single source of truth about it (the fields are covered in [03 — Peers, runtimes, identity](03-peers-runtimes-identity.md)).
+- **Runtime scope discovery** ignores empty `runtimes/<runtime>/` directories and non-directory entries. A populated scope can be discovered during initialization; explicitly declared profile runtimes remain declared even if their scope is empty. A leftover empty folder alone never adds an endpoint.
 - **`launch.env`** — a `KEY=VALUE` file for a specific peer+runtime pair: extra launch arguments (`PEER_START_ARGS`) and environment variables. So one peer can be given special launch flags without touching the rest. `create`/`init` scaffold it as an all-comment skeleton for every agentic runtime scope (behaves exactly like no file until edited), so fleet-wide launch.env operations never skip a peer for lack of the file; an existing file is never overwritten.
 
 A peer's working folder doesn't have to live under `~/.iapeer/peers/`. By default `iapeer create` puts it there, but any folder can be made a peer with `iapeer init` — then `.iapeer/` appears right inside it.

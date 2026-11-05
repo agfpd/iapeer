@@ -90,7 +90,7 @@ The sections are layered: from "install and use" to "understand the architecture
 Provider reliability: [23 — Provider failover](23-failover.md) describes refusal evidence,
 default-first routing, durable custody and native-session quarantine.
 
-Built and working: the single router daemon, the messaging protocol (IAP), the peer registry, identity and its ABI, the lifecycle (wake, sleep, restart, supervision), runtime adapters for Claude, Codex, Telegram, and notifier, host install and onboarding, Telegram connection, the memory slot, and capability plugins.
+Built and working: the single router daemon, the messaging protocol (IAP), the peer registry, identity and its ABI, the lifecycle (wake, sleep, restart, supervision), runtime adapters for Claude, Codex, OpenCode, Telegram, and notifier, host install and onboarding, Telegram connection, the memory slot, capability plugins, and human approvals through Telegram/tray/CLI. A browser console is available through the separately installed `web-runtime` package.
 
 Planned on top of the foundation: a package-compatibility graph, a whole-team health doctor, and an interactive coordination interface. Until those exist, coordination operations live in the `iapeer` CLI.
 
@@ -98,11 +98,9 @@ Planned on top of the foundation: a package-compatibility graph, a whole-team he
 
 Larger directions, planned and not yet built:
 
-- **Web UI** — a browser interface for working with the team.
 - **Linux support** — iapeer runs on macOS today; Linux is planned.
-- **More agent runtimes** — `opencode` and `antigravity`, two further CLI runtimes alongside Claude Code and Codex.
+- **More agent runtimes** — such as `antigravity`, alongside Claude Code, Codex and OpenCode.
 - **Discord runtime** — a human-presence runtime for Discord, alongside Telegram.
 - **Permissions gate** — finer control over what an agent is allowed to do.
-- **Approve permissions over Telegram** — approve an agent's permission requests from the chat; today permissions are auto-allowed by flags.
 
 The platform for now is macOS/launchd only. Linux (systemd) and Windows support is not implemented.

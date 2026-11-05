@@ -14,6 +14,7 @@ import {
   ensureLocalRuntimeScopes,
   peerLaunchEnvPath,
   readLaunchEnv,
+  listRuntimeScopeNames,
 } from './index.ts'
 
 let cwd: string
@@ -22,6 +23,17 @@ beforeEach(() => {
 })
 afterEach(() => {
   rmSync(cwd, { recursive: true, force: true })
+})
+
+test('runtime scope discovery ignores empty directories and files, preserves populated scopes', () => {
+  const scopes = join(cwd, '.iapeer', 'runtimes')
+  mkdirSync(join(scopes, 'opencode'), { recursive: true })
+  writeFileSync(join(scopes, 'codex'), 'not a directory')
+  mkdirSync(join(scopes, 'web'), { recursive: true })
+  writeFileSync(join(scopes, 'web', 'launch.env'), '# configured')
+  expect(listRuntimeScopeNames(cwd)).toEqual(['web'])
+  ensureLocalRuntimeScopes(cwd, ['opencode'])
+  expect(listRuntimeScopeNames(cwd).sort()).toEqual(['opencode', 'web'])
 })
 
 function writeLaunchEnv(runtime: string, body: string): void {

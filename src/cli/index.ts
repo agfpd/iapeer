@@ -2590,6 +2590,14 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         // MCP parity across the peer's agent runtimes: a server on one endpoint and missing on another
         // leaves the SAME peer silently weaker there (incident 17.10 — domain MCPs only in codex config).
         const { mcpParity } = await import('../verify/mcpParity.ts')
+        const { runtimeWiringIssues } = await import('../verify/runtimeWiring.ts')
+        const runtimeWiring = index.peers.flatMap(peer =>
+          runtimeWiringIssues(peer.cwd, peer.runtimes, { env }).map(issue => ({ personality: peer.personality, ...issue })),
+        )
+        for (const issue of runtimeWiring) {
+          errors++
+          lines.push(`✗ ${issue.personality}/${issue.runtime}: ${issue.detail}; re-initialize this endpoint's MCP wiring (verify --fix does not change runtime configuration)`)
+        }
         // --fix: re-project every OpenCode endpoint's peer MCP from its claude/codex sources FIRST, so
         // the parity report below is the post-fix truth (the one-shot alignment of peers whose opencode
         // runtime predates the projection — boris 18.10). Sources are never edited.
@@ -2623,7 +2631,7 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
           }
         }
         if (flags.json === true) {
-          out(JSON.stringify({ peers: index.peers.length, errors, drift: driftCount, mcpDrift, reconcile }, null, 2) + '\n')
+          out(JSON.stringify({ peers: index.peers.length, errors, drift: driftCount, mcpDrift, runtimeWiring, reconcile }, null, 2) + '\n')
         } else {
           for (const l of lines) out(l + '\n')
           out(`\n${index.peers.length} peers · ${errors} error(s) · ${driftCount} index↔local drift(s)\n`)

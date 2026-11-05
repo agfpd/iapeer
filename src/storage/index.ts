@@ -347,7 +347,12 @@ export function listRuntimeScopeNames(cwd: string): Runtime[] {
   } catch {
     return []
   }
-  return entries.filter(isRuntime)
+  // A leftover empty scope (or a file named after a runtime) is not a declaration.
+  // Explicit profile runtimes remain authoritative, including empty infra scopes.
+  return entries.filter(name => {
+    if (!isRuntime(name)) return false
+    try { return readdirSync(join(root, name)).length > 0 } catch { return false }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
