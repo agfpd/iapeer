@@ -48,6 +48,7 @@
     "./core": "./src/core/index.ts",
     "./storage": "./src/storage/index.ts",
     "./identity": "./src/identity/index.ts",
+    "./peer-profile": "./src/identity/patchPeerProfile.ts",
     "./registry": "./src/registry/index.ts",
     "./codec": "./src/codec/index.ts",
     "./install-signature": "./src/install/signature.ts"

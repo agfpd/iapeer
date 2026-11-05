@@ -103,6 +103,28 @@ A peer's working folder doesn't have to live under `~/.iapeer/peers/`. By defaul
 
 ## Who owns what
 
+### Cooperative peer-profile updates
+
+All packages writing a local profile use `patchPeerProfile(cwd, mutate)` from
+`@agfpd/iapeer/peer-profile` (also re-exported by `/identity`). The lightweight
+subpath avoids pulling the lifecycle/launch graph into standalone consumers.
+The synchronous callback receives the latest raw JSON
+object **inside** the shared mkdir lock `<cwd>/.iapeer/.peer-profile.lock` and
+mutates only its owned fields (including deletion). It returns void; async
+callbacks are rejected. Missing profiles start as `{}`; malformed existing JSON
+fails closed. Unknown fields survive. An unchanged object is not rewritten.
+The callback must be short and perform no I/O or nested profile writes.
+
+Lock contention times out after 2 seconds with an error and no write. Filesystem
+errors propagate. Locks are never stolen by age (a paused writer is still an
+owner); after a crashed writer, an operator removes the lock only after ensuring
+all profile writers for that cwd are stopped. Legacy `writePeerProfileAtomic`
+uses the same lock, but is a full foundation-field write, not a safe API for
+patching an earlier snapshot. Package writers must move their read/modify/write
+inside `patchPeerProfile`. Safety holds only once **all** writers cooperate:
+older full-file writers can still overwrite new data and require a coordinated
+update/restart window. No package may silently fall back to an unlocked write.
+
 The ownership boundary is simple: everyone owns the contents of their own folder and stays out of others'.
 
 | Owner | What belongs to it |

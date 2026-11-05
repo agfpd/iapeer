@@ -15,7 +15,7 @@ import { dirname, join } from 'path'
 import { writeFileAtomic } from '../storage/index.ts'
 import { claudeSettingsPath } from '../launch/nativeMemory.ts'
 import { iapeerBinPath } from '../install/index.ts'
-import { readPeerProfile, writePeerProfileAtomic, type ApprovalMode } from '../identity/index.ts'
+import { readPeerProfile, patchPeerProfile, type ApprovalMode } from '../identity/index.ts'
 import { preSeedCodexHooksTrust, removeCodexHooksTrustUnder, type HooksTrustOutcome } from '../launch/codexHooksTrust.ts'
 
 // claude gated uses a matcher-FREE PermissionRequest hook (docs/17, Option D — verified live
@@ -185,7 +185,10 @@ export interface ApprovalToggleResult {
 export function setApprovalMode(cwd: string, mode: ApprovalMode, env: NodeJS.ProcessEnv = process.env): ApprovalToggleResult {
   const profile = readPeerProfile(cwd)
   if (!profile) throw new Error(`no peer profile at ${cwd}`)
-  writePeerProfileAtomic(cwd, { ...profile, approval_mode: mode })
+  patchPeerProfile(cwd, raw => {
+    if (mode === 'gated') raw.approval_mode = mode
+    else delete raw.approval_mode
+  })
   const surfaces = [`profile: approval_mode=${mode}`]
   for (const rt of profile.runtimes) {
     if (rt === 'claude') {

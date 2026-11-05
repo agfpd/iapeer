@@ -160,14 +160,14 @@ describe('writePeerProfileAtomic H1 preserve', () => {
     expect(disk.description).toBe('Owner peer (test fixture).')
   })
 
-  test('В31: a STALE profile lock is reclaimed — the write still lands and the lock is released', () => {
+  test('old locks fail closed instead of stealing a possibly paused writer', () => {
     const lockDir = join(cwd, '.iapeer', '.peer-profile.lock')
     mkdirSync(lockDir, { recursive: true }) // a crashed writer left this behind
     const old = new Date(Date.now() - 60_000)
     utimesSync(lockDir, old, old) // stale (past the 10s reclaim threshold)
-    writePeerProfileAtomic(cwd, { personality: 'p', runtime: 'claude', runtimes: ['claude'], intelligence: 'artificial' })
-    expect(readDisk().default_runtime).toBe('claude') // the write reclaimed the stale lock and landed
-    expect(existsSync(lockDir)).toBe(false) // released after the write
+    expect(() => writePeerProfileAtomic(cwd, { personality: 'p', runtime: 'claude', runtimes: ['claude'], intelligence: 'artificial' })).toThrow('lock timeout')
+    expect(existsSync(peerProfilePath(cwd))).toBe(false)
+    expect(existsSync(lockDir)).toBe(true)
   })
 
   test('explicit intelligence in write IS applied', () => {

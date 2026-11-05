@@ -76,7 +76,7 @@ import {
   resolveAlwaysOnTarget,
   setLaunchdEnabled,
 } from '../launch/launchd.ts'
-import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, writePeerProfileAtomic } from '../identity/index.ts'
+import { readPeerProfile, renamePeer, resolveCallerIdentity, resolveIdentity, patchPeerProfile } from '../identity/index.ts'
 import { claudeProjectsRoot, transcriptSlug } from '../launch/adapters/claude.ts'
 import { peerProfilePath } from '../storage/index.ts'
 import {
@@ -677,7 +677,7 @@ export async function defaultRuntime(
         continue
       }
       // Re-read: initPeer's merge-writer may have touched the profile.
-      writePeerProfileAtomic(p.cwd, { ...(readPeerProfile(p.cwd) ?? profile), runtime: runtime as Runtime })
+      patchPeerProfile(p.cwd, raw => { raw.default_runtime = runtime; delete raw.runtime })
       out.push({ personality: p.personality, action: 'flipped', detail })
     } catch (e) {
       out.push({ personality: p.personality, action: 'failed', detail: e instanceof Error ? e.message : String(e) })
@@ -1201,7 +1201,10 @@ export async function completeRemoveRuntime(runtime: string, opts: CliEnvOptions
   }
   const profile = readPeerProfile(peer.cwd)
   if (profile) {
-    writePeerProfileAtomic(peer.cwd, { ...profile, runtimes: profile.runtimes.filter(r => r !== runtime) })
+    patchPeerProfile(peer.cwd, raw => {
+      const current = readPeerProfile(peer.cwd)!
+      raw.runtimes = current.runtimes.filter(r => r !== runtime)
+    })
     steps.push('local profile: runtime removed')
   }
   const { reindexFromLocals } = await import('../identity/profileStandard.ts')

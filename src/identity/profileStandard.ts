@@ -31,7 +31,7 @@ import {
   type PeersUpdateOptions,
 } from '../registry/index.ts'
 import { peerProfilePath } from '../storage/index.ts'
-import { readPeerProfile, writePeerProfileAtomic } from './index.ts'
+import { readPeerProfile, patchPeerProfile } from './index.ts'
 
 export type IssueSeverity = 'error' | 'warn'
 export interface ProfileIssue {
@@ -193,7 +193,11 @@ export function migrateProfileRuntimeField(cwd: string): boolean {
   if (inShape) return false
   const profile = readPeerProfile(cwd)
   if (!profile) return false
-  writePeerProfileAtomic(cwd, profile)
+  patchPeerProfile(cwd, current => {
+    const live = readPeerProfile(cwd)!
+    current.default_runtime = live.runtime
+    delete current.runtime
+  })
   return true
 }
 
