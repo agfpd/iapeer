@@ -27,6 +27,7 @@ import { routeSend, type RouteDeps } from '../transport/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import { workOriginAtLimit, workOriginStillValid } from '../lifecycle/workOrigin.ts'
 import { sessionQuarantined } from '../lifecycle/failover.ts'
+import { accountLimitActive } from '../lifecycle/accountlimit.ts'
 
 
 export function limitResumeMessage(p: LimitPark): string {
@@ -77,6 +78,9 @@ export async function processLimitResumes(
       log({ identity: p.identity, outcome: 'dropped', err: 'peer no longer registered' })
       continue
     }
+    // An owner's early reset can leave this endpoint's old deadline behind the
+    // account's newer limit. Wait without spending an attempt or waking a session.
+    if (accountLimitActive(cfg, peer.cwd, p.runtime, now, env)) continue
     // A fast native refusal can be observed before the delivery handshake finishes writing its
     // receipt. Recover that proof now; its ACCEPTANCE time must still precede this limit event.
     if (p.runtime !== peer.runtime && !p.workOrigin) {

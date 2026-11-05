@@ -20,8 +20,12 @@ endpoints using the same positively identified ChatGPT account until that reset.
 Only a SHA-256 key of auth mode, non-secret account ID and user subject is persisted
 (workspace IDs alone may be shared by different users). Unknown
 auth identity remains endpoint-only; different accounts are independent. This
-account park affects endpoint selection only, not custody, session quarantine,
-idle holds or continuation nudges. Auth changes after the refusal cannot attribute
+account park affects endpoint selection and defers existing continuation nudges
+until its reset, but creates no continuation work, custody, session quarantine or
+idle holds. A limit-resume nudge must wait for both the endpoint reset (with its
+existing grace) and the current account reset; an operator-cleared account no
+longer delays it. Unknown or different accounts remain endpoint-only.
+Auth changes after the refusal cannot attribute
 historical evidence to the new account.
 The auth file must predate the matching native session's creation as well as its
 refusal; a login/refresh during that session leaves account attribution unknown.

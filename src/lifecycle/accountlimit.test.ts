@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadLifecycleConfig } from './index.ts'
 import { recordProviderFailure, selectFailoverRuntime, clearProviderFailure, providerFailure, quarantineSession, sessionQuarantined } from './failover.ts'
-import { listLimitParks } from './limitpark.ts'
-import { recordAccountLimit, expireAccountLimits } from './accountlimit.ts'
+import { listLimitParks, recordLimitPark, LIMIT_RESUME_GRACE_MS } from './limitpark.ts'
+import { processLimitResumes } from '../daemon/limitresume.ts'
+import { recordAccountLimit, expireAccountLimits, clearAccountLimit } from './accountlimit.ts'
 import { upsertPeer } from '../registry/index.ts'
 import type { PeerRecord } from '../registry/index.ts'
 import type { MuteDetection } from '../daemon/mutewatch.ts'
@@ -45,6 +46,62 @@ beforeEach(() => {
   writeFileSync(event.file!, JSON.stringify({ type: 'session_meta', payload: { id: 'native', timestamp: new Date(at - 1000).toISOString() } }) + '\n')
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
+test('limit-resume waits for the account reset when the endpoint reset is stale', async () => {
+  await upsertPeer(peer(root, 'source'), { env })
+  const reset = at + 600_000
+  expect(recordAccountLimit(cfg, { ...event, resetsAtMs: reset }, env, at)).toBe(true)
+  recordLimitPark(cfg, { identity: 'codex-source', personality: 'source', runtime: 'codex',
+    eventAtMs: at, resetsAtMs: at + 1000 })
+  let sends = 0
+  const tick = (now: number) => processLimitResumes(cfg, env, {}, {
+    now: () => now, progressed: () => false,
+    send: async () => { sends++; return { ok: true, value: { woke: true } } as any },
+  })
+  await tick(at + 1000 + LIMIT_RESUME_GRACE_MS)
+  expect(sends).toBe(0)
+  await tick(reset - 1)
+  expect(sends).toBe(0)
+  expect(listLimitParks(cfg)[0]?.attempts).toBe(0)
+  // The supervisor expires the account record before running limit-resume.
+  expireAccountLimits(cfg, env, reset)
+  await tick(reset)
+  expect(sends).toBe(1)
+  expect(listLimitParks(cfg)).toEqual([])
+})
+test.each(['cleared', 'different', 'unknown'])('limit-resume does not wait on a %s account park', async (mode) => {
+  await upsertPeer(peer(root, 'source'), { env })
+  expect(recordAccountLimit(cfg, { ...event, resetsAtMs: at + 600_000 }, env, at)).toBe(true)
+  if (mode === 'cleared') clearAccountLimit(cfg, root, 'codex', env, at + 1)
+  if (mode === 'different') auth(env.CODEX_HOME!, 'other-account')
+  if (mode === 'unknown') rmSync(join(env.CODEX_HOME!, 'auth.json'))
+  recordLimitPark(cfg, { identity: 'codex-source', personality: 'source', runtime: 'codex',
+    eventAtMs: at, resetsAtMs: at + 1000 })
+  let sends = 0
+  await processLimitResumes(cfg, env, {}, {
+    now: () => at + 1000 + LIMIT_RESUME_GRACE_MS, progressed: () => false,
+    send: async () => { sends++; return { ok: true, value: { woke: true } } as any },
+  })
+  expect(sends).toBe(1)
+  expect(listLimitParks(cfg)).toEqual([])
+})
+test('limit-resume still waits for a later endpoint reset after the account park expires', async () => {
+  await upsertPeer(peer(root, 'source'), { env })
+  expect(recordAccountLimit(cfg, event, env, at)).toBe(true)
+  const reset = at + 600_000
+  recordLimitPark(cfg, { identity: 'codex-source', personality: 'source', runtime: 'codex',
+    eventAtMs: at, resetsAtMs: reset })
+  let sends = 0
+  const tick = (now: number) => processLimitResumes(cfg, env, {}, {
+    now: () => now, progressed: () => false,
+    send: async () => { sends++; return { ok: true, value: { woke: true } } as any },
+  })
+  expireAccountLimits(cfg, env, event.resetsAtMs!)
+  await tick(event.resetsAtMs!)
+  await tick(reset + LIMIT_RESUME_GRACE_MS - 1)
+  expect(sends).toBe(0)
+  await tick(reset + LIMIT_RESUME_GRACE_MS)
+  expect(sends).toBe(1)
+})
 test('same account skips Codex across peers and homes until reset; different user/account and unknown auth do not', () => {
   expect(select().ok && (select() as any).value.runtime).toBe('codex')
   recordProviderFailure(cfg, event, env)
