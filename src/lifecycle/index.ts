@@ -2011,7 +2011,7 @@ async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: strin
   if (item.failoverEligible) {
     const peer = findPeer(readPeersIndex({ env }), personality)
     if (!peer || isStopped(cfg, identity)) return null
-    const selected = selectFailoverRuntime(cfg, peer)
+    const selected = selectFailoverRuntime(cfg, peer, undefined, Date.now(), [], env)
     if (!selected.ok || !selected.value.runtime) return null
     deliveryRuntime = selected.value.runtime
     const actual = buildProcessAddress(deliveryRuntime, personality)

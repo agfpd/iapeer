@@ -1732,7 +1732,7 @@ export async function sendMessage(
     {
       wake: cliWake,
       env,
-      selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt),
+      selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt, Date.now(), [], env),
       ephemeral: makeEphemeralRouteDeps(cfg, env, () => {}),
       noteLiveTopic: makeNoteLiveTopic(cfg, env),
       // CLI-path parity: the idle-proxy floor (В7) and the inflight ledger (OC07) — the daemon tick

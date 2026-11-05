@@ -95,38 +95,44 @@ export function failureContainsTask(task: FailoverTask, failure: ProviderFailure
 /** Positive proof only. A bounded read must include the actual input and the native
  * refusal. Any intervening model work or competing input makes replay ambiguous. */
 export function refusedBeforeWork(task: FailoverTask, failure: ProviderFailure): boolean {
-  if (!failure.file || task.runtime !== failure.runtime || task.personality !== failure.personality || task.ts > failure.atMs) return false
-  try {
-    if (statSync(failure.file).size > 16 * 1024 * 1024) return false
-    return refusedBeforeWorkInText(readFileSync(failure.file, 'utf8'), task, failure)
-  } catch { return false }
+  return refusalReviewReason(task, failure) === undefined
 }
 export function refusedBeforeWorkInText(text: string, task: Pick<FailoverTask, 'runtime' | 'rendered'>, failure: Pick<ProviderFailure, 'atMs' | 'sessionId'>): boolean {
-  if (!text.endsWith('\n') || !['claude', 'codex', 'opencode'].includes(task.runtime)) return false
+  return refusalReviewReasonInText(text, task, failure) === undefined
+}
+export function refusalReviewReason(task: FailoverTask, failure: ProviderFailure): string | undefined {
+  if (!failure.file || task.runtime !== failure.runtime || task.personality !== failure.personality || task.ts > failure.atMs) return 'evidence-mismatch'
+  try {
+    if (statSync(failure.file).size > 16 * 1024 * 1024) return 'oversized-evidence'
+    return refusalReviewReasonInText(readFileSync(failure.file, 'utf8'), task, failure)
+  } catch { return 'unreadable-evidence' }
+}
+export function refusalReviewReasonInText(text: string, task: Pick<FailoverTask, 'runtime' | 'rendered'>, failure: Pick<ProviderFailure, 'atMs' | 'sessionId'>): string | undefined {
+  if (!text.endsWith('\n') || !['claude', 'codex', 'opencode'].includes(task.runtime)) return 'incomplete-or-unsupported-evidence'
   const needles = confirmNeedles(task.rendered)
-  if (!needles.length || needles.some(n => !n)) return false
+  if (!needles.length || needles.some(n => !n)) return 'missing-task-marker'
   let rows: any[]
-  try { rows = text.trim().split('\n').map(l => JSON.parse(l)) } catch { return false }
+  try { rows = text.trim().split('\n').map(l => JSON.parse(l)) } catch { return 'malformed-evidence' }
   if (task.runtime === 'opencode') {
     const input = opencodeInput(rows, needles, failure.sessionId)
-    if (!input) return false
+    if (!input) return 'missing-native-input'
     const userIDs = new Set(rows.filter(r => r.sessionID === failure.sessionId && r.type === 'message.updated' && r.properties?.info?.role === 'user').map(r => r.properties.info.id))
     const assistants = new Set(rows.filter(r => r.sessionID === failure.sessionId && r.type === 'message.updated' && r.properties?.info?.role === 'assistant' && r.properties.info.parentID === input.id).map(r => r.properties.info.id))
     for (const r of rows) {
       if (r.sessionID !== failure.sessionId) continue
       const p = r.properties?.part
-      if (r.type === 'message.part.updated' && assistants.has(p?.messageID) && !['step-start', 'step-finish'].includes(p?.type)) return false
-      if (r.type === 'message.part.delta' && assistants.has(r.properties?.messageID)) return false
+      if (r.type === 'message.part.updated' && assistants.has(p?.messageID) && !['step-start', 'step-finish'].includes(p?.type)) return 'model-work-after-input'
+      if (r.type === 'message.part.delta' && assistants.has(r.properties?.messageID)) return 'model-work-after-input'
     }
     let refusal = false
     for (const r of rows.slice(input.index + 1)) {
       if (r.sessionID !== failure.sessionId) continue
       const info = r.properties?.info, part = r.properties?.part
-      if (r.type === 'message.part.delta') return false // streamed output is model work
-      if (r.type === 'message.part.updated' && !(userIDs.has(part?.messageID) && part?.type === 'text') && !['step-start', 'step-finish'].includes(part?.type)) return false
+      if (r.type === 'message.part.delta') return 'model-work-after-input' // streamed output is model work
+      if (r.type === 'message.part.updated' && !(userIDs.has(part?.messageID) && part?.type === 'text') && !['step-start', 'step-finish'].includes(part?.type)) return 'ambiguous-bootstrap'
       if (r.type === 'session.error' && r.time === failure.atMs && r.properties?.error) refusal = true
     }
-    return refusal
+    return refusal ? undefined : 'missing-native-refusal'
   }
   const carries = (v: unknown) => { const all = strings(v); return needles.every(n => all.some(t => t.includes(n))) }
   const textInput = (v: unknown) => typeof v === 'string' || Array.isArray(v) && v.every(p => p?.type === 'text')
@@ -134,12 +140,12 @@ export function refusedBeforeWorkInText(text: string, task: Pick<FailoverTask, '
     ? !r.isSidechain && (r.type === 'user' && textInput(r.message?.content) && carries(r.message.content)
       || r.type === 'attachment' && r.attachment?.type === 'queued_command' && carries(r.attachment.prompt))
     : carries(codexInput(r)))
-  if (input < 0) return false
+  if (input < 0) return 'missing-native-input'
   const meta = rows.find(r => r.type === 'session_meta')?.payload
   const nativeID = task.runtime === 'codex' ? meta?.session_id ?? meta?.id : rows[input].sessionId
-  if (!failure.sessionId || nativeID !== failure.sessionId) return false
+  if (!failure.sessionId || nativeID !== failure.sessionId) return 'native-session-mismatch'
   if (task.runtime === 'claude') {
-    if (typeof rows[input].uuid !== 'string') return false
+    if (typeof rows[input].uuid !== 'string') return 'missing-input-uuid'
     // Native append order is not causal order: also inspect pre-input rows.
     const ids = new Set([rows[input].uuid].filter(Boolean))
     for (let pass = 0; pass < rows.length; pass++) {
@@ -147,41 +153,41 @@ export function refusedBeforeWorkInText(text: string, task: Pick<FailoverTask, '
       for (const r of rows) if (r.uuid && r.parentUuid && ids.has(r.parentUuid) && !ids.has(r.uuid)) { ids.add(r.uuid); changed = true }
       if (!changed) break
     }
-    if (rows.some(r => r.type === 'assistant' && ids.has(r.uuid) && r.isApiErrorMessage !== true)) return false
+    if (rows.some(r => r.type === 'assistant' && ids.has(r.uuid) && r.isApiErrorMessage !== true)) return 'model-work-after-input'
     // A batch may contain several consecutive unstarted inputs. Trace back to
     // the last real terminal turn; any partial model work before a queued input
     // still makes the whole interrupted turn ambiguous.
     const boundary = rows.slice(0, input).findLastIndex(r => r.type === 'assistant' && !r.isApiErrorMessage && ['end_turn', 'stop_sequence'].includes(r.message?.stop_reason))
     if (rows.slice(boundary + 1, input).some(r => !r.isSidechain &&
-      (r.type === 'assistant' && r.isApiErrorMessage !== true || r.type === 'user' && !textInput(r.message?.content)))) return false
+      (r.type === 'assistant' && r.isApiErrorMessage !== true || r.type === 'user' && !textInput(r.message?.content)))) return 'model-work-before-queued-input'
     let refusal = false
     for (const r of rows.slice(input + 1)) {
       if (r.isSidechain) continue
-      if (r.type === 'user' && !textInput(r.message?.content)) return false
-      if (r.type === 'attachment' && !['queued_command', 'environment', 'model', 'deferred_tools_delta', 'agent_listing_delta', 'mcp_instructions_delta', 'skill_listing', 'instructions', 'auto_mode', 'session_context', 'date', 'remote_session_change', 'prompt_snapshot'].includes(r.attachment?.type)) return false
+      if (r.type === 'user' && !textInput(r.message?.content)) return 'tool-result-after-input'
+      if (r.type === 'attachment' && !['queued_command', 'environment', 'model', 'deferred_tools_delta', 'agent_listing_delta', 'mcp_instructions_delta', 'skill_listing', 'instructions', 'auto_mode', 'session_context', 'date', 'remote_session_change', 'prompt_snapshot'].includes(r.attachment?.type)) return 'ambiguous-bootstrap'
       if (r.type !== 'assistant') continue
-      if (r.isApiErrorMessage !== true || r.message?.model !== '<synthetic>') return false
+      if (r.isApiErrorMessage !== true || r.message?.model !== '<synthetic>') return 'model-work-after-input'
       if (Date.parse(r.timestamp) === failure.atMs) refusal = true
     }
-    return refusal
+    return refusal ? undefined : 'missing-native-refusal'
   }
   const start = rows.slice(0, input).findLastIndex(r => r.type === 'event_msg' && r.payload?.type === 'task_started')
-  if (start < 0) return false
+  if (start < 0) return 'missing-turn-start'
   let refusal = false
   for (let i = start + 1; i < rows.length; i++) {
     const r = rows[i], p = r.payload
-    if (r.type === 'response_item' && !(['message', 'additional_tools'].includes(p?.type) && ['user', 'developer', 'system'].includes(p?.role))) return false
+    if (r.type === 'response_item' && !(['message', 'additional_tools'].includes(p?.type) && ['user', 'developer', 'system'].includes(p?.role))) return 'model-work-after-input'
     if (r.type !== 'event_msg') continue
-    if (['item_started', 'item_completed'].includes(p?.type) && p?.item?.type !== 'UserMessage') return false
-    if (['agent_message', 'agent_reasoning', 'exec_command_begin', 'mcp_tool_call_begin', 'turn_aborted'].includes(p?.type)) return false
+    if (['item_started', 'item_completed'].includes(p?.type) && p?.item?.type !== 'UserMessage') return 'model-work-after-input'
+    if (['agent_message', 'agent_reasoning', 'exec_command_begin', 'mcp_tool_call_begin', 'turn_aborted'].includes(p?.type)) return 'model-work-after-input'
     if (p?.type === 'task_complete') {
       const at = typeof p.completed_at === 'number' ? p.completed_at * 1000 : Date.parse(r.timestamp)
       // A detector can establish refusal from the call's token_count fingerprint too.
-      if (p.last_agent_message !== null) return false
+      if (p.last_agent_message !== null) return 'model-work-after-input'
       if (at === failure.atMs) refusal = true
     }
   }
-  return refusal
+  return refusal ? undefined : 'missing-native-refusal'
 }
 
 function opencodeInput(rows: any[], needles: string[], sessionId?: string): { id: string; index: number } | undefined {

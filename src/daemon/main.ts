@@ -77,6 +77,7 @@ import { NoticeBoard } from './notices.ts'
 import { startMuteWatch } from './mutewatch.ts'
 import { processLimitResumes } from './limitresume.ts'
 import { recordLimitPark } from '../lifecycle/limitpark.ts'
+import { expireAccountLimits } from '../lifecycle/accountlimit.ts'
 import { noteWorkOrigin, workOriginAtLimit } from '../lifecycle/workOrigin.ts'
 import { DEFAULT_PROFILE_SYNC_INTERVAL_MS, startProfileSync } from './profilesync.ts'
 import { startGoalWatch } from './goalwatch.ts'
@@ -586,7 +587,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
   const stopMuteWatch = startMuteWatch(cfg, board, {
     env,
     onFailure: d => {
-      if (recordProviderFailure(cfg, d)) appendLifecycleEvent(cfg.eventLogDir, { ev: 'provider-refusal', identity: `${d.runtime}-${d.personality}`, error_type: d.errorType }, { env })
+      if (recordProviderFailure(cfg, d, env)) appendLifecycleEvent(cfg.eventLogDir, { ev: 'provider-refusal', identity: `${d.runtime}-${d.personality}`, error_type: d.errorType }, { env })
     },
     intervalMs: opts.muteWatchIntervalMs ?? DEFAULT_MUTEWATCH_INTERVAL_MS,
     // Same stance as the supervise tick's onError: a detector throw must be VISIBLE, not
@@ -706,7 +707,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
     noteDelivered: identity => setLastDelivered(cfg, identity),
     // OC07 — confirmed delivery to an agent endpoint → inflight ledger (redelivered if its session dies first).
     noteInflight,
-    selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt),
+    selectAgentRuntime: (peer, rt) => selectFailoverRuntime(cfg, peer, rt, Date.now(), [], env),
     // Busy-human-composer queue: fast queued ack, async drain, fail all pending
     // on daemon close/update so a queued envelope is never silently lost.
     composerQueue,
@@ -729,6 +730,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       // wake superviseTick inside wakeOrSpawn). The outcomes array drives only the
       // eager relaunch here; the trace does not depend on consuming it.
       tick: async () => {
+        expireAccountLimits(cfg, env)
         await processFailovers(cfg, env, { env, wake: makeWakeFn(cfg, env), noteInflight, noteLiveTopic, ephemeral,
           noteDelivered: identity => setLastDelivered(cfg, identity) }, board)
         await processAcceptance({ runDir: cfg.supervisorRunDir ?? join(cfg.stateDir, '..', 'supervisor'), logDir: cfg.eventLogDir, env, board,

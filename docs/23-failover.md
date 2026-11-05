@@ -15,6 +15,21 @@ five-minute retry interval. This does not change the configured default. Detecti
 uses the native mute-watch (20-second cadence); custody transfer runs before the
 normal supervise/inflight/limit-resume passes (60-second cadence by default).
 
+A Codex `usage_limit_exceeded` refusal with a stated reset also excludes other
+endpoints using the same positively identified ChatGPT account until that reset.
+Only a SHA-256 key of auth mode, non-secret account ID and user subject is persisted
+(workspace IDs alone may be shared by different users). Unknown
+auth identity remains endpoint-only; different accounts are independent. This
+account park affects endpoint selection only, not custody, session quarantine,
+idle holds or continuation nudges. Auth changes after the refusal cannot attribute
+historical evidence to the new account.
+Currently this requires unambiguous file-based ChatGPT auth; keyring, API-key,
+custom-provider and inline profile/config overrides remain endpoint-only.
+Lifecycle `account-park` records the account hash, `resetAt` and the current list
+of affected peers (`blocked_peers`). Selection expires at the stated reset;
+`account-park-cleared` records that expiry on the next supervisor tick, without
+waking those peers. These are operator diagnostic events, not owner notices.
+
 An accepted task may transfer only after the failed hosting has ended and the
 complete evidence from its input through the refusal proves no model/tool work
 started. Missing, truncated or ambiguous evidence is not permission to replay.
@@ -34,6 +49,8 @@ An interrupted task with possible effects instead produces an explicit review
 notice with durable evidence; its original instruction is not replayed. The notice
 names the refusal class (for example `usage_limit_exceeded`) so the receiving peer
 reads a limit as a provider-side stop rather than a fault in its own work.
+Review receipts include `reviewReason`, identifying the failed proof condition or
+the uncertain custody/dispatch boundary; legacy receipts may lack it.
 
 Before transferring, persist ownership and quarantine the failed native session.
 The old session cannot be resumed by limit-resume, attach, capability reload or

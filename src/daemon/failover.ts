@@ -9,7 +9,7 @@ import { resolveCallerIdentity, systemCaller } from '../identity/index.ts'
 import { findPeer, readPeersIndex } from '../registry/index.ts'
 import { deliveryCompleted, deliveryProcessed, routeSend, type RouteDeps } from '../transport/index.ts'
 import { appendLifecycleEvent } from '../lifecycle/eventlog.ts'
-import { failureContainsTask, failureForTask, refusedBeforeWork } from './failoverProof.ts'
+import { failureContainsTask, failureForTask, refusedBeforeWork, refusalReviewReason } from './failoverProof.ts'
 import type { NoticeBoard } from './notices.ts'
 
 const running = new Set<string>()
@@ -54,11 +54,11 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
           if (deliveryCompleted(task, env, undefined, true)) { task.state = 'finished'; saveFailoverTask(cfg, task) }
           continue
         }
-        const candidate = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime])
+        const candidate = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime], env)
         if (!candidate.ok || !candidate.value.runtime) continue // e.g. walt: both alternatives stopped
         if (isStopped(cfg, task.identity)) continue // operator stop wins; don't revive its work elsewhere
         if (!task.sessionToken || (alive(task.identity, env) && token(task.identity, env) !== task.sessionToken)) {
-          task.state = 'review'; task.error = 'hosting replaced before failover; no replay'; saveFailoverTask(cfg, task); log(task, 'review'); continue
+          task.state = 'review'; task.reviewReason = 'hosting-replaced'; task.error = 'hosting replaced before failover; no replay'; saveFailoverTask(cfg, task); log(task, 'review'); continue
         }
         task.state = 'claimed'; task.targetRuntime = candidate.value.runtime; task.failure = failure
         // Write custody BEFORE invalidating anything. Re-entering this state after
@@ -66,6 +66,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
         saveFailoverTask(cfg, task); log(task, 'claimed')
       }
       if (task.state === 'dispatching') {
+        task.reviewReason = 'dispatch-uncertain'
         task.state = 'review'; task.error = 'daemon restarted during transfer dispatch; acceptance needs reconciliation'
         saveFailoverTask(cfg, task); log(task, 'dispatch-uncertain')
         board?.raise({ personality: task.personality, runtime: task.targetRuntime ?? task.runtime, kind: 'failover-review', audience: 'operator', errorType: 'failover-dispatch-uncertain', eventAtMs: task.ts, content: task.error })
@@ -80,7 +81,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
       settleFailoverInflight(cfg.stateDir, task)
       if (alive(task.identity, env)) {
         if (token(task.identity, env) !== task.sessionToken) {
-          task.state = 'review'; task.error = 'hosting changed during failover claim'; saveFailoverTask(cfg, task); log(task, 'review'); continue
+          task.state = 'review'; task.reviewReason = 'hosting-changed-during-claim'; task.error = 'hosting changed during failover claim'; saveFailoverTask(cfg, task); log(task, 'review'); continue
         }
         ;(seam.kill ?? killPtyHost)(task.identity, env, { reason: 'provider-failover' }, cfg.supervisorRunDir)
         for (let i = 0; i < 100 && alive(task.identity, env); i++) await (seam.sleep ?? (ms => Bun.sleep(ms)))(50)
@@ -88,9 +89,11 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
       }
       // Re-read AFTER shutdown: automatic provider retries could have raced the
       // first detector. Only the final, immutable transcript can authorize replay.
-      const safe = proof(task, task.failure)
+      const reason = seam.proof ? (proof(task, task.failure) ? undefined : 'proof-rejected') : refusalReviewReason(task, task.failure)
+      const safe = reason === undefined
+      task.reviewReason = reason
       if (isStopped(cfg, task.identity) || isLaunchdManaged(task.personality, env)) continue
-      const selected = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime])
+      const selected = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime], env)
       if (!selected.ok || !selected.value.runtime) continue
       task.targetRuntime = selected.value.runtime
       task.state = 'dispatching'; saveFailoverTask(cfg, task); log(task, safe ? 'dispatch-unstarted' : 'dispatch-review')
@@ -102,8 +105,9 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
           ...(safe && task.attachments?.length ? { attachments: task.attachments } : {}) },
         { ...deps, env, failoverRetry: true, failoverVisited: task.failoverVisited ?? [task.runtime],
           failoverTaskId: task.failoverTaskId,
-          selectAgentRuntime: (p, rt) => selectFailoverRuntime(cfg, p, rt) })
+          selectAgentRuntime: (p, rt) => selectFailoverRuntime(cfg, p, rt, Date.now(), [], env) })
         task.state = safe && result.ok ? 'transferred' : 'review'
+        if (!result.ok) task.reviewReason = 'dispatch-failed'
         if (!result.ok) task.error = result.error.message
         saveFailoverTask(cfg, task); log(task, result.ok ? task.state : 'dispatch-failed')
       } catch (e) {

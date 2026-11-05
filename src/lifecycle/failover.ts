@@ -10,8 +10,9 @@ import type { PeerRecord } from '../registry/index.ts'
 import type { LifecycleConfig } from './index.ts'
 import type { MuteDetection } from '../daemon/mutewatch.ts'
 import type { InflightNote } from '../transport/index.ts'
+import { accountLimitActive, recordAccountLimit } from './accountlimit.ts'
 
-type Config = Pick<LifecycleConfig, 'stateDir'>
+type Config = Pick<LifecycleConfig, 'stateDir'> & Partial<Pick<LifecycleConfig, 'eventLogDir'>>
 export interface ProviderFailure extends MuteDetection { retryAtMs: number }
 export interface FailoverTask extends InflightNote {
   id: string
@@ -19,6 +20,8 @@ export interface FailoverTask extends InflightNote {
   state: 'watching' | 'claimed' | 'dispatching' | 'transferred' | 'review' | 'finished'
   targetRuntime?: string
   error?: string
+  /** Failed positive-proof condition, or uncertain custody/dispatch boundary. */
+  reviewReason?: string
   failure?: ProviderFailure
 }
 const root = (cfg: Config) => join(cfg.stateDir, 'failover')
@@ -40,7 +43,8 @@ export function failoverEnabled(cwd: string): boolean {
 export function providerFailure(cfg: Config, identity: string): ProviderFailure | undefined {
   return read(healthPath(cfg, identity))
 }
-export function recordProviderFailure(cfg: Config, d: MuteDetection): boolean {
+export function recordProviderFailure(cfg: Config, d: MuteDetection, env: NodeJS.ProcessEnv = {}): boolean {
+  recordAccountLimit(cfg, d, env)
   const path = healthPath(cfg, `${d.runtime}-${d.personality}`)
   const previous = read<ProviderFailure>(path)
   if (previous && previous.atMs >= d.atMs) return false
@@ -65,7 +69,7 @@ export function hasFailoverFresh(cfg: Config, identity: string): boolean {
 export function clearFailoverFresh(cfg: Config, identity: string): void {
   rmSync(join(root(cfg), `${identity}.fresh.json`), { force: true })
 }
-export function selectFailoverRuntime(cfg: Config, peer: PeerRecord, explicit?: string, now = Date.now(), excluded: readonly string[] = []): Result<{ runtime?: string; eligible: boolean }> {
+export function selectFailoverRuntime(cfg: Config, peer: PeerRecord, explicit?: string, now = Date.now(), excluded: readonly string[] = [], env: NodeJS.ProcessEnv = {}): Result<{ runtime?: string; eligible: boolean }> {
   if (peer.intelligence !== 'artificial' || getAdapter(explicit ?? peer.runtime).kind !== 'tui') return ok({ runtime: explicit, eligible: false })
   const enabled = failoverEnabled(peer.cwd)
   const eligible = enabled && (!explicit || explicit === peer.runtime)
@@ -79,6 +83,7 @@ export function selectFailoverRuntime(cfg: Config, peer: PeerRecord, explicit?: 
     if (existsSync(join(root(cfg), `${identity}.claim.json`))) continue
     const failure = providerFailure(cfg, identity)
     if (eligible && failure && failure.retryAtMs > now) continue
+    if (eligible && accountLimitActive(cfg, peer.cwd, runtime, now, env)) continue
     return ok({ runtime, eligible })
   }
   return err(`peer "${peer.personality}" has no available agent runtime (stopped or provider refusal); message NOT delivered`)

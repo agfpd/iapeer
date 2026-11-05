@@ -10,7 +10,7 @@ import { listFailoverTasks, providerFailure, quarantineSession, recordFailoverTa
 import { findPeer, readPeersIndex, upsertPeer, type PeerRecord } from '../registry/index.ts'
 import { readPeerProfile, writePeerProfileAtomic } from '../identity/index.ts'
 import { processFailovers, type FailoverSeam } from './failover.ts'
-import { failureContainsTask, failureForTask, refusedBeforeWork, refusedBeforeWorkInText } from './failoverProof.ts'
+import { failureContainsTask, failureForTask, refusedBeforeWork, refusedBeforeWorkInText, refusalReviewReason, refusalReviewReasonInText } from './failoverProof.ts'
 import { readInflight, recordInflight } from '../lifecycle/inflight.ts'
 import { processLimitResumes } from './limitresume.ts'
 import { listLimitParks, recordLimitPark } from '../lifecycle/limitpark.ts'
@@ -82,6 +82,16 @@ describe('provider selection and durable configuration', () => {
 })
 
 describe('positive no-work proof', () => {
+  test('review reasons diagnose the original proof, without changing its verdict', () => {
+    expect(refusalReviewReason(task, failure)).toBeUndefined()
+    const rows = codexRows()
+    rows.splice(3, 0, { type: 'event_msg', payload: { type: 'agent_reasoning' } } as any)
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-after-input')
+    expect(refusalReviewReasonInText(jsonl(rows).trimEnd(), task, failure)).toBe('incomplete-or-unsupported-evidence')
+    expect(refusalReviewReasonInText('not-json\n', task, failure)).toBe('malformed-evidence')
+    writeFileSync(failure.file!, ' '.repeat(16 * 1024 * 1024 + 1))
+    expect(refusalReviewReason(task, failure)).toBe('oversized-evidence')
+  })
   test('real 0.164 API auth shape: tagged HTTP error, native UserMessage and inert developer input', () => {
     const rows: unknown[] = [
       { type: 'session_meta', payload: { id: 'native-1', cwd: root } },
@@ -248,6 +258,7 @@ describe('custody transfer', () => {
     // The peer must read a limit as a provider-side stop, not as its own fault (natural limit 04.11).
     expect(sent[0].input.message).toContain(`(${failure.errorType}:`)
     expect(sent[0].input.message).not.toContain(task.message)
+    expect(listFailoverTasks(cfg, true)[0]?.reviewReason).toBe('model-work-after-input')
   })
   test('unknown dispatch never retries; lost hosting confirmation never transfers', async () => {
     setup(); await upsertPeer({ personality: 'alice', runtime: 'claude', cwd: root, intelligence: 'artificial' }, { env })
@@ -256,6 +267,7 @@ describe('custody transfer', () => {
     await processFailovers(cfg, env, {}, undefined, s)
     await processFailovers(cfg, env, {}, undefined, s)
     expect(attempts).toBe(1); expect(listFailoverTasks(cfg, true)[0]?.state).toBe('review')
+    expect(listFailoverTasks(cfg, true)[0]?.reviewReason).toBe('dispatch-uncertain')
   })
   test('replacement hosting and unrelated refusal never authorize killing another session', async () => {
     setup()

@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex usage limits exclude the same account across peers.** A positively attributed
+  ChatGPT usage refusal parks automatic endpoint selection until the stated reset, without
+  inventing unfinished tasks or continuation nudges. Different users/accounts and unknown
+  authentication remain independent. `account-park` / `account-park-cleared` lifecycle events
+  expose the hashed identity, reset and affected peers; live acceptance awaits a natural limit.
+- **Failover review receipts retain the rejected proof condition.** `reviewReason` distinguishes
+  model/tool work, oversized or incomplete evidence, ambiguous setup and uncertain dispatch,
+  rather than requiring a manual transcript reconstruction. Replay safety is unchanged.
+
 - **Verify catches declared but unwired core MCP endpoints.** Claude/Codex checks now report
   missing, disabled or malformed persistent core server configuration independently of domain MCP
   parity, including in `--json` (`runtimeWiring`). OpenCode's launch-time injection is not a false
