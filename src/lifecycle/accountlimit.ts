@@ -8,6 +8,7 @@ import type { MuteDetection } from '../daemon/mutewatch.ts'
 import { readPeersIndex } from '../registry/index.ts'
 import { readPeerProfile } from '../identity/index.ts'
 import { appendLifecycleEvent } from './eventlog.ts'
+import { readFirstLine } from '../launch/adapters/transcriptTail.ts'
 
 type Config = Pick<LifecycleConfig, 'stateDir'> & Partial<Pick<LifecycleConfig, 'eventLogDir'>>
 interface AuthIdentity { key: string; home: string; modifiedAtMs: number }
@@ -52,6 +53,13 @@ export function recordAccountLimit(cfg: Config, d: MuteDetection, env: NodeJS.Pr
   // A login/refresh after the event is not proof of the historical account. A
   // rollout from another CODEX_HOME is also not attributable to this auth file.
   if (!auth || auth.modifiedAtMs > d.atMs || !d.file || !resolve(d.file).startsWith(resolve(auth.home, 'sessions') + '/')) return false
+  try {
+    const meta = JSON.parse(readFirstLine(d.file) ?? 'null')
+    const startedAt = Date.parse(meta?.payload?.timestamp)
+    if (meta?.type !== 'session_meta' || !d.sessionId ||
+        (meta.payload.session_id ?? meta.payload.id) !== d.sessionId ||
+        !Number.isFinite(startedAt) || startedAt > d.atMs || auth.modifiedAtMs > startedAt) return false
+  } catch { return false }
   const old = readPark(cfg, auth.key)
   if (old && old.eventAtMs >= d.atMs) return false
   const blockedPeers = readPeersIndex({ env }).peers.filter(p =>

@@ -25,7 +25,9 @@ beforeEach(() => {
   env = { HOME: root, CODEX_HOME: join(root, 'codex'), IAPEER_ROOT: join(root, 'root') }
   cfg = loadLifecycleConfig(env); at = Date.now()
   auth(env.CODEX_HOME!)
-  event = { cwd: root, personality: 'source', runtime: 'codex', atMs: at, resetsAtMs: at + 60_000, errorType: 'usage_limit_exceeded', content: 'usage limit', file: join(env.CODEX_HOME!, 'sessions', 'native.jsonl') }
+  event = { cwd: root, personality: 'source', runtime: 'codex', atMs: at, resetsAtMs: at + 60_000, errorType: 'usage_limit_exceeded', content: 'usage limit', sessionId: 'native', file: join(env.CODEX_HOME!, 'sessions', 'native.jsonl') }
+  mkdirSync(join(env.CODEX_HOME!, 'sessions'))
+  writeFileSync(event.file!, JSON.stringify({ type: 'session_meta', payload: { id: 'native', timestamp: new Date(at - 1000).toISOString() } }) + '\n')
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 test('same account skips Codex across peers and homes until reset; different user/account and unknown auth do not', () => {
@@ -67,6 +69,12 @@ test('unsupported auth/provider, wrong native home, absent reset and other refus
   expect(recordAccountLimit(cfg, event, env)).toBe(false)
   writeFileSync(join(env.CODEX_HOME!, 'config.toml'), 'model_provider = "custom"\n')
   expect(recordAccountLimit(cfg, event, env)).toBe(false)
+  expect((select() as any).value.runtime).toBe('codex')
+})
+test('auth switched between native session start and refusal cannot poison the new account', () => {
+  auth(env.CODEX_HOME!, 'new-account')
+  utimesSync(join(env.CODEX_HOME!, 'auth.json'), (at - 500) / 1000, (at - 500) / 1000)
+  expect(recordAccountLimit(cfg, event, env, at)).toBe(false)
   expect((select() as any).value.runtime).toBe('codex')
 })
 test('diagnostic events show the blocked peers and one observed expiry, with no re-park of historical evidence', async () => {

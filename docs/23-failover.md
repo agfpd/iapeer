@@ -23,6 +23,8 @@ auth identity remains endpoint-only; different accounts are independent. This
 account park affects endpoint selection only, not custody, session quarantine,
 idle holds or continuation nudges. Auth changes after the refusal cannot attribute
 historical evidence to the new account.
+The auth file must predate the matching native session's creation as well as its
+refusal; a login/refresh during that session leaves account attribution unknown.
 Currently this requires unambiguous file-based ChatGPT auth; keyring, API-key,
 custom-provider and inline profile/config overrides remain endpoint-only.
 Lifecycle `account-park` records the account hash, `resetAt` and the current list
