@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sender deletes `/tmp` or otherwise removes the source. Copies live for the
   recipient peer's lifetime and `iapeer remove` purges its inbox.
 
+## [0.4.166] - 2026-11-06
+
+### Fixed
+
+- **Limit-resume waits for an active account limit as well as the endpoint reset.**
+  A stale endpoint deadline after an owner's early quota reset no longer wakes a session
+  before the current account reset or consumes a nudge attempt. Existing endpoint grace
+  remains unchanged; cleared, different and unknown accounts do not delay continuation.
+  Regression tests cover both deadline orders and the account-reset boundary.
+
 ## [0.4.25] - 2026-06-22
 
 ### Fixed
