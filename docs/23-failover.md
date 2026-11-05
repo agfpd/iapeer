@@ -47,6 +47,12 @@ marker. A batch with no model work is transferred in receipt order, once per tas
 a newer refusal never erases an older task. Native queued Claude input and Codex
 `item_completed/UserMessage` input are included. Codex developer/system setup records
 are input metadata, not model output; assistant/tool/reasoning items remain work.
+For a Codex input steered into an existing turn, earlier model work is allowed
+only when its last response has an explicit native `raw_response_completed`
+receipt and no outstanding tool calls. No model items may follow the new input.
+Absent/ambiguous completion produces review with
+`model-work-before-queued-input`. Token usage alone is not completion evidence:
+Codex also writes usage records for incomplete responses.
 An interrupted task with possible effects instead produces an explicit review
 notice with durable evidence; its original instruction is not replayed. The notice
 names the refusal class (for example `usage_limit_exceeded`) so the receiving peer

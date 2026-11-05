@@ -173,8 +173,34 @@ export function refusalReviewReasonInText(text: string, task: Pick<FailoverTask,
   }
   const start = rows.slice(0, input).findLastIndex(r => r.type === 'event_msg' && r.payload?.type === 'task_started')
   if (start < 0) return 'missing-turn-start'
+  // A steered input may arrive between responses in another turn. Only a native
+  // raw_response_completed proves that response ended. token_usage_record is NOT
+  // a completion receipt: upstream also persists it for response.incomplete.
+  let modelBefore = false, completed = false
+  const pendingCalls = new Set<string>()
+  for (const r of rows.slice(start + 1, input)) {
+    const p = r.payload
+    if (r.type === 'event_msg' && p?.type === 'raw_response_completed' && typeof p.response_id === 'string') {
+      completed = true
+      continue
+    }
+    if (r.type === 'response_item' && !(['message', 'additional_tools'].includes(p?.type) && ['user', 'developer', 'system'].includes(p?.role))) {
+      modelBefore = true
+      if (['function_call_output', 'custom_tool_call_output'].includes(p?.type)) {
+        if (typeof p.call_id !== 'string' || !pendingCalls.delete(p.call_id)) completed = false
+      } else {
+        completed = false
+        if (['function_call', 'custom_tool_call'].includes(p?.type)) pendingCalls.add(p.call_id ?? 'unknown')
+      }
+    }
+    if (r.type === 'event_msg' && (['item_started', 'item_completed'].includes(p?.type) && p?.item?.type !== 'UserMessage'
+      || ['agent_message', 'agent_reasoning', 'exec_command_begin', 'mcp_tool_call_begin', 'turn_aborted'].includes(p?.type))) {
+      modelBefore = true; completed = false
+    }
+  }
+  if (modelBefore && (!completed || pendingCalls.size > 0)) return 'model-work-before-queued-input'
   let refusal = false
-  for (let i = start + 1; i < rows.length; i++) {
+  for (let i = input + 1; i < rows.length; i++) {
     const r = rows[i], p = r.payload
     if (r.type === 'response_item' && !(['message', 'additional_tools'].includes(p?.type) && ['user', 'developer', 'system'].includes(p?.role))) return 'model-work-after-input'
     if (r.type !== 'event_msg') continue

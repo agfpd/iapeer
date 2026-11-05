@@ -82,6 +82,29 @@ describe('provider selection and durable configuration', () => {
 })
 
 describe('positive no-work proof', () => {
+  test('steered Codex input requires completed prior response, never usage alone', () => {
+    const rows: any[] = codexRows()
+    const work = { type: 'response_item', payload: { type: 'reasoning' } }
+    rows.splice(2, 0, work)
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-before-queued-input')
+    rows.splice(3, 0, { type: 'token_usage_record', payload: { response_id: 'r1', usage: { output_tokens: 1018 } } })
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-before-queued-input')
+    rows.splice(4, 0, { type: 'event_msg', payload: { type: 'raw_response_completed', response_id: 'r1' } })
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBeUndefined()
+    rows.splice(5, 0, work)
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-before-queued-input')
+  })
+  test('completed response with an unresolved tool call is not a safe steering boundary', () => {
+    const rows: any[] = codexRows()
+    rows.splice(2, 0,
+      { type: 'response_item', payload: { type: 'function_call', call_id: 'call1' } },
+      { type: 'event_msg', payload: { type: 'raw_response_completed', response_id: 'r1' } })
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-before-queued-input')
+    rows.splice(4, 0, { type: 'response_item', payload: { type: 'function_call_output', call_id: 'call1', output: 'done' } })
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBeUndefined()
+    rows.splice(6, 0, { type: 'response_item', payload: { type: 'reasoning' } })
+    expect(refusalReviewReasonInText(jsonl(rows), task, failure)).toBe('model-work-after-input')
+  })
   test('review reasons diagnose the original proof, without changing its verdict', () => {
     expect(refusalReviewReason(task, failure)).toBeUndefined()
     const rows = codexRows()
