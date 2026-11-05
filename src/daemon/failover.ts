@@ -66,7 +66,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
         saveFailoverTask(cfg, task); log(task, 'claimed')
       }
       if (task.state === 'dispatching') {
-        task.reviewReason = 'dispatch-uncertain'
+        task.reviewReason ??= 'dispatch-uncertain'
         task.state = 'review'; task.error = 'daemon restarted during transfer dispatch; acceptance needs reconciliation'
         saveFailoverTask(cfg, task); log(task, 'dispatch-uncertain')
         board?.raise({ personality: task.personality, runtime: task.targetRuntime ?? task.runtime, kind: 'failover-review', audience: 'operator', errorType: 'failover-dispatch-uncertain', eventAtMs: task.ts, content: task.error })
@@ -107,7 +107,7 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
           failoverTaskId: task.failoverTaskId,
           selectAgentRuntime: (p, rt) => selectFailoverRuntime(cfg, p, rt, Date.now(), [], env) })
         task.state = safe && result.ok ? 'transferred' : 'review'
-        if (!result.ok) task.reviewReason = 'dispatch-failed'
+        if (!result.ok) task.reviewReason ??= 'dispatch-failed'
         if (!result.ok) task.error = result.error.message
         saveFailoverTask(cfg, task); log(task, result.ok ? task.state : 'dispatch-failed')
       } catch (e) {
