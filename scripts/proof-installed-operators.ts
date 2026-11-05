@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { findSurfaceTool, proveReload, surfaceProofServer } from './reload-proof.ts'
+import { installProofCleanup, stopProofProcess } from './proof-installed-lib.ts'
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const hostHome = homedir(), bin = resolve(arg('--bin') ?? join(hostHome, '.local/bin/iapeer'))
@@ -59,6 +60,7 @@ const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
 const reserve = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch() { return new Response('reserve') } })
 const port = reserve.port!; reserve.stop(true)
 const env: NodeJS.ProcessEnv = {
+  IAPEER_TEST_SANDBOX: process.env.IAPEER_TEST_SANDBOX,
   PATH: process.env.PATH, HOME: home, TERM: 'xterm-256color', IAPEER_ROOT: iap,
   IAPEER_LAUNCHAGENTS_DIR: join(root, 'LaunchAgents'), IAPEER_SOCK_DIR: join(root, 's'),
   IAPEER_PORT: String(port), IAPEER_DAEMON_SOCKET: join(root, 'router.sock'), IAPEER_OPENCODE_BIN: native,
@@ -85,11 +87,12 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch
 const hosting = () => ({ pid: readPidFile(runDir, identity())?.pid, ready: read(join(runDir, identity() + '.ready')).trim() })
 const until = async (what: string, f: () => unknown | Promise<unknown>, ms = 20000) => {
   const end = Date.now() + ms
-  while (Date.now() < end) { if (await f()) return; await Bun.sleep(100) }
+  while (Date.now() < end) { teardown.assertRunning(); if (await f()) return; await Bun.sleep(100) }
   throw new Error(`timeout: ${what}`)
 }
 const record = (check: string, details: unknown) => { results.push({ check, time: Date.now(), details }); console.log(`PASS ${check}`) }
 const cli = async (...args: string[]) => {
+  if (!(args[0] === 'supervisor' && args[1] === 'kill')) teardown.assertRunning()
   const t = Date.now(), p = Bun.spawn([cliBin, ...args], { env, stdout: 'pipe', stderr: 'pipe' })
   const [code, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()])
   const r = { args, code, stdout, stderr, ms: Date.now() - t }; results.push({ cli: r })
@@ -109,6 +112,7 @@ const checkNew = async (before: NonNullable<ReturnType<typeof state>>, sentinelP
   record('new-fresh', { state: state(), oldHosting, newHosting, oldAlive: alive(oldHosting.pid), newAlive: alive(newHosting.pid), unrelatedPid: sentinelPid, unrelatedAlive: alive(sentinelPid) })
 }
 let daemon: ReturnType<typeof Bun.spawn> | undefined, attached: ReturnType<typeof Bun.spawn> | undefined, success = false
+const teardown = installProofCleanup(cleanupProof)
 try {
   const senderCwd = join(root, 'sender')
   writePeerProfileAtomic(senderCwd, { personality: 'sender', runtime: 'notifier', runtimes: ['notifier'], intelligence: 'absent' })
@@ -117,11 +121,13 @@ try {
   if (sink.state !== 'started') throw new Error(JSON.stringify(sink))
   const sentinelPid = readPidFile(runDir, 'notifier-sender')!.pid
   await initPeer({ cwd, runtime: 'opencode', personality, intelligence: 'artificial', env })
+  teardown.assertRunning()
   mkdirSync(paths().dir, { recursive: true })
   const writeProviderConfig = () => { mkdirSync(paths().dir, { recursive: true }); writeFileSync(paths().config, JSON.stringify({ model: 'synthetic/synthetic', small_model: 'synthetic/synthetic', enabled_providers: ['synthetic'], provider: {
     synthetic: { npm: '@ai-sdk/openai-compatible', name: 'Synthetic', options: { baseURL: provider.url.origin + '/v1', apiKey: 'x' }, models: { synthetic: { name: 'Synthetic', limit: { context: 100000, output: 1000 } } } },
   } })) }
   writeProviderConfig()
+  teardown.assertRunning()
   daemon = Bun.spawn([arg('--legacy-bin') ?? bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
   await until('installed daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
   await turn('FIRST_OPERATOR_PROOF')
@@ -143,6 +149,7 @@ try {
       restartDaemon: async () => {
         cliBin = bin
         daemon!.kill(); await daemon!.exited
+        teardown.assertRunning()
         daemon = Bun.spawn([bin, 'daemon'], { env, stdout: Bun.file(join(root, 'daemon.out')), stderr: Bun.file(join(root, 'daemon.err')) })
         await until('new daemon ready', () => read(join(root, 'daemon.err')).includes('daemon READY'))
       },
@@ -192,6 +199,7 @@ const path=join(dir,'surface-proof.json');if(kind==='off')rmSync(path,{force:tru
 
   // A real terminal client, not a raw spectator socket. Human input enters the native TUI.
   let attachOut = ''
+  teardown.assertRunning()
   attached = Bun.spawn([bin, 'attach', personality, 'opencode'], { env, terminal: { cols: 100, rows: 32, name: 'xterm-256color', data(_t, d) { attachOut += Buffer.from(d).toString('utf8') } } })
   await until('interactive attached marker', () => existsSync(join(runDir, identity() + '.attached')))
   await Bun.sleep(1000)
@@ -266,10 +274,12 @@ const path=join(dir,'surface-proof.json');if(kind==='off')rmSync(path,{force:tru
   record('remove-live-guard-force-purge-keeps-cwd', {})
   success = true
   }
-} finally {
+} finally { await teardown.run() }
+
+async function cleanupProof() {
   releaseBusy?.()
-  if (attached) { attached.kill(); await attached.exited; attached.terminal?.close() }
-  if (daemon) { daemon.kill(); await daemon.exited }
+  if (attached) { await stopProofProcess(attached); attached.terminal?.close() }
+  if (daemon) await stopProofProcess(daemon)
   for (const p of ['operator-proof', 'operator-renamed']) await cli('supervisor', 'kill', 'opencode-' + p, '--run-dir', runDir)
   await cli('supervisor', 'kill', 'notifier-sender', '--run-dir', runDir)
   provider.stop(true)
