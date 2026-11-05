@@ -1961,7 +1961,8 @@ const VERBS: ReadonlyArray<{ sig: string; desc: string }> = [
   { sig: 'self-done', desc: '(agent self-call, ephemeral) silent finish: arm own quiet-reap, wake no one' },
   { sig: 'capability <list | register <decl.json> | sync <name> | unregister <name>>', desc: 'capability-plugin lifecycle: per-peer provision/unprovision on every agent endpoint (docs/21)' },
   { sig: 'native-memory <off|on> (--peer <p> | --all)', desc: "gate/restore runtimes' native memory (canonized lever; контракт «Слот памяти»)" },
-  { sig: 'trust-hooks <hooks.json> [--check]', desc: 'pre-seed codex hooks trust for a file-form hooks.json (no modal); --check = drift report' },
+  { sig: 'trust-hooks <hooks.json> | --plugin <id> | --plugins [--check] [--cwd <dir>]', desc: 'file trust or native allowlisted plugin-hook trust; --check is read-only' },
+  { sig: 'provider-clear <peer> <runtime>', desc: 'clear provider/account exclusion after operator reset; preserve custody/quarantine' },
   {
     sig: 'supervisor up|start|attach|list|kill <sess> [runtime]',
     desc: 'DARK (cutover Block 2): detach-persistent pty-supervisor PoC port; serves nothing on the live fleet (throwaway validation only)',
@@ -2284,6 +2285,17 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         return failed ? 1 : 0
       }
       case 'trust-hooks': {
+        if (typeof flags.plugin === 'string' || flags.plugins === true) {
+          const { allowPlugin, pluginTrustPath, reconcilePluginTrust } = await import('../launch/codexPluginTrust.ts')
+          const cfg = loadLifecycleConfig(env)
+          const configPath = pluginTrustPath(cfg.stateDir)
+          const only = typeof flags.plugin === 'string' ? flags.plugin : undefined
+          if (only && flags.check !== true) allowPlugin(configPath, only)
+          const hooks = await reconcilePluginTrust({ configPath, eventLogDir: cfg.eventLogDir, codexBin: cfg.codexBin, cwd: typeof flags.cwd === 'string' ? flags.cwd : process.cwd(), env }, flags.check === true, only)
+          for (const h of hooks) out(`${h.trustStatus}\t${h.pluginId}\t${h.key}\t${h.currentHash}\n`)
+          if (only && !hooks.length) { errOut('no enabled unmanaged plugin hooks found\n'); return 1 }
+          return hooks.every(h => h.trustStatus === 'trusted') ? 0 : 1
+        }
         // Deterministic pre-seed of the codex hooks trust state for a FILE-form
         // hooks.json (user- or project-local layer) — the headless replacement for
         // the "Hooks need review" modal: codex trusts per hook-command HASH, and in
@@ -2751,6 +2763,15 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const outcomes = await defaultRuntime(rt, { peer: peerName, all: flags.all === true, env })
         for (const o of outcomes) out(`${o.personality}: ${o.action}${o.detail ? ` — ${o.detail}` : ''}\n`)
         return outcomes.some(o => o.action === 'failed') ? 1 : 0
+      }
+      case 'provider-clear': {
+        const [name, runtime] = positionals
+        const peer = readPeersIndex({ env }).peers.find(p => p.personality === name)
+        if (!peer || !runtime || !peer.runtimes.includes(runtime)) return argErr(errOut, 'usage: iapeer provider-clear <peer> <declared-runtime>')
+        const { clearProviderFailure } = await import('../lifecycle/failover.ts')
+        clearProviderFailure(loadLifecycleConfig(env), peer, runtime, env)
+        out(`provider exclusion cleared: ${runtime}-${name}; quarantine/custody unchanged\n`)
+        return 0
       }
       case 'new': {
         // UNCONDITIONAL fresh restart (control, system class — docs/Control-команды

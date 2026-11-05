@@ -81,6 +81,28 @@ Recovery makes the configured default eligible for subsequent messages; it does
 not replay, migrate or interrupt work already assigned to a fallback. Quarantined
 native sessions remain quarantined after provider recovery and daemon restart.
 
+After an owner resets quota early, `iapeer provider-clear <peer> <runtime>` opens
+that endpoint and its positively identified account for subsequent selection.
+It preserves refusal timestamps (dedup), quarantine and task custody. Account
+clearance is shared by the same account, not a fake recovery of every peer. A
+newer refusal parks again; replay of the cleared old refusal does not. Events:
+`provider-cleared` and, when applicable, `account-park-cleared reason=operator`.
+
+## Plugin-hook trust on Codex boot
+
+`state/lifecycle/codex-plugin-trust.json` is operator-owned host configuration:
+`{"version":1,"plugins":["exact-plugin@marketplace"]}`. No wildcard or built-in
+plugin names are trusted. `trust-hooks --plugin <id>` adds an exact ID and
+reconciles its enabled, unmanaged plugin hooks through native app-server
+`hooks/list` and `config/batchWrite`; `--check` only reads. `--plugins` processes
+the configured allowlist. `--cwd <dir>` selects the discovery cwd. This can be
+run after `codex plugin add/update`; the next core-owned Codex boot also checks
+it. File hooks and disabled/unknown plugins are not auto-trusted by this path.
+Native composite command/content hashes are used verbatim, not recomputed.
+Changes emit `plugin-hook-trusted` with plugin, old hash and new hash. Discovery
+or protocol failures warn at boot rather than blindly dismissing a modal.
+The native trust model is documented in [OpenAI Hooks](https://learn.chatgpt.com/docs/hooks).
+
 Automatic replacement work carries its own durable provenance: it may continue
 on its assigned non-default runtime after a later limit reset, just like an
 explicitly addressed task. This does not grant autonomous core maintenance notices

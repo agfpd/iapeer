@@ -10,7 +10,8 @@ import type { PeerRecord } from '../registry/index.ts'
 import type { LifecycleConfig } from './index.ts'
 import type { MuteDetection } from '../daemon/mutewatch.ts'
 import type { InflightNote } from '../transport/index.ts'
-import { accountLimitActive, recordAccountLimit } from './accountlimit.ts'
+import { accountLimitActive, recordAccountLimit, clearAccountLimit } from './accountlimit.ts'
+import { appendLifecycleEvent } from './eventlog.ts'
 
 type Config = Pick<LifecycleConfig, 'stateDir'> & Partial<Pick<LifecycleConfig, 'eventLogDir'>>
 export interface ProviderFailure extends MuteDetection { retryAtMs: number }
@@ -52,6 +53,14 @@ export function recordProviderFailure(cfg: Config, d: MuteDetection, env: NodeJS
   // breaker, not a permanent disable; the next real message can test recovery.
   write(path, { ...d, retryAtMs: d.resetsAtMs ?? d.atMs + 5 * 60_000 })
   return true
+}
+export function clearProviderFailure(cfg: Config, peer: PeerRecord, runtime: string, env: NodeJS.ProcessEnv, now = Date.now()): void {
+  const identity = `${runtime}-${peer.personality}`
+  const prior = providerFailure(cfg, identity)
+  // Keep atMs as the detector's dedup watermark; do not remove custody/quarantine.
+  if (prior) write(healthPath(cfg, identity), { ...prior, retryAtMs: now })
+  const account = clearAccountLimit(cfg, peer.cwd, runtime, env, now)
+  appendLifecycleEvent(cfg.eventLogDir, { ev: 'provider-cleared', identity, reason: 'operator', atMs: prior?.atMs, account_key: account ?? 'unknown-or-unparked' }, { env })
 }
 export function quarantineSession(cfg: Config, identity: string, ref: string): void {
   const refs = read<string[]>(join(root(cfg), `${identity}.quarantine.json`)) ?? []

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readdirSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadLifecycleConfig } from './index.ts'
-import { recordProviderFailure, selectFailoverRuntime } from './failover.ts'
+import { recordProviderFailure, selectFailoverRuntime, clearProviderFailure, providerFailure, quarantineSession, sessionQuarantined } from './failover.ts'
 import { listLimitParks } from './limitpark.ts'
 import { recordAccountLimit, expireAccountLimits } from './accountlimit.ts'
 import { upsertPeer } from '../registry/index.ts'
@@ -11,6 +11,21 @@ import type { PeerRecord } from '../registry/index.ts'
 import type { MuteDetection } from '../daemon/mutewatch.ts'
 import { peerLaunchEnvPath } from '../storage/index.ts'
 let root: string, env: NodeJS.ProcessEnv, cfg: ReturnType<typeof loadLifecycleConfig>, event: MuteDetection, at: number
+test('operator early reset retains dedup and quarantine; only a newer refusal re-parks', () => {
+  recordProviderFailure(cfg, event, env)
+  quarantineSession(cfg, 'codex-p', 'native')
+  clearProviderFailure(cfg, peer(root, 'source'), 'codex', env, at + 1)
+  expect(providerFailure(cfg, 'codex-source')?.atMs).toBe(event.atMs)
+  expect((select(root, at + 2) as any).value.runtime).toBe('codex')
+  expect(recordProviderFailure(cfg, event, env)).toBe(false)
+  expireAccountLimits(cfg, env, at + 2)
+  expect(recordProviderFailure(cfg, event, env)).toBe(false)
+  expect((select(root, at + 3) as any).value.runtime).toBe('codex')
+  expect(sessionQuarantined(cfg, 'codex-p', 'native')).toBe(true)
+  expect(readFileSync(join(cfg.eventLogDir, 'lifecycle.log'), 'utf8')).toContain('ev=provider-cleared')
+  expect(recordProviderFailure(cfg, { ...event, atMs: at + 4 }, env)).toBe(true)
+  expect((select(root, at + 5) as any).value.runtime).toBe('claude')
+})
 function auth(home: string, account = 'account-a', subject = 'user-a') {
   mkdirSync(home, { recursive: true })
   writeFileSync(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: {

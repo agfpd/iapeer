@@ -1326,6 +1326,7 @@ export async function wakeOrSpawn(args: WakeArgs, deps: WakeDeps = {}): Promise<
       // investigator already looks: a self-death now leaves `exits.log` with the
       // status/signal the daemon's post-factum reaped-gone could never recover.
       exitLogDir: cfg.eventLogDir,
+      pluginTrustConfigPath: join(cfg.stateDir, 'codex-plugin-trust.json'),
       env,
     }
     // C2 — initial_prompt (launch-seed): on a FRESH wake, seed the first turn with

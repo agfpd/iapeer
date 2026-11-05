@@ -198,6 +198,14 @@ export const launch: LaunchFn = async (
     // ABI stays authoritative: prepared env never overrides PEER_PERSONALITY/RUNTIME/IDENTITY.
     let readyToken: string | undefined
     const loggedWarnings = new Set<string>()
+    if (spec.runtime === 'codex' && cfg.pluginTrustConfigPath) {
+      try {
+        const { reconcilePluginTrust } = await import('./codexPluginTrust.ts')
+        await reconcilePluginTrust({ configPath: cfg.pluginTrustConfigPath, eventLogDir: cfg.exitLogDir, codexBin: cfg.codexBin, cwd, env: invocation.env })
+      } catch (e) {
+        appendLifecycleEvent(cfg.exitLogDir, { ev: 'launch-warning', identity, warning: `plugin hook trust: ${e instanceof Error ? e.message : String(e)}` }, { env })
+      }
+    }
     if (adapter.prepareLaunch) {
       try {
         const prepared = adapter.prepareLaunch(spec, invocation.env, cfg)

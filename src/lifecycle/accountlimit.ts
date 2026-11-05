@@ -43,7 +43,7 @@ function accountIdentity(cwd: string, env: NodeJS.ProcessEnv): AuthIdentity | un
   } catch { return }
 }
 const pathFor = (cfg: Config, key: string) => join(cfg.stateDir, 'failover', 'accounts', `${key}.json`)
-interface AccountPark { eventAtMs: number; resetsAtMs: number; sourceIdentity: string; blockedPeers: string[] }
+interface AccountPark { eventAtMs: number; resetsAtMs: number; sourceIdentity: string; blockedPeers: string[]; clearedAtMs?: number }
 function readPark(cfg: Config, key: string): AccountPark | undefined {
   try { return JSON.parse(readFileSync(pathFor(cfg, key), 'utf8')) } catch { return }
 }
@@ -81,12 +81,25 @@ export function expireAccountLimits(cfg: Config, env: NodeJS.ProcessEnv, now = D
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
     const key = name.slice(0, -5), park = readPark(cfg, key)
     if (!park || park.resetsAtMs > now) continue
-    appendLifecycleEvent(cfg.eventLogDir, { ev: 'account-park-cleared', runtime: 'codex', account_key: key, resetAt: new Date(park.resetsAtMs).toISOString(), reason: 'reset', blocked_peers: park.blockedPeers?.join(',') ?? '' }, { env })
+    if (park.clearedAtMs === undefined) appendLifecycleEvent(cfg.eventLogDir, { ev: 'account-park-cleared', runtime: 'codex', account_key: key, resetAt: new Date(park.resetsAtMs).toISOString(), reason: 'reset', blocked_peers: park.blockedPeers?.join(',') ?? '' }, { env })
     rmSync(pathFor(cfg, key), { force: true })
   }
 }
 export function accountLimitActive(cfg: Config, cwd: string, runtime: string, now: number, env: NodeJS.ProcessEnv): boolean {
   if (runtime !== 'codex') return false
   const auth = accountIdentity(cwd, env)
-  return !!auth && (readPark(cfg, auth.key)?.resetsAtMs ?? 0) > now
+  const park = auth && readPark(cfg, auth.key)
+  return !!park && park.clearedAtMs === undefined && park.resetsAtMs > now
+}
+/** Retain eventAtMs until original reset so a repeated detector cannot re-park
+ * the same historical refusal after an operator's early reset. */
+export function clearAccountLimit(cfg: Config, cwd: string, runtime: string, env: NodeJS.ProcessEnv, now = Date.now()): string | undefined {
+  if (runtime !== 'codex') return
+  const auth = accountIdentity(cwd, env)
+  if (!auth) return
+  const park = readPark(cfg, auth.key)
+  if (!park || park.clearedAtMs !== undefined) return
+  writeFileAtomic(pathFor(cfg, auth.key), JSON.stringify({ ...park, clearedAtMs: now }) + '\n')
+  appendLifecycleEvent(cfg.eventLogDir, { ev: 'account-park-cleared', runtime, account_key: auth.key, reason: 'operator', blocked_peers: park.blockedPeers?.join(',') ?? '' }, { env })
+  return auth.key
 }

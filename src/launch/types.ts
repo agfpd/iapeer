@@ -454,6 +454,7 @@ export interface PreparedLaunch {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface LaunchConfig extends LaunchAdapterConfig {
+  pluginTrustConfigPath?: string
   sockDir: string
   bootDeadlineSecs: number
   /** Seconds an unrecognized boot modal must stay unchanged before the bring-up fails fast. */
