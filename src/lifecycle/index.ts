@@ -37,7 +37,7 @@ import { approvalModeOf, readPeerProfile, resolveIdentity, type ApprovalMode } f
 import {
   ephemeralQueueDepth,
   listQueuedIdentities,
-  peekEphemeralTask,
+  peekPersonalityTask,
   removeEphemeralTask,
 } from './queue.ts'
 import { findPeer, publicPeerSummary, readPeersIndex, type PeerRecord, type PublicPeerSummary } from '../registry/index.ts'
@@ -1972,6 +1972,27 @@ export interface DrainDeps {
   wakeFn?: (args: WakeArgs, deps: WakeDeps) => Promise<WakeResult>
 }
 
+/** Read-only operator/sender projection; no new custody or replay authority. */
+export function ephemeralPinnedBarrier(cfg: LifecycleConfig, personality: string): { queueIdentity: string; seq: string; reason: string } | null {
+  const next = peekPersonalityTask(cfg, personality, true)
+  if (!next || next.item.failoverEligible) return null
+  const parked = readLimitPark(cfg, next.identity)
+  const stopped = isStopped(cfg, next.identity)
+  if (!parked && !stopped) return null
+  return { queueIdentity: next.identity, seq: next.item.seq,
+    reason: `held behind pinned task on ${parked ? 'parked' : 'stopped'} endpoint ${next.identity} (seq ${next.item.seq})` }
+}
+
+export function listEphemeralBarriers(cfg: LifecycleConfig): { recipient: string; status: 'pending'; queueIdentity: string; seq: string; reason: string }[] {
+  const personalities = new Set(listQueuedIdentities(cfg).flatMap(id => {
+    const p = parseSessionName(id); return p ? [p.personality] : []
+  }))
+  return [...personalities].flatMap(p => {
+    const barrier = ephemeralPinnedBarrier(cfg, p)
+    return barrier ? [{ recipient: p, status: 'pending' as const, ...barrier }] : []
+  })
+}
+
 /**
  * Feed ONE queued task to an ephemeral worker IFF it has no live session:
  * peek → wake FRESH (the task is the boot first-message; resolveWakeMode takes
@@ -1980,9 +2001,9 @@ export interface DrainDeps {
  * crash-loop guard bounds a tight failure loop, its refusals land in
  * lifecycle.log). Returns null when there is nothing to do (empty queue, or a
  * session is still live — invariant: ≤1 live session = exactly one task).
- * Serialization: concurrent drains converge on wakeOrSpawn's per-identity
- * wake.lock — the loser takes the idempotent live-session fast path and the
- * item is removed once, delivered once.
+ * Serialization: kicks from all endpoint queues take the same personality
+ * drain lock. Any live endpoint owns the single worker slot; source seq/custody
+ * remains in place until the actual delivery reports READY.
  */
 export async function drainEphemeralQueue(
   cfg: LifecycleConfig,
@@ -1990,19 +2011,23 @@ export async function drainEphemeralQueue(
   runtime: Runtime,
   deps: DrainDeps = {},
 ): Promise<WakeResult | null> {
-  return withWakeLock(cfg, `${runtime}-${personality}.queue-drain`, () => drainEphemeralQueueInner(cfg, personality, runtime, deps))
+  return withWakeLock(cfg, `${personality}.queue-drain`, () => drainEphemeralQueueInner(cfg, personality, runtime, deps))
 }
 
 async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: string, runtime: Runtime, deps: DrainDeps): Promise<WakeResult | null> {
   const env = deps.env ?? process.env
-  const identity = buildProcessAddress(runtime, personality)
-  const sock = buildSocketPath(runtime, personality, cfg.sockDir)
-  if (sessionAlive(sock, identity, env)) return null // one task per session — wait for its reap
+  const next = peekPersonalityTask(cfg, personality)
+  if (!next) return null
+  const { identity, item } = next
+  runtime = parseSessionName(identity)!.runtime
+  const peer = findPeer(readPeersIndex({ env }), personality)
+  const runtimes = new Set([runtime, ...(peer?.runtimes ?? []), ...listQueuedIdentities(cfg).flatMap(id => {
+    const p = parseSessionName(id); return p?.personality === personality ? [p.runtime] : []
+  })])
+  if ([...runtimes].some(rt => sessionAlive(buildSocketPath(rt, personality, cfg.sockDir), buildProcessAddress(rt, personality), env))) return null
   // A limit-park owns this worker's CURRENT job even after idle-reap. The next FIFO task must not
   // overtake it on the supervise tick that runs BEFORE the reset continuation pass.
-  if (readLimitPark(cfg, identity)) return null
-  const item = peekEphemeralTask(cfg, identity)
-  if (!item) return null
+  if (!item.failoverEligible && (readLimitPark(cfg, identity) || isStopped(cfg, identity))) return null
   if (item.coreNotice && findPeer(readPeersIndex({ env }), personality)?.runtime !== runtime) {
     appendLifecycleEvent(cfg.eventLogDir, { ev: 'ephemeral-core-notice-skipped', identity, seq: item.seq, reason: 'default runtime changed before drain' }, { env })
     removeEphemeralTask(cfg, identity, item.seq) // stale STATUS, never an addressed work item
@@ -2010,8 +2035,7 @@ async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: strin
   }
   let deliveryRuntime = runtime
   if (item.failoverEligible) {
-    const peer = findPeer(readPeersIndex({ env }), personality)
-    if (!peer || isStopped(cfg, identity)) return null
+    if (!peer) return null
     const selected = selectFailoverRuntime(cfg, peer, undefined, Date.now(), [], env)
     if (!selected.ok || !selected.value.runtime) return null
     deliveryRuntime = selected.value.runtime
@@ -2021,7 +2045,7 @@ async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: strin
   // Durable drain trace: which item, how deep the queue.
   appendLifecycleEvent(
     cfg.eventLogDir,
-    { ev: 'ephemeral-drain', identity, seq: item.seq, depth: ephemeralQueueDepth(cfg, identity) },
+    { ev: 'ephemeral-drain', identity, seq: item.seq, runtime: deliveryRuntime, depth: ephemeralQueueDepth(cfg, identity) },
     { env },
   )
   const wake = deps.wakeFn ?? wakeOrSpawn

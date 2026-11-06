@@ -76,6 +76,31 @@ result reconciliation at the tool/business layer.
 
 ## Context and recovery
 
+### Ephemeral FIFO across runtimes
+
+An ephemeral personality has one execution slot and one pending-work order,
+not an independent worker per runtime. New failover-eligible tasks share the
+configured default's queue; exact tasks stay in their addressed endpoint queues.
+The item format and exact routing remain readable by the previous binary on
+rollback, without requiring the queues to be empty.
+Runtime selection for eligible work happens at drain, including work enqueued
+before a provider refusal. A source endpoint's quota park does not hold an
+unstarted eligible tail when another runtime can execute it. Explicit tasks
+retain their target and its stop/park constraints.
+
+An older exact task is a FIFO barrier: later eligible work must not bypass its
+pin, even when a fallback could execute that later work. A parked/stopped exact
+head is visible as `pending: true` with `pendingReason` on the sender's queue
+acknowledgement and as a pending queue barrier (source identity/seq/reason) in
+`iapeer delivery list`. It is not a native acceptance case and cannot be closed
+with `delivery resolve`; clearing the pin's park/stop releases normal draining.
+
+Legacy endpoint queues are drained together under the personality lock, oldest
+head first (filesystem creation order, identity/seq tie-break). They need not be
+rewritten or copied on upgrade. A live session of any runtime holds the shared
+slot. Lifecycle `ephemeral-drain` retains the source identity/seq and records the
+selected execution runtime, so natural-limit acceptance can audit the order.
+
 Ordinary bootstrap supplies the same peer's doctrine, memory and handoffs in the
 replacement runtime. A transferred unstarted task retains its original sender,
 topic and attachments. Historical native evidence is retained for review rather

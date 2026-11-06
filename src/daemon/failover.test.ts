@@ -16,6 +16,10 @@ import { processLimitResumes } from './limitresume.ts'
 import { listLimitParks, recordLimitPark } from '../lifecycle/limitpark.ts'
 import { ok } from '../core/errors.ts'
 import { parseCodexRollout } from './mutewatch.ts'
+import { makeEphemeralRouteDeps } from './main.ts'
+import { runCli, formatSendResult } from '../cli/index.ts'
+import { clearLimitPark } from '../lifecycle/limitpark.ts'
+import { defaultRunDir, pidPath } from '../supervisor/paths.ts'
 
 let root: string, cfg: LifecycleConfig, env: NodeJS.ProcessEnv, peer: PeerRecord, at: number
 const jsonl = (rows: unknown[]) => rows.map(r => JSON.stringify(r)).join('\n') + '\n'
@@ -343,4 +347,86 @@ test('FIFO rebinding is serialized at the original queue; automatic provenance s
   expect(calls).toEqual(['claude'])
   expect(peekEphemeralTask(cfg, 'codex-p')).toBeNull()
   expect(listFailoverTasks(cfg)[0]?.failoverVisited).toEqual(['codex', 'claude'])
+})
+
+test('excluded endpoint tail precedes a newer fallback task without waiting for quota reset', async () => {
+  recordProviderFailure(cfg, failure)
+  recordLimitPark(cfg, { identity: 'codex-p', personality: 'p', runtime: 'codex',
+    eventAtMs: at, resetsAtMs: Date.now() + 3600_000, sessionId: 'native-1', errorType: 'usage_limit_exceeded' })
+  enqueueEphemeralTask(cfg, 'codex-p', { task: 'OLD_243', failoverEligible: true })
+  enqueueEphemeralTask(cfg, 'codex-p', { task: 'OLD_244', failoverEligible: true })
+  // Existing pre-upgrade fallback queue. No migration may allow its newer head to jump the tail.
+  enqueueEphemeralTask(cfg, 'claude-p', { task: 'NEW_10', failoverEligible: true })
+  const seen: string[] = []
+  const wakeFn = async (a: any) => { seen.push(`${a.runtime}:${a.task}`); return { status: 'READY' as const, woke: true } }
+  await drainEphemeralQueue(cfg, 'p', 'claude', { env, wakeFn })
+  await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })
+  await drainEphemeralQueue(cfg, 'p', 'claude', { env, wakeFn })
+  expect(seen).toEqual(['claude:OLD_243', 'claude:OLD_244', 'claude:NEW_10'])
+})
+
+test('new ephemeral work has one FIFO across runtime selection and retains an explicit target', async () => {
+  const d = makeEphemeralRouteDeps(cfg, env, () => {})
+  await d.deliver({ peer, runtime: 'claude', envelope: 'AUTO', failoverEligible: true })
+  await d.deliver({ peer, runtime: 'opencode', envelope: 'EXPLICIT', explicitRuntime: true })
+  // Old readers need no new field or migration to retain the exact destination.
+  expect(peekEphemeralTask(cfg, 'codex-p')?.task).toBe('AUTO')
+  expect(peekEphemeralTask(cfg, 'opencode-p')?.task).toBe('EXPLICIT')
+  const seen: string[] = []
+  const wakeFn = async (a: any) => { seen.push(`${a.runtime}:${a.task}`); return { status: 'READY' as const, woke: true } }
+  await drainEphemeralQueue(cfg, 'p', 'opencode', { env, wakeFn })
+  await drainEphemeralQueue(cfg, 'p', 'claude', { env, wakeFn })
+  expect(seen).toEqual(['codex:AUTO', 'opencode:EXPLICIT'])
+})
+
+test('an older pinned parked task is a visible sender/CLI FIFO barrier, not bypassed by eligible work', async () => {
+  enqueueEphemeralTask(cfg, 'opencode-p', { task: 'PINNED', explicitRuntime: true })
+  recordLimitPark(cfg, { identity: 'opencode-p', personality: 'p', runtime: 'opencode', eventAtMs: at, resetsAtMs: Date.now() + 3600_000 })
+  const d = makeEphemeralRouteDeps(cfg, env, () => {})
+  const r = await d.deliver({ peer, runtime: 'codex', envelope: 'LATER', failoverEligible: true })
+  expect(r.ok).toBe(true)
+  if (!r.ok) throw new Error(r.error.message)
+  expect(r.value.pending).toBe(true)
+  expect(r.value.pendingReason).toContain('held behind pinned task on parked endpoint opencode-p')
+  expect(formatSendResult(r.value)).toContain('pending for')
+  let stdout = ''
+  const original = process.stdout.write
+  try {
+    process.stdout.write = ((s: string | Uint8Array) => { stdout += String(s); return true }) as typeof original
+    expect(await runCli(['delivery', 'list'], env)).toBe(0)
+  } finally { process.stdout.write = original }
+  expect(JSON.parse(stdout)).toContainEqual(expect.objectContaining({ recipient: 'p', status: 'pending', queueIdentity: 'opencode-p', seq: '000001' }))
+  const seen: string[] = []
+  const wakeFn = async (a: any) => { seen.push(a.task); return { status: 'READY' as const, woke: true } }
+  expect(await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })).toBeNull()
+  expect(seen).toEqual([])
+  clearLimitPark(cfg, 'opencode-p')
+  await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })
+  await drainEphemeralQueue(cfg, 'p', 'opencode', { env, wakeFn })
+  expect(seen).toEqual(['PINNED', 'LATER'])
+})
+
+test('a live alternative runtime owns the whole personality worker slot', async () => {
+  enqueueEphemeralTask(cfg, 'codex-p', { task: 'WAIT', failoverEligible: true })
+  const runDir = defaultRunDir(env)
+  mkdirSync(runDir, { recursive: true })
+  writeFileSync(pidPath(runDir, 'claude-p'), String(process.pid))
+  let calls = 0
+  expect(await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn: async () => { calls++; return { status: 'READY', woke: true } } })).toBeNull()
+  expect(calls).toBe(0)
+  expect(peekEphemeralTask(cfg, 'codex-p')?.task).toBe('WAIT')
+})
+
+test('concurrent kicks from different endpoint queues serialize the personality, FIFO order retained', async () => {
+  enqueueEphemeralTask(cfg, 'codex-p', { task: 'FIRST', failoverEligible: true })
+  enqueueEphemeralTask(cfg, 'claude-p', { task: 'SECOND', failoverEligible: true })
+  let active = 0, peak = 0
+  const seen: string[] = []
+  const wakeFn = async (a: any) => {
+    peak = Math.max(peak, ++active); seen.push(a.task); await Bun.sleep(20); active--
+    return { status: 'READY' as const, woke: true }
+  }
+  await Promise.all(['codex', 'claude'].map(runtime => drainEphemeralQueue(cfg, 'p', runtime as 'codex' | 'claude', { env, wakeFn })))
+  expect(peak).toBe(1)
+  expect(seen).toEqual(['FIRST', 'SECOND'])
 })

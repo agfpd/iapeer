@@ -1705,7 +1705,7 @@ const cliWake: WakeFn = req =>
 
 export async function sendMessage(
   opts: SendOptions,
-): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number; acceptance?: 'pending'; deliveryId?: string; unconfirmed?: true }> {
+): Promise<{ ok: true; delivered_to: { personality: string; runtime: string }; queued?: boolean; queueDepth?: number; pending?: true; pendingReason?: string; acceptance?: 'pending'; deliveryId?: string; unconfirmed?: true }> {
   const env = opts.env ?? process.env
   const caller = resolveCallerIdentity(parseIdentity(opts.from), readPeersIndex({ env }))
   // wake_policy:ephemeral M3 parity: the CLI path used
@@ -1788,6 +1788,8 @@ export async function sendMessage(
     delivered_to: result.value.delivered_to,
     queued: result.value.queued,
     queueDepth: result.value.queueDepth,
+    pending: result.value.pending,
+    pendingReason: result.value.pendingReason,
     acceptance: result.value.acceptance,
     unconfirmed: result.value.unconfirmed,
     deliveryId: result.value.deliveryId,
@@ -1796,6 +1798,7 @@ export async function sendMessage(
 
 export function formatSendResult(r: Awaited<ReturnType<typeof sendMessage>>): string {
   const target = `${r.delivered_to.personality} (${r.delivered_to.runtime})`
+  if (r.pending) return `pending for ${target} — ${r.pendingReason}; durably queued, do not resend\n`
   if (r.acceptance === 'pending') return `pending acceptance ${r.deliveryId} for ${target} — core owns resolution; do not resend\n`
   if (r.unconfirmed) return `unconfirmed acceptance for ${target} — core owns resolution; do not resend\n`
   if (r.queued) return `queued for ${target}, depth ${r.queueDepth ?? '?'} — the daemon tick drains it\n`
@@ -2908,8 +2911,10 @@ export async function runCli(argv: string[], env: NodeJS.ProcessEnv = process.en
         const { listAcceptance, resolveAcceptance } = await import('../launch/acceptanceStore.ts')
         const runDir = hostRunDir(env)
         if (positionals[0] === 'list') {
-          out(JSON.stringify(listAcceptance(runDir).filter(r => !r.resolution && ['prepared', 'sending', 'pending', 'unresolved'].includes(r.status))
-            .map(r => ({ deliveryId: r.id, recipient: r.identity, status: r.status, reason: r.reason, createdAt: r.createdAt })), null, 2) + '\n')
+          const { listEphemeralBarriers } = await import('../lifecycle/index.ts')
+          out(JSON.stringify([...listAcceptance(runDir).filter(r => !r.resolution && ['prepared', 'sending', 'pending', 'unresolved'].includes(r.status))
+            .map(r => ({ deliveryId: r.id, recipient: r.identity, status: r.status, reason: r.reason, createdAt: r.createdAt })),
+            ...listEphemeralBarriers(loadLifecycleConfig(env))], null, 2) + '\n')
           return 0
         }
         const [action, id, outcome] = positionals

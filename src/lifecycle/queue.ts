@@ -21,8 +21,9 @@
 // wake leaves the task at the head for the next supervise-tick drain. See
 // drainEphemeralQueue.
 
-import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs'
+import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { parseSessionName } from '../core/socket.ts'
 import type { LifecycleConfig } from './index.ts'
 
 /** One queued task for an ephemeral worker. */
@@ -143,7 +144,7 @@ export function enqueueEphemeralTask(
  * A corrupt head (unparseable JSON) is dropped with its slot — a poison task
  * must not wedge the whole queue — and the next item (if any) is returned.
  */
-export function peekEphemeralTask(cfg: LifecycleConfig, identity: string): PeekedQueueItem | null {
+export function peekEphemeralTask(cfg: LifecycleConfig, identity: string, readOnly = false): PeekedQueueItem | null {
   const dir = ephemeralQueueDir(cfg, identity)
   for (const seq of listSeqs(dir)) {
     const path = join(dir, seq)
@@ -159,6 +160,7 @@ export function peekEphemeralTask(cfg: LifecycleConfig, identity: string): Peeke
     } catch {
       /* unreadable/corrupt → drop the slot below */
     }
+    if (readOnly) return null // an operator query never cleans a corrupt slot
     try {
       rmSync(path, { force: true }) // poison/corrupt item: drop, do not wedge the queue
     } catch {
@@ -193,4 +195,19 @@ export function listQueuedIdentities(cfg: LifecycleConfig): string[] {
     if (listSeqs(join(cfg.stateDir, name)).length > 0) out.push(identity)
   }
   return out.sort()
+}
+
+/** Merge endpoint heads without copying custody. Birth time is assigned by the
+ * filesystem, not by an untrusted envelope timestamp. Eligible route enqueues
+ * share a queue; exact/legacy queues remain separate for rollback compatibility. */
+export function peekPersonalityTask(cfg: LifecycleConfig, personality: string, readOnly = false): { identity: string; item: PeekedQueueItem } | null {
+  const heads = listQueuedIdentities(cfg).filter(id => parseSessionName(id)?.personality === personality)
+    .flatMap(identity => {
+      const item = peekEphemeralTask(cfg, identity, readOnly)
+      if (!item) return []
+      const st = statSync(join(ephemeralQueueDir(cfg, identity), item.seq), { bigint: true })
+      return [{ identity, item, order: st.birthtimeNs || st.mtimeNs }]
+    })
+  heads.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : a.identity.localeCompare(b.identity) || a.item.seq.localeCompare(b.item.seq))
+  return heads[0] ?? null
 }

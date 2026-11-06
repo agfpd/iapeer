@@ -34,6 +34,7 @@ import {
   drainAllEphemeralQueues,
   drainEphemeralQueue,
   enqueueEphemeralTask,
+  ephemeralPinnedBarrier,
   isEphemeralPeer,
   isLaunchdManaged,
   addTopic,
@@ -228,7 +229,9 @@ export function makeEphemeralRouteDeps(
     deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime, failoverEligible, failoverTaskId, failoverVisited }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
-      const identity = buildProcessAddress(rt.value, peer.personality)
+      // Eligible work shares the default FIFO; exact work stays in its original
+      // endpoint queue, so the previous binary can still consume it on rollback.
+      const identity = buildProcessAddress(failoverEligible ? peer.runtime : rt.value, peer.personality)
       let depth: number
       try {
         depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(failoverEligible ? { failoverEligible, failoverTaskId, failoverVisited } : {}), ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
@@ -237,6 +240,11 @@ export function makeEphemeralRouteDeps(
           `ephemeral enqueue failed for "${peer.personality}": ${e instanceof Error ? e.message : String(e)}; message NOT queued`,
         )
       }
+      // Advisory inspection must never turn an already durable enqueue into a
+      // failure (which would invite a duplicate retry by its sender).
+      let pendingReason: string | undefined
+      try { pendingReason = ephemeralPinnedBarrier(cfg, peer.personality)?.reason }
+      catch { pendingReason = 'durably queued; queue barrier inspection unavailable' }
       kick(peer.personality, rt.value)
       return ok({
         ok: true as const,
@@ -245,6 +253,7 @@ export function makeEphemeralRouteDeps(
         queued: true,
         queuedBy: 'ephemeral',
         queueDepth: depth,
+        ...(pendingReason ? { pending: true as const, pendingReason } : {}),
         ts: sentAt ?? new Date().toISOString(),
       })
     },

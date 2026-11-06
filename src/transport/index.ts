@@ -1456,6 +1456,9 @@ export interface RouteResult {
   deliveryId?: string
   /** Queue depth right after the enqueue (observability; only with queued). */
   queueDepth?: number
+  /** Durable FIFO is accepted but held behind an exact-addressed older task. */
+  pending?: true
+  pendingReason?: string
   /** The bytes reached the live session but its acceptance record did not appear within the confirm
    *  window (e.g. a busy receiver). NOT a failure: do not resend — the core's inflight ledger checks
    *  it landed and redelivers once (or tells you) if it did not. */
