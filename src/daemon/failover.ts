@@ -105,6 +105,8 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
           ...(safe && task.attachments?.length ? { attachments: task.attachments } : {}) },
         { ...deps, env, failoverRetry: true, failoverVisited: task.failoverVisited ?? [task.runtime],
           failoverTaskId: task.failoverTaskId,
+          failoverQueueAtMs: Number.isFinite(Date.parse(task.sentAt)) ? Date.parse(task.sentAt) : task.ts,
+          failoverQueueOrderNs: task.fifoOrderNs,
           selectAgentRuntime: (p, rt) => selectFailoverRuntime(cfg, p, rt, Date.now(), [], env) })
         task.state = safe && result.ok ? 'transferred' : 'review'
         if (!result.ok) task.reviewReason ??= 'dispatch-failed'

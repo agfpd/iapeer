@@ -102,6 +102,13 @@ head first (filesystem creation order, identity/seq tie-break). They need not be
 rewritten or copied on upgrade. A live session of any runtime holds the shared
 slot. Lifecycle `ephemeral-drain` retains the source identity/seq and records the
 selected execution runtime, so natural-limit acceptance can audit the order.
+Core failover dispatch (unstarted transfer or state-review) retains the original
+queue's `fifoOrderNs` in custody and across subsequent hops, rather than joining
+behind tasks sent after it. Legacy receipts without this order use original
+router send time as `fifoAtMs`.
+This internal ordering metadata is not a sender tool option; storage remains an
+ordinary queued envelope with its original exact-routing key. The drain log
+includes this marker when a transferred item uses it to precede the pending tail.
 
 Ordinary bootstrap supplies the same peer's doctrine, memory and handoffs in the
 replacement runtime. A transferred unstarted task retains its original sender,

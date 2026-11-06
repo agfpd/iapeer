@@ -28,6 +28,10 @@ import type { LifecycleConfig } from './index.ts'
 
 /** One queued task for an ephemeral worker. */
 export interface EphemeralQueueItem {
+  /** Core-only failover dispatch keeps the original router acceptance order. */
+  fifoAtMs?: number
+  /** Original queue creation order, retained through every failover hop. */
+  fifoOrderNs?: string
   failoverEligible?: true
   failoverTaskId?: string
   failoverVisited?: string[]
@@ -106,7 +110,7 @@ export function enqueueEphemeralTask(
   const dir = ephemeralQueueDir(cfg, identity)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const tmp = join(dir, `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  writeFileSync(tmp, JSON.stringify({ task: item.task, ...(item.failoverEligible ? { failoverEligible: true, failoverTaskId: item.failoverTaskId, failoverVisited: item.failoverVisited } : {}), ...(item.topic ? { topic: item.topic } : {}), ...(item.explicitRuntime ? { explicitRuntime: true } : {}), ...(item.coreNotice ? { coreNotice: true } : {}), ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }), {
+  writeFileSync(tmp, JSON.stringify({ task: item.task, ...(item.fifoAtMs !== undefined ? { fifoAtMs: item.fifoAtMs } : {}), ...(item.fifoOrderNs ? { fifoOrderNs: item.fifoOrderNs } : {}), ...(item.failoverEligible ? { failoverEligible: true, failoverTaskId: item.failoverTaskId, failoverVisited: item.failoverVisited } : {}), ...(item.topic ? { topic: item.topic } : {}), ...(item.explicitRuntime ? { explicitRuntime: true } : {}), ...(item.coreNotice ? { coreNotice: true } : {}), ...(item.suppressInitialPrompt ? { suppressInitialPrompt: true } : {}) }), {
     mode: 0o600,
   })
   try {
@@ -146,28 +150,34 @@ export function enqueueEphemeralTask(
  */
 export function peekEphemeralTask(cfg: LifecycleConfig, identity: string, readOnly = false): PeekedQueueItem | null {
   const dir = ephemeralQueueDir(cfg, identity)
+  const candidates: PeekedQueueItem[] = []
   for (const seq of listSeqs(dir)) {
     const path = join(dir, seq)
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
       if (typeof raw.task === 'string' && raw.task.length > 0) {
-        return { seq, task: raw.task, topic: typeof raw.topic === 'string' ? raw.topic : undefined,
+        candidates.push({ seq, task: raw.task, topic: typeof raw.topic === 'string' ? raw.topic : undefined,
+          ...(typeof raw.fifoAtMs === 'number' && Number.isFinite(raw.fifoAtMs) && raw.fifoAtMs >= 0 ? { fifoAtMs: raw.fifoAtMs } : {}),
+          ...(typeof raw.fifoOrderNs === 'string' && /^\d{1,30}$/.test(raw.fifoOrderNs) ? { fifoOrderNs: raw.fifoOrderNs } : {}),
           ...(raw.failoverEligible === true ? { failoverEligible: true as const, failoverTaskId: typeof raw.failoverTaskId === 'string' ? raw.failoverTaskId : undefined,
             failoverVisited: Array.isArray(raw.failoverVisited) ? raw.failoverVisited.filter((x): x is string => typeof x === 'string') : undefined } : {}),
           ...(raw.explicitRuntime === true ? { explicitRuntime: true as const } : {}),
-          ...(raw.coreNotice === true ? { coreNotice: true as const } : {}), ...(raw.suppressInitialPrompt === true ? { suppressInitialPrompt: true as const } : {}) }
+          ...(raw.coreNotice === true ? { coreNotice: true as const } : {}), ...(raw.suppressInitialPrompt === true ? { suppressInitialPrompt: true as const } : {}) })
+        continue
       }
     } catch {
       /* unreadable/corrupt → drop the slot below */
     }
-    if (readOnly) return null // an operator query never cleans a corrupt slot
+    if (readOnly) continue // an operator query never cleans a corrupt slot
     try {
       rmSync(path, { force: true }) // poison/corrupt item: drop, do not wedge the queue
     } catch {
       return null // cannot even drop it — give up this round, retry next tick
     }
   }
-  return null
+  const ordered = candidates.map(item => ({ item, order: ephemeralTaskOrder(cfg, identity, item) }))
+  ordered.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : a.item.seq.localeCompare(b.item.seq))
+  return ordered[0] ? { ...ordered[0].item, fifoOrderNs: ordered[0].order.toString() } : null
 }
 
 /** Remove a consumed item (after its wake went READY). Idempotent. */
@@ -200,13 +210,19 @@ export function listQueuedIdentities(cfg: LifecycleConfig): string[] {
 /** Merge endpoint heads without copying custody. Birth time is assigned by the
  * filesystem, not by an untrusted envelope timestamp. Eligible route enqueues
  * share a queue; exact/legacy queues remain separate for rollback compatibility. */
+function ephemeralTaskOrder(cfg: LifecycleConfig, identity: string, item: PeekedQueueItem): bigint {
+  if (item.fifoOrderNs !== undefined) return BigInt(item.fifoOrderNs)
+  if (item.fifoAtMs !== undefined) return BigInt(Math.trunc(item.fifoAtMs)) * 1_000_000n
+  const st = statSync(join(ephemeralQueueDir(cfg, identity), item.seq), { bigint: true })
+  return st.birthtimeNs || st.mtimeNs
+}
+
 export function peekPersonalityTask(cfg: LifecycleConfig, personality: string, readOnly = false): { identity: string; item: PeekedQueueItem } | null {
   const heads = listQueuedIdentities(cfg).filter(id => parseSessionName(id)?.personality === personality)
     .flatMap(identity => {
       const item = peekEphemeralTask(cfg, identity, readOnly)
       if (!item) return []
-      const st = statSync(join(ephemeralQueueDir(cfg, identity), item.seq), { bigint: true })
-      return [{ identity, item, order: st.birthtimeNs || st.mtimeNs }]
+      return [{ identity, item, order: ephemeralTaskOrder(cfg, identity, item) }]
     })
   heads.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : a.identity.localeCompare(b.identity) || a.item.seq.localeCompare(b.item.seq))
   return heads[0] ?? null

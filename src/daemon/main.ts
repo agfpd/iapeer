@@ -226,7 +226,7 @@ export function makeEphemeralRouteDeps(
 ): EphemeralRouteDeps {
   return {
     isEphemeral: cwd => isEphemeralPeer(cwd),
-    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime, failoverEligible, failoverTaskId, failoverVisited }) => {
+    deliver: async ({ peer, envelope, topic, runtime, sentAt, suppressInitialPrompt, coreNotice, explicitRuntime, failoverEligible, failoverTaskId, failoverVisited, failoverQueueAtMs, failoverQueueOrderNs }) => {
       const rt = resolveWakeRuntime(runtime, peer)
       if (!rt.ok) return rt
       // Eligible work shares the default FIFO; exact work stays in its original
@@ -234,7 +234,7 @@ export function makeEphemeralRouteDeps(
       const identity = buildProcessAddress(failoverEligible ? peer.runtime : rt.value, peer.personality)
       let depth: number
       try {
-        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(failoverEligible ? { failoverEligible, failoverTaskId, failoverVisited } : {}), ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
+        depth = enqueueEphemeralTask(cfg, identity, { task: envelope, topic, ...(failoverEligible && Number.isFinite(failoverQueueAtMs) ? { fifoAtMs: failoverQueueAtMs } : {}), ...(failoverEligible && failoverQueueOrderNs ? { fifoOrderNs: failoverQueueOrderNs } : {}), ...(failoverEligible ? { failoverEligible, failoverTaskId, failoverVisited } : {}), ...(explicitRuntime ? { explicitRuntime: true } : {}), ...(suppressInitialPrompt ? { suppressInitialPrompt: true } : {}), ...(coreNotice ? { coreNotice: true } : {}) })
       } catch (e) {
         return err(
           `ephemeral enqueue failed for "${peer.personality}": ${e instanceof Error ? e.message : String(e)}; message NOT queued`,

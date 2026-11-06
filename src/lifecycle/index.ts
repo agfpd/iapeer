@@ -2052,7 +2052,7 @@ async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: strin
   // Durable drain trace: which item, how deep the queue.
   appendLifecycleEvent(
     cfg.eventLogDir,
-    { ev: 'ephemeral-drain', identity, seq: item.seq, runtime: deliveryRuntime, depth: ephemeralQueueDepth(cfg, identity) },
+    { ev: 'ephemeral-drain', identity, seq: item.seq, runtime: deliveryRuntime, fifoAtMs: item.fifoAtMs, fifoOrderNs: item.fifoOrderNs, depth: ephemeralQueueDepth(cfg, identity) },
     { env },
   )
   const wake = deps.wakeFn ?? wakeOrSpawn
@@ -2071,7 +2071,7 @@ async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: strin
       const peer = findPeer(readPeersIndex({ env }), personality)
       const actual = buildProcessAddress(deliveryRuntime, personality)
       if (peer) {
-        const note = { identity: actual, personality, runtime: deliveryRuntime, cwd: peer.cwd,
+        const note = { identity: actual, personality, runtime: deliveryRuntime, cwd: peer.cwd, fifoOrderNs: item.fifoOrderNs,
           sessionToken: hostSessionToken(actual, env), ts: acceptedAtMs, acceptedAtMs, sentAt: from.sentAt ?? new Date(acceptedAtMs).toISOString(),
           caller: { personality: from.fromPersonality, runtime: from.fromRuntime },
           message: item.failoverTaskId ? from.message.replace(new RegExp(`\\n\\[iapeer taskId=${item.failoverTaskId}\\]$`), '') : from.message,

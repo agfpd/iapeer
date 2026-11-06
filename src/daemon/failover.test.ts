@@ -252,6 +252,7 @@ describe('custody transfer', () => {
       return ok({ ok: true, delivered_to: { personality: 'p', runtime: input.runtime! }, woke: true, ts: 'now' })
     } })
   test('unstarted work transfers once, old native session cannot resume; limit-resume drops resurrected old park', async () => {
+    task.fifoOrderNs = '1793941112345678901'
     setup()
     await upsertPeer({ personality: 'alice', runtime: 'claude', cwd: root, intelligence: 'artificial' }, { env })
     recordLimitPark(cfg, { identity: 'codex-p', personality: 'p', runtime: 'codex', resetsAtMs: at - 999999, eventAtMs: at, sessionId: 'native-1' })
@@ -259,6 +260,8 @@ describe('custody transfer', () => {
     expect(killed).toBe(1); expect(sent).toHaveLength(1)
     expect(sent[0].input).toMatchObject({ runtime: 'claude', message: task.message })
     expect(sent[0].caller.personality).toBe('alice')
+    expect(sent[0].deps.failoverQueueOrderNs).toBe(task.fifoOrderNs)
+    expect(sent[0].deps.failoverQueueAtMs).toBe(Date.parse(task.sentAt))
     expect(listFailoverTasks(cfg, true)[0]?.state).toBe('transferred')
     expect(resolveWakeMode(cfg, 'codex-p', root, true, () => ({ ok: true, ref: 'native-1' })).resume).toBe(false)
     // Even a stale overlapping mute sweep must not revive the retired job.
@@ -341,12 +344,14 @@ test('FIFO rebinding is serialized at the original queue; automatic provenance s
   const envelope = buildEnvelope({ fromPersonality: 'alice', fromRuntime: 'claude', fromIntelligence: 'artificial', message: task.message, sentAt: task.sentAt })
   enqueueEphemeralTask(cfg, 'codex-p', { task: envelope, failoverEligible: true, failoverTaskId: 'unique-42', failoverVisited: ['codex'] })
   expect(peekEphemeralTask(cfg, 'codex-p')?.failoverEligible).toBe(true)
+  const order = peekEphemeralTask(cfg, 'codex-p')!.fifoOrderNs
   const calls: string[] = []
   const wakeFn = async (args: any) => { calls.push(args.runtime); await Bun.sleep(10); return { status: 'READY' as const, woke: true, runtime: args.runtime } }
   await Promise.all([drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn }), drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })])
   expect(calls).toEqual(['claude'])
   expect(peekEphemeralTask(cfg, 'codex-p')).toBeNull()
   expect(listFailoverTasks(cfg)[0]?.failoverVisited).toEqual(['codex', 'claude'])
+  expect(listFailoverTasks(cfg)[0]?.fifoOrderNs).toBe(order)
 })
 
 test('excluded endpoint tail precedes a newer fallback task without waiting for quota reset', async () => {
@@ -429,6 +434,17 @@ test('an idle-reaped active exact job retains the shared slot and is visible unt
   clearLimitPark(cfg, 'opencode-p')
   await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })
   expect(calls).toBe(1)
+})
+
+test('failover dispatch of an older accepted task keeps its place ahead of an already pending tail', async () => {
+  const d = makeEphemeralRouteDeps(cfg, env, () => {})
+  await d.deliver({ peer, runtime: 'codex', envelope: 'TAIL_B', failoverEligible: true })
+  await d.deliver({ peer, runtime: 'claude', envelope: 'OLDER_A', failoverEligible: true, failoverQueueAtMs: at - 500 } as any)
+  await d.deliver({ peer, runtime: 'claude', envelope: 'OLDER_A2', failoverEligible: true, failoverQueueAtMs: at - 400 } as any)
+  const seen: string[] = []
+  const wakeFn = async (a: any) => { seen.push(a.task); return { status: 'READY' as const, woke: true } }
+  for (let i = 0; i < 3; i++) await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })
+  expect(seen).toEqual(['OLDER_A', 'OLDER_A2', 'TAIL_B'])
 })
 
 test('concurrent kicks from different endpoint queues serialize the personality, FIFO order retained', async () => {

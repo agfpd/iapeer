@@ -1148,6 +1148,7 @@ export function deliveryLanded(probe: ProcessedProbe, env: NodeJS.ProcessEnv = p
 
 /** One confirmed delivery to an AGENT endpoint, as transport reports it to the inflight ledger. */
 export interface InflightNote {
+  fifoOrderNs?: string
   failoverEligible?: true
   failoverVisited?: string[]
   failoverTaskId?: string
@@ -1511,6 +1512,8 @@ export interface EphemeralRouteDeps {
    *  ack. MUST NOT block on the wake (the sender's content-level answer is the
    *  worker's own reply, not this transport ack). */
   deliver: (args: {
+    failoverQueueOrderNs?: string
+    failoverQueueAtMs?: number
     failoverEligible?: true
     failoverTaskId?: string
     failoverVisited?: string[]
@@ -1565,6 +1568,9 @@ export interface RouteDeps {
   selectAgentRuntime?: (peer: PeerRecord, runtime?: string) => Result<{ runtime?: string; eligible: boolean }>
   /** Internal transfer preserves automatic routing provenance without exposing a tool flag. */
   failoverRetry?: boolean
+  /** Original router send time; only the core transfer path may set this. */
+  failoverQueueAtMs?: number
+  failoverQueueOrderNs?: string
   failoverVisited?: string[]
   failoverTaskId?: string
   /** Internal core status notice: agent destinations follow their CURRENT default (a stopped default →
@@ -2154,6 +2160,8 @@ async function routeSendInner(
   if (deps.ephemeral?.isEphemeral(peer.cwd)) {
     if (caller.personality === peer.personality) return err('cannot send to self')
     return deps.ephemeral.deliver({ peer, envelope, topic, runtime, sentAt,
+      ...(deps.failoverRetry && deps.failoverQueueAtMs !== undefined ? { failoverQueueAtMs: deps.failoverQueueAtMs } : {}),
+      ...(deps.failoverRetry && deps.failoverQueueOrderNs !== undefined ? { failoverQueueOrderNs: deps.failoverQueueOrderNs } : {}),
       ...(failoverEligible ? { failoverEligible: true as const, failoverTaskId, failoverVisited: deps.failoverVisited } : {}),
       ...(explicitRuntime ? { explicitRuntime: true as const } : {}),
       ...(caller.runtime === 'core' ? { suppressInitialPrompt: true } : {}), ...(deps.coreNotice ? { coreNotice: true } : {}) })
