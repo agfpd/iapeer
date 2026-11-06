@@ -77,6 +77,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sender deletes `/tmp` or otherwise removes the source. Copies live for the
   recipient peer's lifetime and `iapeer remove` purges its inbox.
 
+## [0.4.167] - 2026-11-06
+
+### Fixed
+
+- **Ephemeral FIFO survives provider failover between runtimes.** Eligible tasks share
+  the default queue, while legacy and exact-addressed queues drain under one personality
+  lock and execution slot. An excluded endpoint's pending tail can run on an available
+  fallback before newer work, without waiting for the source quota reset. Exact queues
+  retain their routing and remain readable by the previous binary on rollback.
+- **Pinned-task barriers are visible instead of silently delaying later work.** Older
+  exact tasks retain strict FIFO priority, including active jobs parked after idle-reap.
+  Senders receive `pending` with a reason; CLI send and `delivery list` expose the barrier.
+- **Failover redispatch retains the original FIFO position.** Custody carries the queue's
+  nanosecond order across hops (legacy receipts use original router send time), so an
+  unstarted transfer or state-review request does not fall behind an already pending tail.
+  Lifecycle drain records expose source identity/seq, selected runtime and ordering metadata.
+
 ## [0.4.166] - 2026-11-06
 
 ### Fixed
