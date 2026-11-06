@@ -94,6 +94,8 @@ head is visible as `pending: true` with `pendingReason` on the sender's queue
 acknowledgement and as a pending queue barrier (source identity/seq/reason) in
 `iapeer delivery list`. It is not a native acceptance case and cannot be closed
 with `delivery resolve`; clearing the pin's park/stop releases normal draining.
+An already started exact job also retains this barrier after idle-reap: its
+proven work-origin park holds the shared slot and is shown with `seq: "active"`.
 
 Legacy endpoint queues are drained together under the personality lock, oldest
 head first (filesystem creation order, identity/seq tie-break). They need not be

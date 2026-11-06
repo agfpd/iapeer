@@ -12,7 +12,7 @@
 // before any wake or reap. wakeOrSpawn refuses a launchd peer; superviseTick and
 // sweepZombies skip it. Only daemon-owned (no-plist) peers are managed here.
 
-import { limitHoldActive, readLimitPark } from './limitpark.ts'
+import { limitHoldActive, readLimitPark, listLimitParks } from './limitpark.ts'
 import { noteHostingGeneration, noteWorkOrigin } from './workOrigin.ts'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
@@ -1974,6 +1974,12 @@ export interface DrainDeps {
 
 /** Read-only operator/sender projection; no new custody or replay authority. */
 export function ephemeralPinnedBarrier(cfg: LifecycleConfig, personality: string): { queueIdentity: string; seq: string; reason: string } | null {
+  // A started exact job is no longer a queue file. Its park retains the worker
+  // slot even after idle-reap; otherwise later work could overtake it on another runtime.
+  const active = listLimitParks(cfg).find(p => p.personality === personality && p.workOrigin && !p.workOrigin.automaticFailover
+    && !sessionQuarantined(cfg, p.identity, p.sessionId))
+  if (active) return { queueIdentity: active.identity, seq: 'active',
+    reason: `held behind pinned task on parked endpoint ${active.identity} (active job)` }
   const next = peekPersonalityTask(cfg, personality, true)
   if (!next || next.item.failoverEligible) return null
   const parked = readLimitPark(cfg, next.identity)
@@ -2016,6 +2022,7 @@ export async function drainEphemeralQueue(
 
 async function drainEphemeralQueueInner(cfg: LifecycleConfig, personality: string, runtime: Runtime, deps: DrainDeps): Promise<WakeResult | null> {
   const env = deps.env ?? process.env
+  if (ephemeralPinnedBarrier(cfg, personality)) return null
   const next = peekPersonalityTask(cfg, personality)
   if (!next) return null
   const { identity, item } = next

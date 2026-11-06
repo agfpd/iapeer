@@ -417,6 +417,20 @@ test('a live alternative runtime owns the whole personality worker slot', async 
   expect(peekEphemeralTask(cfg, 'codex-p')?.task).toBe('WAIT')
 })
 
+test('an idle-reaped active exact job retains the shared slot and is visible until its park clears', async () => {
+  recordLimitPark(cfg, { identity: 'opencode-p', personality: 'p', runtime: 'opencode', eventAtMs: at,
+    resetsAtMs: Date.now() + 3600_000, workOrigin: { sessionToken: 'old-host', deliveredAtMs: at - 100, caller: { personality: 'alice', runtime: 'claude' } } })
+  const d = makeEphemeralRouteDeps(cfg, env, () => {})
+  const r = await d.deliver({ peer, runtime: 'codex', envelope: 'LATER', failoverEligible: true })
+  expect(r.ok && r.value.pendingReason).toContain('active job')
+  let calls = 0
+  const wakeFn = async () => { calls++; return { status: 'READY' as const, woke: true } }
+  expect(await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })).toBeNull()
+  clearLimitPark(cfg, 'opencode-p')
+  await drainEphemeralQueue(cfg, 'p', 'codex', { env, wakeFn })
+  expect(calls).toBe(1)
+})
+
 test('concurrent kicks from different endpoint queues serialize the personality, FIFO order retained', async () => {
   enqueueEphemeralTask(cfg, 'codex-p', { task: 'FIRST', failoverEligible: true })
   enqueueEphemeralTask(cfg, 'claude-p', { task: 'SECOND', failoverEligible: true })
