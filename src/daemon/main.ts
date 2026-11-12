@@ -555,6 +555,7 @@ export interface ConfiguredDaemonOptions {
  * layer (H8) engages only when a token is configured.
  */
 export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}): Promise<DaemonHandle> {
+  let superviseTickRunning = false
   const env = opts.env ?? process.env
   const cfg = loadLifecycleConfig(env)
   const bearerToken = opts.bearerToken ?? (env.IAPEER_BEARER_TOKEN?.trim() || undefined)
@@ -739,6 +740,12 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
       // wake superviseTick inside wakeOrSpawn). The outcomes array drives only the
       // eager relaunch here; the trace does not depend on consuming it.
       tick: async () => {
+        // One pass at a time: the failover pass yields the event loop between tasks (so the MCP
+        // listener stays responsive), which lets the 60 s timer fire mid-pass. An overlapping pass
+        // would race the same durable custody; the next timer tick simply runs the next pass.
+        if (superviseTickRunning) return
+        superviseTickRunning = true
+        try {
         expireAccountLimits(cfg, env)
         await processFailovers(cfg, env, { env, wake: makeWakeFn(cfg, env), noteInflight, noteLiveTopic, ephemeral,
           noteDelivered: identity => setLastDelivered(cfg, identity) }, board)
@@ -775,6 +782,7 @@ export async function startConfiguredDaemon(opts: ConfiguredDaemonOptions = {}):
           noteInflight,
           isLaunchdManaged: (personality: string) => isLaunchdManaged(personality, env),
         }, { justReaped: new Set(outcomes.filter(o => o.action.startsWith('reaped')).map(o => o.identity)) })
+        } finally { superviseTickRunning = false }
       },
       // Surface a supervise-tick throw that the daemon timer would otherwise SWALLOW (the class that
       // hid a stuck reaper for hours): record ev=supervise-error in lifecycle.log, flattened to one

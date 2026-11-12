@@ -13,6 +13,45 @@ import { failureContainsTask, failureForTask, refusedBeforeWork, refusalReviewRe
 import type { NoticeBoard } from './notices.ts'
 
 const running = new Set<string>()
+const yieldTurn = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+/**
+ * How long a watching task outlives the end of the hosting that accepted it. A refusal for that
+ * input can only be produced by that hosting; the native detector records it within ~20 s and the
+ * next supervise pass (60 s) claims it. The grace covers several full passes AFTER the end was first
+ * observed, so a refusal written just before the hosting died is still claimed normally.
+ */
+export const FAILOVER_WATCH_RELEASE_GRACE_MS = 10 * 60_000
+
+/**
+ * Release custody of a watching task whose accepting hosting has ended without a provider refusal
+ * attributable to it. Not a proof of completion and never a replay: nothing can transfer it any
+ * more (a later hosting of the identity is `hosting-replaced` review by construction), so keeping
+ * it «watching» only re-reads up to 16 MiB of evidence per task per pass, forever — the 12.11
+ * incident (297 tasks back to 04.11; their inputs had slid out of the bounded evidence window, so
+ * neither `finished` nor a refusal could ever be proved). The first observation is made durable so
+ * a daemon restart does not reset the grace.
+ */
+function releaseOrphanedWatch(
+  cfg: LifecycleConfig,
+  task: FailoverTask,
+  alive: typeof hostSessionAlive,
+  token: typeof hostSessionToken,
+  env: NodeJS.ProcessEnv,
+  log: (t: FailoverTask, outcome: string) => void,
+  now: number,
+): void {
+  const ended = !task.sessionToken || !alive(task.identity, env) || token(task.identity, env) !== task.sessionToken
+  if (!ended) {
+    if (task.hostingEndedAt !== undefined) { task.hostingEndedAt = undefined; saveFailoverTask(cfg, task) }
+    return
+  }
+  if (task.hostingEndedAt === undefined) { task.hostingEndedAt = now; saveFailoverTask(cfg, task); return }
+  if (now - task.hostingEndedAt < FAILOVER_WATCH_RELEASE_GRACE_MS) return
+  task.state = 'released'
+  task.reviewReason = 'hosting-ended-without-refusal'
+  saveFailoverTask(cfg, task); log(task, 'released')
+}
 export interface FailoverSeam {
   send?: typeof routeSend
   alive?: typeof hostSessionAlive
@@ -22,6 +61,9 @@ export interface FailoverSeam {
   belongs?: typeof failureContainsTask
   completed?: typeof deliveryCompleted
   processed?: typeof deliveryProcessed
+  /** Event-loop yield between tasks (tests: a no-op). */
+  yieldTurn?: () => Promise<void>
+  now?: () => number
   sleep?: (ms: number) => Promise<void>
 }
 /** Only this daemon pass transfers custody; durable states make restart fail closed.
@@ -35,32 +77,45 @@ export async function processFailovers(cfg: LifecycleConfig, env: NodeJS.Process
     const send = seam.send ?? routeSend, proof = seam.proof ?? refusedBeforeWork
     const log = (t: FailoverTask, outcome: string) => appendLifecycleEvent(cfg.eventLogDir, { ev: 'failover', identity: t.identity, task: t.id, target: t.targetRuntime, outcome, err: t.error }, { env })
     for (const task of listFailoverTasks(cfg)) {
-      if (['transferred', 'review', 'finished'].includes(task.state)) continue
+      // Proofs below read and JSON-parse up to 16 MiB of native evidence per task. Yield between
+      // tasks so a long pass never starves the router's HTTP-MCP listener (incident 12.11: a 57 s
+      // synchronous pass over 297 watching tasks every 60 s → peers' MCP clients timed out).
+      await (seam.yieldTurn ?? yieldTurn)()
+      if (['transferred', 'review', 'finished', 'released'].includes(task.state)) continue
       const peer = findPeer(readPeersIndex({ env }), task.personality)
       if (!peer || isLaunchdManaged(task.personality, env) || !failoverEnabled(peer.cwd)) continue
-      const newest = providerFailure(cfg, task.identity)
-      const failure = task.failure ?? (newest ? failureForTask(task, newest) : undefined)
       if (task.state === 'watching') {
         // Positive failure evidence wins over native task_complete: a refused Codex
         // call also writes task_complete, and a Claude refusal is an assistant row.
-        if (!failure || failure.atMs < task.ts) {
-          if ((seam.processed ?? deliveryProcessed)(task, env) && (seam.completed ? seam.completed(task, env) : deliveryCompleted(task, env, undefined, true))) {
-            task.state = 'finished'; saveFailoverTask(cfg, task)
+        const watching = (): boolean => {
+          const newest = providerFailure(cfg, task.identity)
+          const failure = task.failure ?? (newest ? failureForTask(task, newest) : undefined)
+          if (!failure || failure.atMs < task.ts) {
+            if ((seam.processed ?? deliveryProcessed)(task, env) && (seam.completed ? seam.completed(task, env) : deliveryCompleted(task, env, undefined, true))) {
+              task.state = 'finished'; saveFailoverTask(cfg, task)
+            }
+            return true
           }
+          if (!failure.sessionId || !failure.file) return true // unknown evidence: no transfer
+          if (!(seam.belongs ?? failureContainsTask)(task, failure)) {
+            if (deliveryCompleted(task, env, undefined, true)) { task.state = 'finished'; saveFailoverTask(cfg, task) }
+            return true
+          }
+          const candidate = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime], env)
+          if (!candidate.ok || !candidate.value.runtime) return true // e.g. walt: both alternatives stopped
+          if (isStopped(cfg, task.identity)) return true // operator stop wins; don't revive its work elsewhere
+          claim = { target: candidate.value.runtime, failure }
+          return false
+        }
+        let claim: { target: string; failure: NonNullable<FailoverTask['failure']> } | undefined
+        if (watching() || !claim) {
+          if (task.state === 'watching') releaseOrphanedWatch(cfg, task, alive, token, env, log, seam.now?.() ?? Date.now())
           continue
         }
-        if (!failure.sessionId || !failure.file) continue // unknown evidence: no transfer
-        if (!(seam.belongs ?? failureContainsTask)(task, failure)) {
-          if (deliveryCompleted(task, env, undefined, true)) { task.state = 'finished'; saveFailoverTask(cfg, task) }
-          continue
-        }
-        const candidate = selectFailoverRuntime(cfg, peer, undefined, Date.now(), task.failoverVisited ?? [task.runtime], env)
-        if (!candidate.ok || !candidate.value.runtime) continue // e.g. walt: both alternatives stopped
-        if (isStopped(cfg, task.identity)) continue // operator stop wins; don't revive its work elsewhere
         if (!task.sessionToken || (alive(task.identity, env) && token(task.identity, env) !== task.sessionToken)) {
           task.state = 'review'; task.reviewReason = 'hosting-replaced'; task.error = 'hosting replaced before failover; no replay'; saveFailoverTask(cfg, task); log(task, 'review'); continue
         }
-        task.state = 'claimed'; task.targetRuntime = candidate.value.runtime; task.failure = failure
+        task.state = 'claimed'; task.targetRuntime = claim.target; task.failure = claim.failure
         // Write custody BEFORE invalidating anything. Re-entering this state after
         // daemon death re-applies quarantine/teardown, not a second dispatch.
         saveFailoverTask(cfg, task); log(task, 'claimed')

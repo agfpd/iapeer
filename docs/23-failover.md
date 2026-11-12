@@ -155,6 +155,19 @@ core custody marker, not a request for a reply or an application idempotency key
 Settled receipts are retained for seven days; active/uncertain custody and native
 session quarantines are not expired by that cleanup.
 
+A `watching` receipt (accepted, no refusal attributed yet) is bound to the hosting
+that accepted it: only that hosting can produce a refusal for its input, and any
+later hosting turns a claim into `hosting-replaced` review. Once the supervise pass
+observes that hosting gone (or replaced) it records `hostingEndedAt`; if no
+attributable refusal is claimed within ten minutes (several full passes after the
+detector's 20-second cadence) the receipt becomes terminal `released`
+(`reviewReason: hosting-ended-without-refusal`, lifecycle `failover outcome=released`).
+Release is neither a completion proof nor a replay — it only stops re-reading
+evidence that can no longer authorize anything. The pass yields the event loop
+between receipts, and supervise passes never overlap, so proof reads cannot
+starve the router's MCP listener (incident 12.11: 297 unreleased receipts made a
+57-second synchronous pass every 60 seconds).
+
 ## Acceptance
 
 Use a disposable peer with genuinely invalid provider authentication, not a mock

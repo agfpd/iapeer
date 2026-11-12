@@ -18,7 +18,11 @@ export interface ProviderFailure extends MuteDetection { retryAtMs: number }
 export interface FailoverTask extends InflightNote {
   id: string
   ts: number
-  state: 'watching' | 'claimed' | 'dispatching' | 'transferred' | 'review' | 'finished'
+  /** `released`: watching custody dropped after the accepting hosting ended with no attributable
+   *  refusal (daemon/failover.ts releaseOrphanedWatch) — terminal, never a replay. */
+  state: 'watching' | 'claimed' | 'dispatching' | 'transferred' | 'review' | 'finished' | 'released'
+  /** First supervise pass that saw the accepting hosting gone (ms); starts the release grace. */
+  hostingEndedAt?: number
   targetRuntime?: string
   error?: string
   /** Failed positive-proof condition, or uncertain custody/dispatch boundary. */
@@ -109,7 +113,7 @@ export function saveFailoverTask(cfg: Config, task: FailoverTask): void {
   // an unindexed active receipt. Canonical paths remain stable for review evidence.
   const active = join(activeDir(cfg), task.id)
   const claim = join(root(cfg), `${task.identity}.claim.json`)
-  const terminal = ['transferred', 'review', 'finished'].includes(task.state)
+  const terminal = ['transferred', 'review', 'finished', 'released'].includes(task.state)
   if (!terminal) { mkdirSync(activeDir(cfg), { recursive: true, mode: 0o700 }); writeFileAtomic(active, '') }
   if (task.state === 'claimed' || task.state === 'dispatching') write(claim, { id: task.id })
   write(join(taskDir(cfg), `${task.id}.json`), task)
@@ -129,7 +133,7 @@ export function gcFailoverTasks(cfg: Config, now = Date.now()): void {
     const path = join(taskDir(cfg), name)
     if (now - statSync(path).mtimeMs < 7 * 24 * 3_600_000) continue
     const task = read<FailoverTask>(path)
-    if (task && ['transferred', 'finished', 'review'].includes(task.state)) rmSync(path, { force: true })
+    if (task && ['transferred', 'finished', 'review', 'released'].includes(task.state)) rmSync(path, { force: true })
   }
 }
 export function listFailoverTasks(cfg: Config, includeSettled = false): FailoverTask[] {

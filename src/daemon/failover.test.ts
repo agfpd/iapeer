@@ -9,7 +9,7 @@ import { deliveryCompleted } from '../transport/index.ts'
 import { listFailoverTasks, providerFailure, quarantineSession, recordFailoverTask, recordProviderFailure, selectFailoverRuntime, sessionQuarantined, type FailoverTask, type ProviderFailure } from '../lifecycle/failover.ts'
 import { findPeer, readPeersIndex, upsertPeer, type PeerRecord } from '../registry/index.ts'
 import { readPeerProfile, writePeerProfileAtomic } from '../identity/index.ts'
-import { processFailovers, type FailoverSeam } from './failover.ts'
+import { FAILOVER_WATCH_RELEASE_GRACE_MS as GRACE, processFailovers, type FailoverSeam } from './failover.ts'
 import { failureContainsTask, failureForTask, refusedBeforeWork, refusedBeforeWorkInText, refusalReviewReason, refusalReviewReasonInText } from './failoverProof.ts'
 import { readInflight, recordInflight } from '../lifecycle/inflight.ts'
 import { processLimitResumes } from './limitresume.ts'
@@ -459,4 +459,61 @@ test('concurrent kicks from different endpoint queues serialize the personality,
   await Promise.all(['codex', 'claude'].map(runtime => drainEphemeralQueue(cfg, 'p', runtime as 'codex' | 'claude', { env, wakeFn })))
   expect(peak).toBe(1)
   expect(seen).toEqual(['FIRST', 'SECOND'])
+})
+
+describe('orphaned watching custody is released (incident 12.11: 297 watching tasks, 57 s pass)', () => {
+  const t0 = Date.now()
+  const quiet = (alive: () => boolean, now: () => number, sends: unknown[] = []): FailoverSeam => ({
+    alive, token: () => 'host:42', now, yieldTurn: async () => {},
+    processed: () => false, completed: () => false,
+    kill: () => { throw new Error('must not kill') },
+    send: async (...a) => { sends.push(a); throw new Error('must not send') },
+  })
+  test('hosting ended without refusal → released only after the grace, never sent or killed', async () => {
+    recordFailoverTask(cfg, task)
+    const sends: unknown[] = []
+    await processFailovers(cfg, env, {}, undefined, quiet(() => false, () => t0, sends))
+    let t = listFailoverTasks(cfg, true)[0]!
+    expect(t.state).toBe('watching'); expect(t.hostingEndedAt).toBe(t0)
+    await processFailovers(cfg, env, {}, undefined, quiet(() => false, () => t0 + GRACE - 1, sends))
+    expect(listFailoverTasks(cfg, true)[0]!.state).toBe('watching')
+    await processFailovers(cfg, env, {}, undefined, quiet(() => false, () => t0 + GRACE, sends))
+    t = listFailoverTasks(cfg, true)[0]!
+    expect(t.state).toBe('released'); expect(t.reviewReason).toBe('hosting-ended-without-refusal')
+    expect(listFailoverTasks(cfg)).toEqual([]) // left the active index: no further per-pass proof reads
+    expect(sends).toEqual([])
+  })
+  test('the accepting hosting still live → stays watching however old', async () => {
+    recordFailoverTask(cfg, task)
+    await processFailovers(cfg, env, {}, undefined, quiet(() => true, () => t0))
+    await processFailovers(cfg, env, {}, undefined, quiet(() => true, () => t0 + 100 * GRACE))
+    const t = listFailoverTasks(cfg, true)[0]!
+    expect(t.state).toBe('watching'); expect(t.hostingEndedAt).toBeUndefined()
+  })
+  test('a replaced hosting counts as ended (a later hosting can never transfer this input)', async () => {
+    recordFailoverTask(cfg, task)
+    const s = (now: number): FailoverSeam => ({ ...quiet(() => true, () => now), token: () => 'host:99' })
+    await processFailovers(cfg, env, {}, undefined, s(t0))
+    await processFailovers(cfg, env, {}, undefined, s(t0 + GRACE))
+    expect(listFailoverTasks(cfg, true)[0]!.state).toBe('released')
+  })
+  test('an attributable refusal still transfers when the hosting already ended (no release race)', async () => {
+    recordProviderFailure(cfg, failure)
+    recordFailoverTask(cfg, task)
+    const sent: unknown[] = []
+    await processFailovers(cfg, env, {}, undefined, {
+      alive: () => false, token: () => null, now: () => t0 + 100 * GRACE, yieldTurn: async () => {},
+      kill: () => { throw new Error('dead hosting is not killed') },
+      send: async (caller, input) => { sent.push(input); return ok({ ok: true, delivered_to: { personality: 'p', runtime: input.runtime! }, woke: true, ts: 'now' }) },
+    })
+    const t = listFailoverTasks(cfg, true)[0]!
+    expect(t.state).not.toBe('released'); expect(t.state).not.toBe('watching')
+  })
+  test('the pass yields the event loop once per task', async () => {
+    recordFailoverTask(cfg, task)
+    recordFailoverTask(cfg, { ...task, rendered: task.rendered + ' 2', acceptedAtMs: task.ts + 1 })
+    let yields = 0
+    await processFailovers(cfg, env, {}, undefined, { ...quiet(() => true, () => t0), yieldTurn: async () => { yields++ } })
+    expect(yields).toBe(2)
+  })
 })
