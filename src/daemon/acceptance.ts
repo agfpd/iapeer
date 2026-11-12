@@ -10,6 +10,7 @@ import { readAlertTarget } from './bootalert.ts'
 import { appendDeliveryEvent } from './deliverylog.ts'
 import { deliveryLanded } from '../transport/index.ts'
 import type { NoticeBoard } from './notices.ts'
+import { claudeNotLanded } from './notLanded.ts'
 
 export const ACCEPTANCE_ALERT_AFTER_MS = 120_000
 const DEAD_DRAIN_MS = 5000
@@ -20,7 +21,10 @@ function alive(pid: number, token: string | null): boolean {
 }
 export function acceptanceEvent(r: AcceptanceRecord): string {
   return JSON.stringify({ event: 'delivery-acceptance', deliveryId: r.id, outcome: r.status,
-    recipient: r.identity, reason: r.resolution?.reason ?? r.reason, originalEnvelope: r.message,
+    recipient: r.identity, reason: r.resolution?.reason ?? r.reason,
+    // Positive non-delivery proof (notLanded.ts): the sender may resend; nothing was received.
+    ...(r.status === 'failed' && r.reason?.startsWith('not-landed') ? { notLanded: true, resendSafe: true } : {}),
+    originalEnvelope: r.message,
     ...(r.resolution ? { operatorResolved: true, resolution: r.resolution } : {}) })
 }
 function noticePayload(r: AcceptanceRecord, runDir: string): { message: string; attachments?: string[] } {
@@ -40,6 +44,8 @@ export interface AcceptanceOptions {
   now?: number
   send?: typeof routeSend
   processAlive?: typeof alive
+  /** Positive non-delivery proof for an unproven Claude paste (tests inject). */
+  notLanded?: (r: AcceptanceRecord, runDir: string) => Promise<string | null>
 }
 let running = false
 export async function processAcceptance(opts: AcceptanceOptions): Promise<void> {
@@ -101,7 +107,13 @@ async function reconcile(opts: AcceptanceOptions): Promise<void> {
         // can destroy evidence of work already started; empty files NEVER prove refusal.
         if (now - r.createdAt >= ACCEPTANCE_ALERT_AFTER_MS || r.status === 'sending'
           || (allNativeDead && now - (r.deadSince ?? now) >= DEAD_DRAIN_MS)) {
-          r.status = 'unresolved'; r.reason = 'native acceptance cannot be proved or excluded; do not replay'
+          // Unproven is not lost — unless non-delivery is POSITIVELY proven (Claude only): then the
+          // sender is told it may resend instead of being left without a channel. Re-evaluated on
+          // every pass while unresolved, so a receiver that goes idle later still settles it.
+          const notLanded = runtime === 'claude' && now - r.createdAt >= ACCEPTANCE_ALERT_AFTER_MS
+            ? await (opts.notLanded ?? claudeNotLanded)(r, opts.runDir).catch(() => null) : null
+          if (notLanded) { r.status = 'failed'; r.reason = notLanded }
+          else { r.status = 'unresolved'; r.reason = 'native acceptance cannot be proved or excluded; do not replay' }
         }
       }
       if (r.status !== previous) {

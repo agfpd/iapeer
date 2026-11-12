@@ -41,7 +41,7 @@ import type {
 export const OPENCODE_COMPACT_TIMEOUT_MS = 600_000
 
 /** Journal byte offset at prepare time, per launchID — structuralReady scans only THIS launch's lines. */
-const readyOffsets = new Map<string, number>()
+const readyOffsets = new Map<string, { offset: number; ino: number | null }>()
 
 function newLaunchID(): string {
   return `lch_${Date.now().toString(36)}${randomBytes(6).toString('hex')}`
@@ -102,7 +102,9 @@ export const opencodeAdapter: RuntimeAdapter = {
       { env },
     )
     const launchID = newLaunchID()
-    readyOffsets.set(launchID, existsSync(p.events) ? statSync(p.events).size : 0)
+    // Offset AND inode: the plugin may rotate the journal (live → .1) on its first append, so the
+    // prepare-time offset belongs to whichever generation now carries that inode.
+    readyOffsets.set(launchID, existsSync(p.events) ? { offset: statSync(p.events).size, ino: statSync(p.events).ino } : { offset: 0, ino: null })
     const out: Record<string, string> = {
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       IAPEER_OPENCODE_DIR: p.dir,
@@ -127,11 +129,24 @@ export const opencodeAdapter: RuntimeAdapter = {
 
   async structuralReady(spec, launchID, deadlineMs, alive, env) {
     const p = paths(spec.personality, env)
-    let offset = readyOffsets.get(launchID) ?? 0
+    const prepared = readyOffsets.get(launchID) ?? { offset: 0, ino: null }
+    let offset = prepared.offset
+    let ino = prepared.ino
+    const inoOf = (path: string): number | null => { try { return statSync(path).ino } catch { return null } }
     try {
       while (Date.now() < deadlineMs) {
-        const { lines, end } = readJournalFrom(p.events, offset)
-        offset = end
+        let lines: ReturnType<typeof readJournalFrom>['lines'] = []
+        const liveIno = inoOf(p.events)
+        if (ino !== null && liveIno !== null && liveIno !== ino) {
+          // Rotated since prepare: finish the old generation (now .1) from the held offset, then
+          // follow the new live file from its start. Lines are filtered by launchID below.
+          if (inoOf(`${p.events}.1`) === ino) lines = readJournalFrom(`${p.events}.1`, offset).lines
+          offset = 0
+          ino = liveIno
+        } else if (ino === null) ino = liveIno
+        const next = readJournalFrom(p.events, offset)
+        offset = next.end
+        lines = [...lines, ...next.lines]
         for (const l of lines) {
           if (l.launchID !== launchID) continue
           if (l.type === 'runtime.ready') {

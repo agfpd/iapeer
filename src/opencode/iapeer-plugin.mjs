@@ -103,7 +103,21 @@ async function server(input) {
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 })
 
-  let seq = lastSeq(paths.events)
+  // Rotation (docs/20, mirrors src/opencode/journal.ts rotateJournalIfNeeded): before an append that
+  // would push the live file past ROTATE bytes, shift .1..KEEP-1 up and rename live → .1. The newest
+  // line is therefore always in the live file; seq continues across generations.
+  const ROTATE = Number(env.IAPEER_OPENCODE_JOURNAL_ROTATE_BYTES) > 0 ? Number(env.IAPEER_OPENCODE_JOURNAL_ROTATE_BYTES) : 8 * 1024 * 1024
+  const KEEP = 4
+  let journalBytes = 0
+  try { journalBytes = statSync(paths.events).size } catch {}
+  function rotateJournal() {
+    for (let g = KEEP - 1; g >= 1; g--) {
+      try { renameSync(`${paths.events}.${g}`, `${paths.events}.${g + 1}`) } catch {}
+    }
+    renameSync(paths.events, `${paths.events}.1`)
+    journalBytes = 0
+  }
+  let seq = lastSeq(paths.events) || lastSeq(`${paths.events}.1`)
   const state = {
     schema: SCHEMA,
     identity,
@@ -123,7 +137,13 @@ async function server(input) {
   function journal(type, properties, nativeID, sessionID) {
     seq++
     const line = { schema: SCHEMA, seq, time: Date.now(), identity, launchID, sessionID: sessionID ?? null, type, properties, nativeID: nativeID ?? null }
-    appendFileSync(paths.events, JSON.stringify(line) + '\n', { mode: 0o600 })
+    const text = JSON.stringify(line) + '\n'
+    const n = Buffer.byteLength(text)
+    if (journalBytes > 0 && journalBytes + n > ROTATE) {
+      try { rotateJournal() } catch { /* rotation is hygiene; never lose the event over it */ }
+    }
+    appendFileSync(paths.events, text, { mode: 0o600 })
+    journalBytes += n
     state.lastEventSeq = seq // fence: the line above is on disk before the state write below
     state.lastActivityMs = line.time
   }

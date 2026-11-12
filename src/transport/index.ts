@@ -38,6 +38,7 @@ import { buildEnvelope, formatSentAt, renderEnvelopeForAgent } from '../codec/in
 import { endpointPrivateDir, resolveGlobalRoot } from '../storage/index.ts'
 import { findPeer, readPeersIndex, type PeerRecord } from '../registry/index.ts'
 import type { ResolvedCaller } from '../identity/index.ts'
+import { readJournalTail } from '../opencode/journal.ts'
 // Delivery markers are OWNED by the runtime adapter. transport
 // reads them from getAdapter(target.runtime) for the tui submit path. One-way
 // dependency: launch does NOT import transport, so no cycle.
@@ -958,14 +959,9 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
     const dir = endpointPrivateDir(probe.runtime, probe.personality, { env })
     if (!dir) return false
     const path = join(dir, 'events.jsonl')
-    let size = 0
-    try {
-      size = statSync(path).size
-    } catch {
-      return false
-    }
     const userIDs = new Set<string>()
-    for (const line of readFileTailFrom(path, Math.max(0, size - PROCESSED_TAIL_BYTES)).split('\n')) {
+    // Across rotation (.1 + live): an input accepted just before a rotation is still provable.
+    for (const line of readJournalTail(path, PROCESSED_TAIL_BYTES).text.split('\n')) {
       if (!line.trim()) continue
       let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { role?: string; parentID?: string } } }
       try {
@@ -1041,14 +1037,9 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
     const dir = endpointPrivateDir(probe.runtime, probe.personality, { env })
     if (!dir) return false
     const path = join(dir, 'events.jsonl')
-    let size = 0
-    try {
-      size = statSync(path).size
-    } catch {
-      return false
-    }
     const userIDs = new Set<string>()
-    for (const line of readFileTailFrom(path, Math.max(0, size - PROCESSED_TAIL_BYTES)).split('\n')) {
+    // Across rotation (.1 + live): an input accepted just before a rotation is still provable.
+    for (const line of readJournalTail(path, PROCESSED_TAIL_BYTES).text.split('\n')) {
       if (!line.trim()) continue
       let e: { type?: string; properties?: { part?: { type?: string; text?: string; messageID?: string }; info?: { error?: unknown; role?: string; parentID?: string; finish?: string; time?: { completed?: number } } } }
       try {

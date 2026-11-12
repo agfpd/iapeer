@@ -232,3 +232,28 @@ test('old closed cases notify caller on startup; oversized callback retains reso
     expect(x.sent).toHaveLength(1)
   } finally { rmSync(x.root, { recursive: true, force: true }) }
 })
+
+test('claude: proven non-delivery turns unresolved into failed/not-landed (resend safe); unproven stays unresolved', async () => {
+  const x = fixture()
+  try {
+    const claude = { ...x.r, identity: 'claude-receiver', token: 'host:9 start', status: 'unresolved' as const, snapshot: { offsets: [], historyOffset: 0 } }
+    writeAcceptance(x.opts.runDir, claude)
+    await processAcceptance({ ...x.opts, now: 200_000, processAlive: () => true, notLanded: async () => null })
+    expect(x.read().status).toBe('unresolved')
+    await processAcceptance({ ...x.opts, now: 260_000, processAlive: () => true, notLanded: async () => 'not-landed: proof' })
+    expect(x.read().status).toBe('failed')
+    expect(x.read().reason).toBe('not-landed: proof')
+    const toSender = x.sent.map(s => JSON.parse(s.message)).filter(m => m.outcome === 'failed')
+    expect(toSender[0]).toMatchObject({ outcome: 'failed', notLanded: true, resendSafe: true, deliveryId: x.r.id })
+    expect(readFileSync(join(x.root, 'delivery.log'), 'utf8')).toContain('outcome=failed')
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})
+
+test('codex records never take the claude not-landed path', async () => {
+  const x = fixture()
+  try {
+    let asked = 0
+    await processAcceptance({ ...x.opts, now: 200_000, processAlive: () => true, notLanded: async () => { asked++; return 'not-landed' } })
+    expect(asked).toBe(0); expect(x.read().status).toBe('unresolved')
+  } finally { rmSync(x.root, { recursive: true, force: true }) }
+})

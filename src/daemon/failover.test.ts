@@ -233,6 +233,24 @@ describe('positive no-work proof', () => {
     rows.splice(3, 0, { sessionID: 'native-1', type: 'message.part.updated', properties: { part: { messageID: 'a', type: 'tool' } } })
     expect(refusedBeforeWorkInText(jsonl(rows), { ...task, runtime: 'opencode' }, failure)).toBe(false)
   })
+  test('OpenCode proof reads across journal rotation: input in .1, refusal in the live file', () => {
+    const rows: unknown[] = [
+      { sessionID: 'native-1', type: 'message.updated', properties: { info: { id: 'u', role: 'user' } } },
+      { sessionID: 'native-1', type: 'message.part.updated', properties: { part: { messageID: 'u', type: 'text', text: rendered } } },
+      { sessionID: 'native-1', type: 'message.updated', properties: { info: { id: 'a', role: 'assistant', parentID: 'u' } } },
+      { sessionID: 'native-1', type: 'session.error', time: at, properties: { error: { name: 'ProviderAuthError' } } },
+    ]
+    const journal = join(root, 'events.jsonl')
+    writeFileSync(`${journal}.1`, jsonl(rows.slice(0, 2)))
+    writeFileSync(journal, jsonl(rows.slice(2)))
+    const t = { ...task, runtime: 'opencode' as const, identity: 'opencode-p' }
+    const f = { ...failure, runtime: 'opencode' as const, file: journal }
+    expect(failureContainsTask(t, f)).toBe(true)
+    expect(refusalReviewReason(t, f)).toBeUndefined()
+    // Older than .1 + live within the bound is not «complete»: never a replay, as before rotation.
+    writeFileSync(`${journal}.1`, 'x'.repeat(17 * 1024 * 1024) + '\n' + jsonl(rows.slice(0, 2)))
+    expect(refusalReviewReason(t, f)).toBe('oversized-evidence')
+  })
 })
 
 describe('custody transfer', () => {

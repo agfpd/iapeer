@@ -70,8 +70,15 @@ native OpenCode SQLite DB or a second SDK client:
   object per line:
   `{schema:1, seq, time:<epoch ms>, identity:"opencode-<p>", launchID,
   sessionID:<native ses_…|null>, type, properties, nativeID:<event.id|null>}`.
-  - `seq` is monotonic across process restarts and resumes. The journal is never
-    rotated or renamed on fresh. Consumers dedup by `seq`.
+  - `seq` is monotonic across process restarts, resumes and rotations. Consumers dedup by `seq`.
+  - **Rotation (since 0.4.169; before it the journal was never rotated).** Before an append that
+    would push a non-empty live file past 8 MiB, the producer renames `events.jsonl` →
+    `events.jsonl.1`, shifting older generations up to `events.jsonl.4` (the oldest is dropped).
+    The newest line is always in the live file; the live file shrinks only by this rename, never by
+    truncation in place. A tail reader that sees the size drop below its offset (or the inode change)
+    restarts at 0 and dedups by `seq`; a history reader reads `.4 … .1` then the live file. The
+    core's own proofs read `.1` + live (≤ 16 MiB together) and keep their completeness rules.
+    Incident 12.11: one unrotated journal reached 284 MB.
   - Native events are passed through **unchanged** (`type` + `properties`):
     `message.updated` (info: tokens, cost, modelID, providerID, time.completed),
     `message.part.updated` (the full part with id, tool args/output),
@@ -85,7 +92,8 @@ native OpenCode SQLite DB or a second SDK client:
     the journal alone. A launch that fails before readiness writes `runtime.error`
     `{error}` under its `launchID` instead.
   - Consumers: web-runtime, telegram-runtime and iapeer-memory's weekly collector (it
-    relies on the path, `time`, unchanged `type`/`properties` and no rotation).
+    relies on the path, `time` and unchanged `type`/`properties`; with rotation a week can span
+    `.N` generations).
     statusline-injector reads in-process (its own plugin hook, which also receives the
     context window), so the journal is optional for it. Any ABI change is announced
     to all four.

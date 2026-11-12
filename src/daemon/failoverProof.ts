@@ -2,6 +2,11 @@ import { readFileSync, statSync } from 'node:fs'
 import type { FailoverTask, ProviderFailure } from '../lifecycle/failover.ts'
 import { confirmNeedles } from '../transport/index.ts'
 import { readSessionSlices } from './sessionfiles.ts'
+import { readJournalTail } from '../opencode/journal.ts'
+
+const EVIDENCE_BYTES = 16 * 1024 * 1024
+/** opencode evidence is the core journal, which rotates (`.1` + live, docs/20): read across it. */
+const opencodeEvidence = (failure: Pick<ProviderFailure, 'runtime' | 'file'>) => failure.runtime === 'opencode' && !!failure.file
 import { parseClaudeTranscript, parseCodexRollout, parseOpencodeJournal } from './mutewatch.ts'
 const strings = (v: unknown): string[] => typeof v === 'string' ? [v.replace(/\r/g, '')] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
 function codexInput(r: any): unknown {
@@ -16,7 +21,7 @@ function codexInput(r: any): unknown {
 export function failureForTask(task: FailoverTask, newest: ProviderFailure): ProviderFailure | undefined {
   if (task.ts > newest.atMs || !newest.file) return
   if (failureContainsTask(task, newest)) return newest
-  const slices = readSessionSlices(newest.file, 16 * 1024 * 1024)
+  const slices = opencodeEvidence(newest) ? { tail: readJournalTail(newest.file, EVIDENCE_BYTES).text, head: '' } : readSessionSlices(newest.file, EVIDENCE_BYTES)
   if (!slices?.tail.endsWith('\n')) return
   let text = slices.tail
   if (slices.head) text = text.slice(text.indexOf('\n') + 1)
@@ -40,13 +45,17 @@ export function failureForTask(task: FailoverTask, newest: ProviderFailure): Pro
 export function failureContainsTask(task: FailoverTask, failure: ProviderFailure): boolean {
   if (!failure.file || failure.runtime !== task.runtime || failure.personality !== task.personality) return false
   try {
-    const oversized = statSync(failure.file).size > 16 * 1024 * 1024
     const needles = confirmNeedles(task.rendered)
-    const slice = oversized ? readSessionSlices(failure.file, 16 * 1024 * 1024)?.tail ?? '' : readFileSync(failure.file, 'utf8')
-    // A tail can prove that this refusal belongs to this input, but cannot prove
-    // absence of work. That distinction permits review of a long session without
-    // ever treating a truncated read as permission to replay its original task.
-    const text = oversized ? slice.slice(slice.indexOf('\n') + 1) : slice
+    let text: string
+    if (opencodeEvidence(failure)) text = readJournalTail(failure.file, EVIDENCE_BYTES).text // line-aligned
+    else {
+      const oversized = statSync(failure.file).size > EVIDENCE_BYTES
+      const slice = oversized ? readSessionSlices(failure.file, EVIDENCE_BYTES)?.tail ?? '' : readFileSync(failure.file, 'utf8')
+      // A tail can prove that this refusal belongs to this input, but cannot prove
+      // absence of work. That distinction permits review of a long session without
+      // ever treating a truncated read as permission to replay its original task.
+      text = oversized ? slice.slice(slice.indexOf('\n') + 1) : slice
+    }
     if (!text.endsWith('\n')) return false
     const rows = text.trim().split('\n').map(l => JSON.parse(l))
     if (task.runtime === 'opencode') {
@@ -103,7 +112,12 @@ export function refusedBeforeWorkInText(text: string, task: Pick<FailoverTask, '
 export function refusalReviewReason(task: FailoverTask, failure: ProviderFailure): string | undefined {
   if (!failure.file || task.runtime !== failure.runtime || task.personality !== failure.personality || task.ts > failure.atMs) return 'evidence-mismatch'
   try {
-    if (statSync(failure.file).size > 16 * 1024 * 1024) return 'oversized-evidence'
+    if (opencodeEvidence(failure)) {
+      // Replay needs the COMPLETE record as before rotation existed: `.1` + live within the bound.
+      const j = readJournalTail(failure.file, EVIDENCE_BYTES)
+      return j.complete ? refusalReviewReasonInText(j.text, task, failure) : 'oversized-evidence'
+    }
+    if (statSync(failure.file).size > EVIDENCE_BYTES) return 'oversized-evidence'
     return refusalReviewReasonInText(readFileSync(failure.file, 'utf8'), task, failure)
   } catch { return 'unreadable-evidence' }
 }

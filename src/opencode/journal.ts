@@ -77,8 +77,70 @@ export function readJournalFrom(path: string, offset: number): { lines: Opencode
   }
 }
 
-/** Last `seq` in the journal (tail read; the journal never shrinks). 0 when absent/empty. */
+/**
+ * Journal ROTATION (docs/20 §Observability ABI, since 0.4.169). The producer renames
+ * `events.jsonl` → `events.jsonl.1` (older generations shift up to `.<KEEP>`, the oldest is
+ * dropped) BEFORE an append that would push the live file past the rotate size, so the newest line
+ * is always in the live file and every rename happens under the single writer. The live file plus
+ * `.1` together never exceed 2 × rotate size — one bounded read covers the recent evidence.
+ * Incident 12.11: an unrotated opencode-doc journal reached 284 MB.
+ */
+export const OPENCODE_JOURNAL_ROTATE_BYTES = 8 * 1024 * 1024
+export const OPENCODE_JOURNAL_KEEP = 4
+
+/** Rotate `path` if appending `incoming` bytes would push a non-empty live file past `rotateBytes`. */
+export function rotateJournalIfNeeded(path: string, incoming: number, rotateBytes = OPENCODE_JOURNAL_ROTATE_BYTES, keep = OPENCODE_JOURNAL_KEEP): boolean {
+  let size: number
+  try { size = statSync(path).size } catch { return false }
+  if (size === 0 || size + incoming <= rotateBytes) return false
+  for (let g = keep - 1; g >= 1; g--) {
+    try { renameSync(`${path}.${g}`, `${path}.${g + 1}`) } catch { /* generation absent */ }
+  }
+  renameSync(path, `${path}.1`)
+  return true
+}
+
+/**
+ * The newest ≤ `maxBytes` of the journal ACROSS rotation (`.1` then the live file), starting at a
+ * line boundary. `complete` = nothing older than the returned text exists in `.1`+live (i.e. it
+ * starts at the start of `.1`, or of the live file when there is no `.1`) — a reader that needs a
+ * complete native record gets the same fail-closed signal it had before rotation existed.
+ */
+export function readJournalTail(path: string, maxBytes: number): { text: string; complete: boolean } {
+  const read = (p: string, bytes: number): { text: string; whole: boolean } => {
+    let fd: number | undefined
+    try {
+      fd = openSync(p, 'r')
+      const size = fstatSync(fd).size
+      const start = Math.max(0, size - bytes)
+      const buf = Buffer.alloc(size - start)
+      const n = readSync(fd, buf, 0, buf.length, start)
+      let text = buf.subarray(0, n).toString('utf8')
+      if (start > 0) text = text.slice(text.indexOf('\n') + 1) // drop the cut first line
+      return { text, whole: start === 0 }
+    } catch {
+      return { text: '', whole: true }
+    } finally {
+      if (fd !== undefined) closeSync(fd)
+    }
+  }
+  const live = read(path, maxBytes)
+  const liveBytes = Buffer.byteLength(live.text)
+  if (!live.whole || liveBytes >= maxBytes) return { text: live.text, complete: live.whole && !existsSync(`${path}.1`) }
+  if (!existsSync(`${path}.1`)) return { text: live.text, complete: true }
+  const older = read(`${path}.1`, maxBytes - liveBytes)
+  const prefix = older.text && !older.text.endsWith('\n') ? older.text.slice(0, older.text.lastIndexOf('\n') + 1) : older.text
+  return { text: prefix + live.text, complete: older.whole }
+}
+
+/** Last `seq` in the journal (tail read), falling back to `.1` when the live file was just rotated
+ *  and holds no line yet. 0 when absent/empty. */
 export function lastJournalSeq(path: string): number {
+  const live = lastJournalSeqIn(path)
+  return live > 0 ? live : lastJournalSeqIn(`${path}.1`)
+}
+
+function lastJournalSeqIn(path: string): number {
   if (!existsSync(path)) return 0
   const fd = openSync(path, 'r')
   try {
@@ -126,7 +188,7 @@ export function recordOpencodeStopped(
 ): boolean {
   const state = readOpencodeState(paths.state)
   if (!state || state.status === 'stopped') return false
-  const seq = lastJournalSeq(paths.events) + 1
+  const seq = Math.max(lastJournalSeq(paths.events), state.lastEventSeq) + 1
   const properties: Record<string, unknown> = { reason: info.reason }
   if (info.exitCode !== undefined) properties.exitCode = info.exitCode
   if (info.signal !== undefined) properties.signal = info.signal
