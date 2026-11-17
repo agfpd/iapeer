@@ -23,7 +23,8 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { readdirSync, realpathSync, statSync } from 'fs'
-import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, RuntimeAdapter } from '../types.ts'
+import type { ApprovalMode, ControlCommand, ControlPlan, LaunchAdapterConfig, LaunchSpec, PreparedLaunch, RuntimeAdapter } from '../types.ts'
+import { claudeTrustDirs, ensureClaudeTrust } from '../claudeTrust.ts'
 import { lastTimestampedEntryMs } from './transcriptTail.ts'
 import { detectNumberedModal } from './modalDetect.ts'
 
@@ -47,6 +48,11 @@ import { detectNumberedModal } from './modalDetect.ts'
  */
 const CLAUDE_BOOT_DIALOG_MARKERS = [
   'trust this folder',
+  // 2.1.326+ trust wording (cwd and `--add-dir` alike): "This session hasn't worked here before. Is this a
+  // directory you created or one you trust?" / "❯ No, exit" / "Yes, add it". Normally pre-empted by the
+  // claudeTrust seed; these keep the boot-driver (not the unknown-modal path) owning it.
+  "hasn't worked here before",
+  'one you trust?',
   'Allow external CLAUDE.md file imports?',
   'I am using this for local development',
   'Resume from summary',
@@ -115,6 +121,12 @@ function resumeConfirmKeys(pane: string): string[] | null {
   const d = resumeConfirmLive(pane)
   if (!d) return null
   return d.cursor === 'resume' ? ['Enter'] : ['Escape']
+}
+
+/** Folder/directory-trust modal in any known wording (pre-2.1.30x "trust this folder", 2.1.326+
+ *  "hasn't worked here before … one you trust?" with "Yes, add it"). */
+function isTrustDialog(pane: string): boolean {
+  return pane.includes('trust this folder') || pane.includes("hasn't worked here before") || pane.includes('one you trust?')
 }
 
 function anyBootDialog(pane: string): boolean {
@@ -399,6 +411,19 @@ export const claudeAdapter: RuntimeAdapter = {
    *     backstop. (claude-start.sh:341.)
    *   - anything else (incl. the post-select "Resuming…" load state) → null (wait).
    */
+  /**
+   * Pre-seed Claude Code workspace trust for the cwd and every `--add-dir` this launch passes, so the
+   * boot never parks on a trust modal (claudeTrust.ts). Fail-open: a failed seed is a launch-warning and
+   * the boot-driver's cursor-verified trust auto-answer (bootDialogKeys) remains the backstop.
+   */
+  prepareLaunch(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv, cfg): PreparedLaunch {
+    const r = ensureClaudeTrust(claudeTrustDirs(this.buildArgv(spec, cfg), spec.cwd), spec.cwd, baseEnv, cfg.env ?? baseEnv)
+    const warnings = r.state === 'written' ? [`claude trust seeded in ${r.path}: ${r.added!.join(', ')}`]
+      : r.state === 'failed' ? [`claude trust seed FAILED (${r.path}): ${r.detail} — relying on the boot dialog auto-answer`]
+      : []
+    return { env: {}, warnings }
+  },
+
   bootDialogKeys(pane: string): string[] | null {
     if (pane.includes('Resume from summary')) {
       return /❯\s*2\./.test(pane) ? ['Enter'] : ['Down']
@@ -418,7 +443,7 @@ export const claudeAdapter: RuntimeAdapter = {
     // renders "❯ No, exit" / "Yes, I trust this folder" with the DEFAULT on exit — a bare
     // Enter cleanly exits the peer (live: claude-boris child-exit 5s after first wake,
     // 2026-10-17). Same discipline as Bypass: Enter only once the cursor is SEEN on Yes.
-    if (pane.includes('trust this folder') && /No,\s*exit/.test(pane)) {
+    if (isTrustDialog(pane) && /No,\s*exit/.test(pane)) {
       return /❯\s*(?:\d\.\s*)?Yes\b/.test(pane) ? ['Enter'] : ['Down']
     }
     if (
