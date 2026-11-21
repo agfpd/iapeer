@@ -16,6 +16,7 @@ import { captureHostState } from '../supervisor/capture.ts'
 import { strictClaudeIdle } from '../supervisor/nativeIdle.ts'
 import { readSessionSlices } from './sessionfiles.ts'
 import { transcriptSlug } from '../launch/adapters/claude.ts'
+import { confirmText } from '../transport/index.ts'
 import type { AcceptanceRecord } from '../launch/acceptanceStore.ts'
 
 const canonical = (p: string): string => { try { return realpathSync(p) } catch { return p } }
@@ -58,7 +59,7 @@ export async function claudeNotLanded(r: AcceptanceRecord, runDir: string, deps:
     if (!screen || screen.composerOccupied) return null
     // Whitespace-insensitive: the viewport wraps long lines. The header carries sender+ts+topic, so a
     // match is this very input visible somewhere (queued/echoed) — ambiguous, never «not landed».
-    const flat = (t: string) => t.replace(/\s+/g, '')
+    const flat = (t: string) => confirmText(t).replace(/\s+/g, '')
     const header = flat(payloadHeader(r.message))
     if ((header && flat(screen.text).includes(header)) || /\[Pasted text #\d+/.test(screen.text)) return null
     // Re-check after the async capture: the session must still be idle on the same hosting.

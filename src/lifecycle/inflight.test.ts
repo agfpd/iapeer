@@ -172,6 +172,23 @@ describe('unconfirmed deliveries — the ledger, not the sender, decides', () =>
     appendFileSync(join(dir, 's.jsonl'), JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: ENV_BODY }) + '\n')
     expect(deliveryLanded(probe, env)).toBe(true)
   })
+
+  test('deliveryLanded: Claude strips invisible chars (U+200B) from the pasted input — still landed', () => {
+    // claude-boris 21.11: a Telegram-forwarded text carried U+200B; the stored user turn did not,
+    // so the verbatim needle missed and acceptance reported a false not-landed (resendSafe).
+    const env = { HOME: root }
+    const cwd = join(root, 'zw')
+    mkdirSync(cwd, { recursive: true })
+    const dir = join(root, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(dir, { recursive: true })
+    const rendered = '<iap from="arthur" runtime="telegram" ts="11:51:30">\nReply via send_to_peer.\n<msg>a \u200b\u200bb \ufeffc</msg>\n</iap>'
+    const probe = { runtime: 'claude', personality: 'zw', cwd, ts: Date.now() - 1000, rendered }
+    const stored = '\n\n<pasted_content id="1">\n' + rendered.replace(/[\u200b\ufeff]/g, '') + '\n</pasted_content id="1">\n'
+    writeFileSync(join(dir, 's.jsonl'), JSON.stringify({ type: 'user', message: { content: stored } }) + '\n')
+    expect(deliveryLanded(probe, env)).toBe(true)
+    // A different visible body is still NOT a match.
+    expect(deliveryLanded({ ...probe, rendered: rendered.replace('a ', 'x ') }, env)).toBe(false)
+  })
 })
 
 describe('deliveryProcessed — recorded is NOT processed', () => {

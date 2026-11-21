@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs'
 import type { FailoverTask, ProviderFailure } from '../lifecycle/failover.ts'
-import { confirmNeedles } from '../transport/index.ts'
+import { confirmNeedles, textCarriesAll } from '../transport/index.ts'
 import { readSessionSlices } from './sessionfiles.ts'
 import { readJournalTail } from '../opencode/journal.ts'
 
@@ -75,7 +75,7 @@ export function failureContainsTask(task: FailoverTask, failure: ProviderFailure
         : task.runtime === 'claude' && r.type === 'attachment' && r.attachment?.type === 'queued_command' ? r.attachment.prompt
         : task.runtime === 'codex' ? codexInput(r) : undefined
       const content = r.type === 'user' && Array.isArray(value) ? value.filter(p => p?.type === 'text').map(p => p.text).join('\n') : strings(value).join('\n')
-      if (!content || !needles.every(n => content.includes(n))) continue
+      if (!content || !textCarriesAll(content, needles)) continue
       const error = rows.findIndex(e => task.runtime === 'claude'
         ? e.isApiErrorMessage === true && Date.parse(e.timestamp) === failure.atMs
         : e.type === 'event_msg' && e.payload?.type === 'task_complete' && (typeof e.payload.completed_at === 'number' ? e.payload.completed_at * 1000 : Date.parse(e.timestamp)) === failure.atMs)
@@ -148,7 +148,7 @@ export function refusalReviewReasonInText(text: string, task: Pick<FailoverTask,
     }
     return refusal ? undefined : 'missing-native-refusal'
   }
-  const carries = (v: unknown) => { const all = strings(v); return needles.every(n => all.some(t => t.includes(n))) }
+  const carries = (v: unknown) => { const all = strings(v); return needles.every(n => all.some(t => textCarriesAll(t, [n]))) }
   const textInput = (v: unknown) => typeof v === 'string' || Array.isArray(v) && v.every(p => p?.type === 'text')
   const input = rows.findIndex(r => task.runtime === 'claude'
     ? !r.isSidechain && (r.type === 'user' && textInput(r.message?.content) && carries(r.message.content)
@@ -235,6 +235,6 @@ function opencodeInput(rows: any[], needles: string[], sessionId?: string): { id
   const userIDs = new Set(rows.filter(r => r.sessionID === sessionId && r.type === 'message.updated' && r.properties?.info?.role === 'user').map(r => r.properties.info.id))
   for (let index = 0; index < rows.length; index++) {
     const r = rows[index], part = r.properties?.part
-    if (r.sessionID === sessionId && r.type === 'message.part.updated' && part?.type === 'text' && userIDs.has(part.messageID) && typeof part.text === 'string' && needles.every(n => part.text.includes(n))) return { id: part.messageID, index }
+    if (r.sessionID === sessionId && r.type === 'message.part.updated' && part?.type === 'text' && userIDs.has(part.messageID) && typeof part.text === 'string' && textCarriesAll(part.text, needles)) return { id: part.messageID, index }
   }
 }

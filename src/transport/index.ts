@@ -753,11 +753,25 @@ export function compactTranscriptHasDone(
 /** ALL needles must be present in ONE string value — not scattered across the record. Splitting
  *  the confirm into head+tail (see confirmNeedles) only stays as forge-resistant as the whole
  *  envelope if both halves are found in the SAME string the receiver actually stored. */
+/**
+ * Text as compared for a delivery confirm. Claude Code DROPS invisible characters from pasted input
+ * before persisting it (measured 21.11.2026: U+200B ZERO WIDTH SPACE in a Telegram-forwarded text was
+ * absent from the stored user turn), so a verbatim envelope needle never matched a delivered message
+ * and acceptance reported a false not-landed. Strip CR, Unicode format (Cf) and control (Cc, except
+ * LF/TAB) characters on BOTH sides: symmetric, so a runtime that keeps them still matches, and the
+ * visible envelope (sender+ts header, body) stays the unforgeable needle.
+ */
+export function confirmText(s: string): string {
+  return s.replace(/(?![\n\t])[\p{Cf}\p{Cc}]/gu, '')
+}
+/** Every needle occurs in `text` under {@link confirmText} normalization. */
+export function textCarriesAll(text: string, needles: readonly string[]): boolean {
+  const t = confirmText(text)
+  return needles.every(n => t.includes(n))
+}
+
 function jsonStringValuesContainAll(value: unknown, needles: readonly string[]): boolean {
-  if (typeof value === 'string') {
-    const s = value.replace(/\r/g, '')
-    return needles.every(n => s.includes(n))
-  }
+  if (typeof value === 'string') return textCarriesAll(value, needles)
   if (Array.isArray(value)) return value.some(v => jsonStringValuesContainAll(v, needles))
   if (value && typeof value === 'object') return Object.values(value).some(v => jsonStringValuesContainAll(v, needles))
   return false
@@ -794,7 +808,7 @@ function jsonStringValuesContainAll(value: unknown, needles: readonly string[]):
  * to fake it the receiver must echo both the header and the entire body verbatim.
  */
 export function confirmNeedles(envelope: string): string[] {
-  const n = envelope.replace(/\r/g, '')
+  const n = confirmText(envelope)
   const OPEN = '<attachments>'
   const CLOSE = '</attachments>'
   const open = n.indexOf(OPEN)
@@ -972,7 +986,7 @@ export function deliveryProcessed(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       const part = e.properties?.part
       if (e.type === 'message.part.updated' && part?.type === 'text' && typeof part.text === 'string' && part.messageID) {
         const text = part.text.replace(/\r/g, '')
-        if (needles.every(n => text.includes(n))) userIDs.add(part.messageID)
+        if (textCarriesAll(text, needles)) userIDs.add(part.messageID)
       }
       const info = e.properties?.info
       if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID)) return true
@@ -1050,7 +1064,7 @@ export function deliveryCompleted(probe: ProcessedProbe, env: NodeJS.ProcessEnv 
       const part = e.properties?.part
       if (e.type === 'message.part.updated' && part?.type === 'text' && typeof part.text === 'string' && part.messageID) {
         const text = part.text.replace(/\r/g, '')
-        if (needles.every(n => text.includes(n))) userIDs.add(part.messageID)
+        if (textCarriesAll(text, needles)) userIDs.add(part.messageID)
       }
       const info = e.properties?.info
       if (e.type === 'message.updated' && info?.role === 'assistant' && info.parentID && userIDs.has(info.parentID) && info.time?.completed && info.finish !== 'tool-calls' && (!successOnly || !info.error && !!info.finish)) return true
